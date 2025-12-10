@@ -15,7 +15,7 @@
 
 //! Integration tests for Bybit HTTP client using a mock server.
 
-use std::{collections::HashMap, net::SocketAddr, sync::Arc};
+use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 
 use axum::{
     Router,
@@ -35,12 +35,15 @@ use nautilus_bybit::{
         },
     },
 };
+use nautilus_common::testing::wait_until_async;
 use nautilus_model::{
+    data::BarType,
     enums::PositionSideSpecified,
     identifiers::AccountId,
     instruments::{CurrencyPair, InstrumentAny},
     types::{Currency, Price, Quantity},
 };
+use nautilus_network::http::HttpClient;
 use rstest::rstest;
 use serde_json::{Value, json};
 
@@ -65,6 +68,22 @@ impl Default for TestServerState {
             history_requests: Arc::new(tokio::sync::Mutex::new(0)),
         }
     }
+}
+
+/// Wait for the test server to be ready by polling a health endpoint.
+async fn wait_for_server(addr: SocketAddr, path: &str) {
+    let health_url = format!("http://{addr}{path}");
+    let http_client =
+        HttpClient::new(HashMap::new(), Vec::new(), Vec::new(), None, None, None).unwrap();
+    wait_until_async(
+        || {
+            let url = health_url.clone();
+            let client = http_client.clone();
+            async move { client.get(url, None, None, Some(1), None).await.is_ok() }
+        },
+        Duration::from_secs(5),
+    )
+    .await;
 }
 
 // Load test data from existing files
@@ -715,7 +734,7 @@ async fn start_test_server()
     });
 
     // Give server time to start
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    wait_for_server(addr, "/v5/market/time").await;
     Ok((addr, state))
 }
 
@@ -1235,7 +1254,7 @@ async fn start_reconciliation_test_server()
         axum::serve(listener, router).await.unwrap();
     });
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    wait_for_server(addr, "/v5/market/time").await;
     Ok((addr, state))
 }
 
@@ -2177,4 +2196,135 @@ async fn test_request_tickers_with_symbol_filter() {
     assert!(ticker.index_price.is_some());
 
     println!("[SUCCESS] Fetched ticker for BTCUSDT with all expected fields");
+}
+
+/// Handler that returns only a partial bar on first page, then closed bars on second page.
+async fn handle_get_klines_partial_first_page(
+    query: Query<HashMap<String, String>>,
+    State(state): State<TestServerState>,
+) -> impl IntoResponse {
+    if !query.contains_key("category") || !query.contains_key("symbol") {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "retCode": 10001,
+                "retMsg": "Missing required parameters",
+                "result": {},
+                "retExtInfo": {},
+                "time": 1704470400123i64
+            })),
+        )
+            .into_response();
+    }
+
+    let mut count = state.request_count.lock().await;
+    *count += 1;
+    let page = *count;
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+
+    let bar_duration_ms = 60_000i64;
+    let partial_bar_start = (now_ms / bar_duration_ms) * bar_duration_ms;
+
+    if page == 1 {
+        Json(json!({
+            "retCode": 0,
+            "retMsg": "OK",
+            "result": {
+                "category": "linear",
+                "symbol": "BTCUSDT",
+                "list": [
+                    [partial_bar_start.to_string(), "100000", "100100", "99900", "100050", "1000", "100000000"]
+                ]
+            },
+            "retExtInfo": {},
+            "time": now_ms
+        }))
+        .into_response()
+    } else {
+        let closed_bar_2_start = partial_bar_start - 2 * bar_duration_ms;
+        let closed_bar_1_start = partial_bar_start - 3 * bar_duration_ms;
+
+        Json(json!({
+            "retCode": 0,
+            "retMsg": "OK",
+            "result": {
+                "category": "linear",
+                "symbol": "BTCUSDT",
+                "list": [
+                    [closed_bar_2_start.to_string(), "99800", "99900", "99700", "99850", "600", "60000000"],
+                    [closed_bar_1_start.to_string(), "99700", "99800", "99600", "99750", "500", "50000000"]
+                ]
+            },
+            "retExtInfo": {},
+            "time": now_ms
+        }))
+        .into_response()
+    }
+}
+
+fn create_partial_first_page_test_router(state: TestServerState) -> Router {
+    Router::new()
+        .route("/v5/market/time", get(handle_get_server_time))
+        .route("/v5/market/instruments-info", get(handle_get_instruments))
+        .route(
+            "/v5/market/kline",
+            get(handle_get_klines_partial_first_page),
+        )
+        .with_state(state)
+}
+
+async fn start_partial_first_page_test_server()
+-> Result<(SocketAddr, TestServerState), Box<dyn std::error::Error + Send + Sync>> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let state = TestServerState::default();
+    let router = create_partial_first_page_test_router(state.clone());
+
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+
+    wait_for_server(addr, "/v5/market/time").await;
+
+    Ok((addr, state))
+}
+
+/// Tests that pagination continues when first page only has partial bars (P1 bug fix).
+#[rstest]
+#[tokio::test]
+async fn test_request_bars_continues_pagination_when_first_page_only_partial() {
+    let (addr, state) = start_partial_first_page_test_server().await.unwrap();
+    let base_url = format!("http://{addr}");
+
+    let client =
+        BybitHttpClient::new(Some(base_url), Some(60), None, None, None, None, None).unwrap();
+
+    let instruments = client
+        .request_instruments(BybitProductType::Linear, None)
+        .await
+        .unwrap();
+    for instrument in instruments {
+        client.cache_instrument(instrument);
+    }
+
+    let bar_type = BarType::from("BTCUSDT-LINEAR.BYBIT-1-MINUTE-LAST-EXTERNAL");
+    let bars = client
+        .request_bars(BybitProductType::Linear, bar_type, None, None, None, true)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        bars.len(),
+        2,
+        "Should continue pagination and return closed bars from second page"
+    );
+    let request_count = *state.request_count.lock().await;
+    assert!(
+        request_count >= 2,
+        "Should have made at least 2 requests to paginate past partial bars"
+    );
 }

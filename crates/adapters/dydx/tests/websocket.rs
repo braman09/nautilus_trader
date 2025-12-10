@@ -353,7 +353,12 @@ async fn test_websocket_connection() {
     let mut client = DydxWebSocketClient::new_public(ws_url, Some(30));
     client.connect().await.unwrap();
 
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    let state_clone = state.clone();
+    wait_until_async(
+        || async { *state_clone.connection_count.lock().await == 1 },
+        Duration::from_secs(5),
+    )
+    .await;
 
     let count = state.connection_count.lock().await;
     assert_eq!(*count, 1);
@@ -390,7 +395,8 @@ async fn test_websocket_close() {
     assert!(client.is_connected());
 
     client.disconnect().await.unwrap();
-    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    wait_until_async(|| async { !client.is_connected() }, Duration::from_secs(5)).await;
 
     assert!(!client.is_connected());
 }
@@ -409,7 +415,19 @@ async fn test_subscribe_trades() {
     let instrument_id = InstrumentId::from("BTC-USD.DYDX");
     client.subscribe_trades(instrument_id).await.unwrap();
 
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    let state_clone = state.clone();
+    wait_until_async(
+        || async {
+            state_clone
+                .subscriptions
+                .lock()
+                .await
+                .iter()
+                .any(|s| s.contains("v4_trades"))
+        },
+        Duration::from_secs(5),
+    )
+    .await;
 
     let subs = state.subscriptions.lock().await;
     assert!(subs.iter().any(|s| s.contains("v4_trades")));
@@ -431,7 +449,19 @@ async fn test_subscribe_orderbook() {
     let instrument_id = InstrumentId::from("BTC-USD.DYDX");
     client.subscribe_orderbook(instrument_id).await.unwrap();
 
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    let state_clone = state.clone();
+    wait_until_async(
+        || async {
+            state_clone
+                .subscriptions
+                .lock()
+                .await
+                .iter()
+                .any(|s| s.contains("v4_orderbook"))
+        },
+        Duration::from_secs(5),
+    )
+    .await;
 
     let subs = state.subscriptions.lock().await;
     assert!(subs.iter().any(|s| s.contains("v4_orderbook")));
@@ -456,7 +486,19 @@ async fn test_subscribe_candles() {
         .await
         .unwrap();
 
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    let state_clone = state.clone();
+    wait_until_async(
+        || async {
+            state_clone
+                .subscriptions
+                .lock()
+                .await
+                .iter()
+                .any(|s| s.contains("v4_candles"))
+        },
+        Duration::from_secs(5),
+    )
+    .await;
 
     let subs = state.subscriptions.lock().await;
     assert!(subs.iter().any(|s| s.contains("v4_candles")));
@@ -477,10 +519,36 @@ async fn test_unsubscribe_trades() {
 
     let instrument_id = InstrumentId::from("BTC-USD.DYDX");
     client.subscribe_trades(instrument_id).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let state_clone = state.clone();
+    wait_until_async(
+        || async {
+            state_clone
+                .subscriptions
+                .lock()
+                .await
+                .iter()
+                .any(|s| s.contains("v4_trades"))
+        },
+        Duration::from_secs(5),
+    )
+    .await;
 
     client.unsubscribe_trades(instrument_id).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let state_clone = state.clone();
+    wait_until_async(
+        || async {
+            !state_clone
+                .subscriptions
+                .lock()
+                .await
+                .iter()
+                .any(|s| s.contains("v4_trades"))
+        },
+        Duration::from_secs(5),
+    )
+    .await;
 
     let subs = state.subscriptions.lock().await;
     assert!(!subs.iter().any(|s| s.contains("v4_trades")));
@@ -764,12 +832,28 @@ async fn test_unsubscribe_multiple_channels() {
         .await
         .unwrap();
 
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // Wait for all subscriptions to be registered
+    let state_clone = state.clone();
+    wait_until_async(
+        || async { state_clone.subscriptions.lock().await.len() >= 3 },
+        Duration::from_secs(10),
+    )
+    .await;
 
     client.unsubscribe_trades(instrument_id).await.unwrap();
     client.unsubscribe_orderbook(instrument_id).await.unwrap();
 
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // Wait for unsubscriptions to complete (only candles should remain)
+    let state_clone = state.clone();
+    wait_until_async(
+        || async {
+            let subs = state_clone.subscriptions.lock().await;
+            !subs.iter().any(|s| s.contains("v4_trades"))
+                && !subs.iter().any(|s| s.contains("v4_orderbook"))
+        },
+        Duration::from_secs(10),
+    )
+    .await;
 
     let subs = state.subscriptions.lock().await;
     assert!(
@@ -1408,7 +1492,12 @@ async fn test_mixed_subscription_types() {
     client.subscribe_orderbook(eth_id).await.unwrap();
     client.subscribe_candles(btc_id, "1MIN").await.unwrap();
 
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    let state_clone = state.clone();
+    wait_until_async(
+        || async { state_clone.subscriptions.lock().await.len() >= 3 },
+        Duration::from_secs(10),
+    )
+    .await;
 
     let subs = state.subscriptions.lock().await;
     assert!(
@@ -1576,6 +1665,441 @@ async fn test_stream_receiver_persists_across_reconnect() {
     wait_until_async(|| async { client.is_connected() }, Duration::from_secs(5)).await;
 
     assert!(client.is_connected(), "Should reconnect successfully");
+
+    client.disconnect().await.unwrap();
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_subscribe_markets_immediately_after_connect() {
+    let (addr, state) = start_test_server().await.unwrap();
+    let ws_url = format!("ws://{addr}/v4/ws");
+
+    let mut client = DydxWebSocketClient::new_public(ws_url, Some(30));
+    client.connect().await.unwrap();
+
+    wait_until_async(|| async { client.is_connected() }, Duration::from_secs(5)).await;
+
+    // This is the exact pattern from section 1.3 - subscribe_markets() immediately after connect()
+    client.subscribe_markets().await.unwrap();
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let subs = state.subscriptions.lock().await;
+    assert!(
+        subs.iter().any(|s| s.contains("v4_markets")),
+        "Markets subscription should work immediately after connect"
+    );
+
+    client.disconnect().await.unwrap();
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_subscribe_markets_multiple_times_idempotent() {
+    let (addr, state) = start_test_server().await.unwrap();
+    let ws_url = format!("ws://{addr}/v4/ws");
+
+    let mut client = DydxWebSocketClient::new_public(ws_url, Some(30));
+    client.connect().await.unwrap();
+
+    wait_until_async(|| async { client.is_connected() }, Duration::from_secs(5)).await;
+
+    // Subscribe multiple times
+    client.subscribe_markets().await.unwrap();
+    client.subscribe_markets().await.unwrap();
+    client.subscribe_markets().await.unwrap();
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let subs = state.subscriptions.lock().await;
+    let markets_count = subs.iter().filter(|s| s.contains("v4_markets")).count();
+    assert_eq!(
+        markets_count, 1,
+        "Multiple subscribe_markets calls should be idempotent"
+    );
+
+    client.disconnect().await.unwrap();
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_clone_shares_command_channel() {
+    let (addr, state) = start_test_server().await.unwrap();
+    let ws_url = format!("ws://{addr}/v4/ws");
+
+    let mut client = DydxWebSocketClient::new_public(ws_url, Some(30));
+    client.connect().await.unwrap();
+
+    wait_until_async(|| async { client.is_connected() }, Duration::from_secs(5)).await;
+
+    // Clone the client after connect
+    let client_clone = client.clone();
+
+    // Subscribe using the clone - this tests the Arc<RwLock<UnboundedSender>> pattern
+    client_clone.subscribe_markets().await.unwrap();
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let subs = state.subscriptions.lock().await;
+    assert!(
+        subs.iter().any(|s| s.contains("v4_markets")),
+        "Clone should share command channel and be able to subscribe"
+    );
+
+    client.disconnect().await.unwrap();
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_subscribe_trades_and_markets_in_sequence() {
+    let (addr, state) = start_test_server().await.unwrap();
+    let ws_url = format!("ws://{addr}/v4/ws");
+
+    let mut client = DydxWebSocketClient::new_public(ws_url, Some(30));
+    client.connect().await.unwrap();
+
+    wait_until_async(|| async { client.is_connected() }, Duration::from_secs(5)).await;
+
+    // Subscribe to markets first (like the Python adapter does)
+    client.subscribe_markets().await.unwrap();
+
+    // Then subscribe to trades
+    let btc_id = InstrumentId::from("BTC-USD.DYDX");
+    client.subscribe_trades(btc_id).await.unwrap();
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let subs = state.subscriptions.lock().await;
+    assert!(
+        subs.iter().any(|s| s.contains("v4_markets")),
+        "Markets should be subscribed"
+    );
+    assert!(
+        subs.iter().any(|s| s.contains("v4_trades")),
+        "Trades should be subscribed after markets"
+    );
+
+    client.disconnect().await.unwrap();
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_subscribe_block_height() {
+    let (addr, state) = start_test_server().await.unwrap();
+    let ws_url = format!("ws://{addr}/v4/ws");
+
+    let mut client = DydxWebSocketClient::new_public(ws_url, Some(30));
+    client.connect().await.unwrap();
+
+    wait_until_async(|| async { client.is_connected() }, Duration::from_secs(5)).await;
+
+    client.subscribe_block_height().await.unwrap();
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let subs = state.subscriptions.lock().await;
+    assert!(
+        subs.iter().any(|s| s.contains("v4_block_height")),
+        "Block height subscription should work"
+    );
+
+    client.disconnect().await.unwrap();
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_unsubscribe_markets() {
+    let (addr, state) = start_test_server().await.unwrap();
+    let ws_url = format!("ws://{addr}/v4/ws");
+
+    let mut client = DydxWebSocketClient::new_public(ws_url, Some(30));
+    client.connect().await.unwrap();
+
+    wait_until_async(|| async { client.is_connected() }, Duration::from_secs(5)).await;
+
+    client.subscribe_markets().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    client.unsubscribe_markets().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let subs = state.subscriptions.lock().await;
+    assert!(
+        !subs.iter().any(|s| s.contains("v4_markets")),
+        "Markets should be unsubscribed"
+    );
+
+    client.disconnect().await.unwrap();
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_unsubscribe_block_height() {
+    let (addr, state) = start_test_server().await.unwrap();
+    let ws_url = format!("ws://{addr}/v4/ws");
+
+    let mut client = DydxWebSocketClient::new_public(ws_url, Some(30));
+    client.connect().await.unwrap();
+
+    wait_until_async(|| async { client.is_connected() }, Duration::from_secs(5)).await;
+
+    client.subscribe_block_height().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    client.unsubscribe_block_height().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let subs = state.subscriptions.lock().await;
+    assert!(
+        !subs.iter().any(|s| s.contains("v4_block_height")),
+        "Block height should be unsubscribed"
+    );
+
+    client.disconnect().await.unwrap();
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_subscribe_all_channels_sequence() {
+    let (addr, state) = start_test_server().await.unwrap();
+    let ws_url = format!("ws://{addr}/v4/ws");
+
+    let mut client = DydxWebSocketClient::new_public(ws_url, Some(30));
+    client.connect().await.unwrap();
+
+    wait_until_async(|| async { client.is_connected() }, Duration::from_secs(5)).await;
+
+    let btc_id = InstrumentId::from("BTC-USD.DYDX");
+
+    // Subscribe to all channel types in sequence (like real usage)
+    client.subscribe_markets().await.unwrap();
+    client.subscribe_block_height().await.unwrap();
+    client.subscribe_trades(btc_id).await.unwrap();
+    client.subscribe_orderbook(btc_id).await.unwrap();
+    client.subscribe_candles(btc_id, "1MIN").await.unwrap();
+
+    let state_clone = state.clone();
+    wait_until_async(
+        || async { state_clone.subscriptions.lock().await.len() >= 5 },
+        Duration::from_secs(10),
+    )
+    .await;
+
+    let subs = state.subscriptions.lock().await;
+    assert!(subs.len() >= 5, "Should have all 5 subscription types");
+    assert!(subs.iter().any(|s| s.contains("v4_markets")));
+    assert!(subs.iter().any(|s| s.contains("v4_block_height")));
+    assert!(subs.iter().any(|s| s.contains("v4_trades")));
+    assert!(subs.iter().any(|s| s.contains("v4_orderbook")));
+    assert!(subs.iter().any(|s| s.contains("v4_candles")));
+
+    client.disconnect().await.unwrap();
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_reconnect_then_subscribe_markets() {
+    let (addr, state) = start_test_server().await.unwrap();
+    let ws_url = format!("ws://{addr}/v4/ws");
+
+    let mut client = DydxWebSocketClient::new_public(ws_url, Some(30));
+    client.connect().await.unwrap();
+
+    wait_until_async(|| async { client.is_connected() }, Duration::from_secs(5)).await;
+
+    // Disconnect manually (not via server trigger)
+    client.disconnect().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Clear subscription state on server
+    state.subscriptions.lock().await.clear();
+
+    // Reconnect
+    client.connect().await.unwrap();
+
+    wait_until_async(|| async { client.is_connected() }, Duration::from_secs(5)).await;
+
+    // Subscribe after reconnection
+    client.subscribe_markets().await.unwrap();
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let subs = state.subscriptions.lock().await;
+    assert!(
+        subs.iter().any(|s| s.contains("v4_markets")),
+        "Should be able to subscribe after reconnection"
+    );
+
+    client.disconnect().await.unwrap();
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_subscribe_without_wait_until_active() {
+    let (addr, state) = start_test_server().await.unwrap();
+    let ws_url = format!("ws://{addr}/v4/ws");
+
+    let mut client = DydxWebSocketClient::new_public(ws_url, Some(30));
+    client.connect().await.unwrap();
+
+    // Don't call wait_until_active - just give a small delay for connection
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Try to subscribe
+    let result = client.subscribe_markets().await;
+
+    // Should succeed even without explicit wait_until_active
+    assert!(
+        result.is_ok(),
+        "Subscribe should work after connect without explicit wait"
+    );
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let subs = state.subscriptions.lock().await;
+    assert!(
+        subs.iter().any(|s| s.contains("v4_markets")),
+        "Markets subscription should succeed"
+    );
+
+    client.disconnect().await.unwrap();
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_multiple_clones_subscribe() {
+    let (addr, state) = start_test_server().await.unwrap();
+    let ws_url = format!("ws://{addr}/v4/ws");
+
+    let mut client = DydxWebSocketClient::new_public(ws_url, Some(30));
+    client.connect().await.unwrap();
+
+    wait_until_async(|| async { client.is_connected() }, Duration::from_secs(5)).await;
+
+    // Create multiple clones
+    let clone1 = client.clone();
+    let clone2 = client.clone();
+
+    // Subscribe from different clones
+    clone1.subscribe_markets().await.unwrap();
+    clone2.subscribe_block_height().await.unwrap();
+
+    let btc_id = InstrumentId::from("BTC-USD.DYDX");
+    client.subscribe_trades(btc_id).await.unwrap();
+
+    let state_clone = state.clone();
+    wait_until_async(
+        || async { state_clone.subscriptions.lock().await.len() >= 3 },
+        Duration::from_secs(10),
+    )
+    .await;
+
+    let subs = state.subscriptions.lock().await;
+    assert!(
+        subs.iter().any(|s| s.contains("v4_markets")),
+        "Clone 1 subscription should work"
+    );
+    assert!(
+        subs.iter().any(|s| s.contains("v4_block_height")),
+        "Clone 2 subscription should work"
+    );
+    assert!(
+        subs.iter().any(|s| s.contains("v4_trades")),
+        "Original client subscription should work"
+    );
+
+    client.disconnect().await.unwrap();
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_double_connect_is_noop() {
+    let (addr, state) = start_test_server().await.unwrap();
+    let ws_url = format!("ws://{addr}/v4/ws");
+
+    let mut client = DydxWebSocketClient::new_public(ws_url, Some(30));
+    client.connect().await.unwrap();
+
+    wait_until_async(|| async { client.is_connected() }, Duration::from_secs(5)).await;
+
+    let initial_count = *state.connection_count.lock().await;
+
+    // Call connect again while already connected
+    client.connect().await.unwrap();
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let final_count = *state.connection_count.lock().await;
+    assert_eq!(
+        initial_count, final_count,
+        "Second connect should be a no-op"
+    );
+
+    // Verify subscriptions still work
+    client.subscribe_markets().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let subs = state.subscriptions.lock().await;
+    assert!(
+        subs.iter().any(|s| s.contains("v4_markets")),
+        "Subscriptions should work after double connect"
+    );
+
+    client.disconnect().await.unwrap();
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_url_getter() {
+    let ws_url = "ws://localhost:12345/v4/ws".to_string();
+    let client = DydxWebSocketClient::new_public(ws_url.clone(), Some(30));
+
+    assert_eq!(client.url(), ws_url, "URL getter should return the URL");
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_is_connected_false_before_connect() {
+    let ws_url = "ws://localhost:12345/v4/ws".to_string();
+    let client = DydxWebSocketClient::new_public(ws_url, Some(30));
+
+    assert!(
+        !client.is_connected(),
+        "is_connected should be false before connect"
+    );
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_markets_subscription_failure() {
+    let (addr, state) = start_test_server().await.unwrap();
+    let ws_url = format!("ws://{addr}/v4/ws");
+
+    // Configure server to fail markets subscriptions
+    state
+        .set_subscription_failures(vec!["v4_markets".to_string()])
+        .await;
+
+    let mut client = DydxWebSocketClient::new_public(ws_url, Some(30));
+    client.connect().await.unwrap();
+
+    wait_until_async(|| async { client.is_connected() }, Duration::from_secs(5)).await;
+
+    // This should not error (error comes async via message)
+    let result = client.subscribe_markets().await;
+    assert!(result.is_ok(), "Subscribe call itself should not fail");
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Verify subscription was attempted but failed
+    let events = state.subscription_events().await;
+    assert!(
+        events
+            .iter()
+            .any(|(ch, success)| ch.contains("v4_markets") && !*success),
+        "Markets subscription should have been attempted and failed"
+    );
 
     client.disconnect().await.unwrap();
 }

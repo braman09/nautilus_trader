@@ -31,6 +31,7 @@ This release adds support for Python 3.14 with the following limitations:
 - Added Bybit HTTP request_tickers support (#3241), thanks @TaiShanQ
 - Added Polymarket Gamma API support for instrument loading (#3141), thanks @DeirhX
 - Added OKX historical trades requests
+- Added Tardis `book_snapshot_output` config option for tardis machine replays (default `deltas` to retain current behavior)
 - Added `allow_overfills` config option to `ExecEngineConfig` (default `False`) to handle order fills exceeding order quantity with warning instead of raising
 - Added `overfill_qty` field to orders for tracking fill quantities exceeding original order quantity
 - Introduced `PositionAdjusted` events for tracking quantity/PnL changes outside normal order fills (base currency commissions, funding payments, manual adjustments)
@@ -54,14 +55,20 @@ This release adds support for Python 3.14 with the following limitations:
   ```
 
 ### Security
-TBD
+- Added `osv-scanner` for Python dependency vulnerability scanning in pre-commit
+- Added `cargo-vet` for Rust supply chain security auditing
+- Hardened unsafe code with runtime checks and `#![deny(unsafe_op_in_unsafe_fn)]` lint
+- Hardened CI workflows by pinning Docker images to SHA digests
+- Improved actor/component registry safety with `ActorRef` guards and runtime borrow tracking
+- Fixed code scanning security alerts
 
 ### Fixes
 - Fixed cache dropped same-timestamp market data on insert
 - Fixed race condition in InstrumentProvider causing duplicate instrument initialization in shared providers
 - Fixed portfolio statistics various bugs and edge cases
 - Fixed SyntheticInstrument formula error during parsing with hyphened InstrumentId (#3257), thanks @Javdu10
-- Fixed GTD order expiry key mismatch in matching engine (#3272), thanks for reporting @linimin
+- Fixed matching engine GTD order expiry key mismatch (#3272), thanks for reporting @linimin
+- Fixed matching engine order modification for partial fills
 - Fixed NETTING position flip snapshots and cache index cleanup (#3081), thanks @SarunasSS
 - Fixed `BacktestResult.total_positions` to match tearsheet count (#3148), thanks for reporting @2-5
 - Fixed risk engine negative price handling for spread instruments (#3136), thanks for reporting @q351941406
@@ -80,6 +87,8 @@ TBD
 - Fixed Betfair duplicate fills on startup/reconnect
 - Fixed Binance instrument info dict JSON serialization (#3128), thanks for reporting @woung717
 - Fixed Binance ADL orders with TRADE execution type
+- Fixed Binance Futures Algo Order API for conditional orders (#3287), thanks for reporting @KaizynX
+- Fixed Bybit historical bars requests partial (unclosed) bar filtering
 - Fixed `BybitHttpClient` type stub pyi signatures (#3238), thanks @sunlei
 - Fixed Databento MBO data decoding when `PRICE_UNDEF` appears with non-zero precision
 - Fixed Databento Arrow serialization for `PRICE_UNDEF` (#3183), thanks for reporting @marloncalvo
@@ -98,6 +107,9 @@ TBD
 - Fixed Polymarket maker fills parsing for cross-asset matching and multiple concurrent fills (#3172), thanks @petioptrv
 - Fixed Polymarket account balance update timing issue (#3161), thanks for reporting @santivazq
 - Fixed Polymarket handling of overfilled FOK orders using `allow_overfills` execution engine config option (#3221), thanks for reporting @Javdu10
+- Fixed Polymarket `match_time` timestamp parsing (#3273), thanks for reporting @santivazq
+- Fixed Tardis book snapshot to deltas CLEAR prepending
+- Fixed Tardis CSV parsing for mid-day snapshots
 
 ### Internal Improvements
 - Added BitMEX submit broadcaster
@@ -106,6 +118,7 @@ TBD
 - Added non-mutating swap quote simulation for Pool tickmap profiling (#3123), thanks @filipmacek
 - Added ERC20 token balance tracking to BlockchainExecutionClient (#3224), thanks @filipmacek
 - Added DeFi pool discovery service with full Uniswap(V2/V3/V4) support (#3255), thanks @filipmacek
+- Added initial Deribit HTTP client with instrument support (#3288), thanks @filipmacek
 - Added dYdX v4 crate (#3138), thanks @nicolad
 - Added dYdX v4 WebSocket in Rust (#3158), thanks @nicolad
 - Added dYdX v4 DataClient in Rust (#3162), thanks @nicolad
@@ -114,6 +127,8 @@ TBD
 - Added dYdX v4 gRPC order execution (#3222), thanks @nicolad
 - Added dYdX v4 order execution via gRPC with Python bindings (#3245), thanks @nicolad
 - Added dYdX v4 conditional orders (#3259), thanks @nicolad
+- Added dYdX v4 Python adapter layer (#3275), thanks @nicolad
+- Added dYdX v4 batch cancel and expose missing Python bindings (#3282), thanks @nicolad
 - Added Kraken Futures demo support (#3262), thanks @nicolad
 - Added check for empty data in _handle_table_nautilus (#3248), thanks @faysou
 - Integrated trade analytics across DeFi pools swaps and simulated quotes (#3174), thanks @filipmacek
@@ -128,6 +143,7 @@ TBD
 - Refactored execution engine reconciliation (#3185), thanks @faysou
 - Refactored Polymarket instrument provider to use async HttpClient
 - Refactored Interactive Brokers `HistoricInteractiveBrokersClient` (#3261), thanks @faysou
+- Refactored IB Historical client (#3276), thanks @faysou
 - Improved trade execution matching with transient bid/ask override for `trade_execution=True` mode, ensuring limit orders fill correctly when trades occur at the limit price
 - Improved `None` handling in equality and comparison methods
 - Improved `Actor.request_bars` to enforce standard bar types (#3216), thanks @faysou
@@ -141,7 +157,9 @@ TBD
 - Improved dYdX v4 network, bars, and batch cancel (#3231), thanks @nicolad
 - Improved dYdX v4 gRPC execution with edge cases and batch cancel (#3239), thanks @nicolad
 - Improved dYdX v4 data/exec testers and fix GTT (#3254), thanks @nicolad
+- Improved dYdX v4 WebSocket subscription state management (#3286), thanks @nicolad
 - Improved Polymarket position querying using Gamma API (#3142), thanks @DeirhX
+- Improved Tardis adapter robustness and error handling
 - Standardized dYdX WebSocket architecture (#3173), thanks @nicolad
 - Standardized dYdX client integration tests (#3193), thanks @nicolad
 - Standardized dYdX per adapter guide conventions (#3267), thanks @nicolad
@@ -154,6 +172,7 @@ TBD
 - Refined `BacktestDataIterator` docstrings (#3264), thanks @faysou
 - Refined `BacktestDataConfig.query` (#3266), thanks @faysou
 - Refined Databento utils (#3268), thanks @faysou
+- Refined Interactive Brokers historical data request methods (#3279), thanks @faysou
 - Optimized unnecessary string allocations and `Ustr` usage
 - Optimized build to prefer sccache when available (#3243), thanks @sunlei
 - Optimized execution reconciliation to avoid quadratic complexity (#3140), thanks @DeirhX
@@ -173,7 +192,7 @@ TBD
 - Upgraded implied-vol crate (#3115), thanks @faysou
 - Upgraded Rust (MSRV) to 1.91.1
 - Upgraded Cython to v3.2.2
-- Upgraded `databento` crate to v0.36.0
+- Upgraded `databento` crate to v0.37.0
 - Upgraded `datafusion` crate to v51.0.0
 - Upgraded `msgspec` to 0.20.0
 - Upgraded `pyo3` crate to v0.27.2
@@ -181,7 +200,13 @@ TBD
 
 ### Documentation Updates
 - Added Polymarket historical data loading docs
+- Added visualization docs for `bars_with_fills` tearsheet feature
+- Added order state flow diagram with lifecycle documentation
+- Improved concept docs with Mermaid diagrams replacing ASCII diagrams
+- Improved execution concept guide with overfills explanation
+- Improved backtesting concept guide to clarify bar execution behavior
 - Improved documentation for uv-installed Python environments, thanks to @faysou for investigating and reporting
+- Documented fee rate sign convention in instruments concept guide
 
 ### Deprecations
 None
@@ -262,6 +287,7 @@ This will be the final release with support for Python 3.11.
 - Fixed Databento CMBP-1/CBBO/TBBO symbology resolution
 - Fixed `on_load` called before strategy added bug (#2953), thanks @lisiyuan656
 - Fixed filesystem usage in catalog for `isfile` and `isdir` (#2954), thanks @limx0
+- Fixed `ParquetDataCatalog.from_uri` to support Windows paths (#3283), thanks @nikitium
 - Fixed `SandboxExecutionClient` instrument data handling
 - Fixed `AccountState` Arrow serialization (#3005), thanks for reporting @nikzasel
 - Fixed `CryptoOption` Arrow schema `option_kind` field to accept string values
@@ -372,6 +398,7 @@ This will be the final release with support for Python 3.11.
 - Improved BitMEX instrument cache error logging
 - Improved Binance, Bybit, OKX, BitMEX, and Coinbase International HTTP rate limiting to enforce documented per-endpoint quotas
 - Improved Binance fill handling when instrument not cached with clearer error log
+- Improved dYdX v4 websocket lifecycle and add fixture-based tests (#3285), thanks @nicolad
 - Improved OKX trade mode detection and fee currency parsing
 - Improved OKX client connection reliability
 - Improved OKX liquidation and ADL fill handling and logging

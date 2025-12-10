@@ -35,9 +35,19 @@
 /// See: <https://docs.dydx.trade/developers/indexer/websockets#rate-limits>
 pub const DYDX_RATE_LIMIT_KEY_SUBSCRIPTION: &str = "subscription";
 
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, AtomicU8, Ordering},
+/// WebSocket topic delimiter for dYdX (channel:symbol format).
+pub const DYDX_WS_TOPIC_DELIMITER: char = ':';
+
+/// Default WebSocket quota for dYdX subscriptions (2 messages per second).
+pub static DYDX_WS_SUBSCRIPTION_QUOTA: LazyLock<Quota> =
+    LazyLock::new(|| Quota::per_second(NonZeroU32::new(2).expect("non-zero")));
+
+use std::{
+    num::NonZeroU32,
+    sync::{
+        Arc, LazyLock,
+        atomic::{AtomicBool, AtomicU8, Ordering},
+    },
 };
 
 use arc_swap::ArcSwap;
@@ -48,6 +58,7 @@ use nautilus_model::{
 };
 use nautilus_network::{
     mode::ConnectionMode,
+    ratelimiter::quota::Quota,
     websocket::{
         AuthTracker, SubscriptionState, WebSocketClient, WebSocketConfig, channel_message_handler,
     },
@@ -55,9 +66,9 @@ use nautilus_network::{
 use ustr::Ustr;
 
 use super::{
+    enums::NautilusWsMessage,
     error::{DydxWsError, DydxWsResult},
     handler::{FeedHandler, HandlerCommand},
-    messages::NautilusWsMessage,
 };
 use crate::common::credential::DydxCredential;
 
@@ -110,8 +121,8 @@ pub struct DydxWebSocketClient {
     account_id: Option<AccountId>,
     /// Optional heartbeat interval in seconds.
     heartbeat: Option<u64>,
-    /// Command channel sender to handler.
-    cmd_tx: Arc<tokio::sync::mpsc::UnboundedSender<HandlerCommand>>,
+    /// Command channel sender to handler (wrapped in RwLock so updates are visible across clones).
+    cmd_tx: Arc<tokio::sync::RwLock<tokio::sync::mpsc::UnboundedSender<HandlerCommand>>>,
     /// Receiver for parsed Nautilus messages from handler.
     out_rx: Option<tokio::sync::mpsc::UnboundedReceiver<NautilusWsMessage>>,
     /// Background handler task handle.
@@ -152,7 +163,7 @@ impl DydxWebSocketClient {
             credential: None,
             requires_auth: false,
             auth_tracker: AuthTracker::new(),
-            subscriptions: SubscriptionState::new(':'), // dYdX uses colon delimiter (channel:symbol)
+            subscriptions: SubscriptionState::new(DYDX_WS_TOPIC_DELIMITER),
             connection_mode: Arc::new(ArcSwap::from_pointee(AtomicU8::new(
                 ConnectionMode::Closed as u8,
             ))),
@@ -160,7 +171,7 @@ impl DydxWebSocketClient {
             instruments_cache: Arc::new(DashMap::new()),
             account_id: None,
             heartbeat: _heartbeat,
-            cmd_tx: Arc::new(cmd_tx),
+            cmd_tx: Arc::new(tokio::sync::RwLock::new(cmd_tx)),
             out_rx: None,
             handler_task: None,
         }
@@ -184,7 +195,7 @@ impl DydxWebSocketClient {
             credential: Some(Arc::new(credential)),
             requires_auth: true,
             auth_tracker: AuthTracker::new(),
-            subscriptions: SubscriptionState::new(':'), // dYdX uses colon delimiter (channel:symbol)
+            subscriptions: SubscriptionState::new(DYDX_WS_TOPIC_DELIMITER),
             connection_mode: Arc::new(ArcSwap::from_pointee(AtomicU8::new(
                 ConnectionMode::Closed as u8,
             ))),
@@ -192,7 +203,7 @@ impl DydxWebSocketClient {
             instruments_cache: Arc::new(DashMap::new()),
             account_id: Some(account_id),
             heartbeat: _heartbeat,
-            cmd_tx: Arc::new(cmd_tx),
+            cmd_tx: Arc::new(tokio::sync::RwLock::new(cmd_tx)),
             out_rx: None,
             handler_task: None,
         }
@@ -247,10 +258,10 @@ impl DydxWebSocketClient {
         let symbol = instrument.id().symbol.inner();
         self.instruments_cache.insert(symbol, instrument.clone());
 
-        // Send command to handler if connected
-        if let Err(e) = self
-            .cmd_tx
-            .send(HandlerCommand::UpdateInstrument(Box::new(instrument)))
+        // Before connect() the handler isn't running; this send will fail and that's expected
+        // because connect() replays the instruments via InitializeInstruments
+        if let Ok(cmd_tx) = self.cmd_tx.try_read()
+            && let Err(e) = cmd_tx.send(HandlerCommand::UpdateInstrument(Box::new(instrument)))
         {
             tracing::debug!("Failed to send UpdateInstrument command to handler: {e}");
         }
@@ -265,10 +276,11 @@ impl DydxWebSocketClient {
                 .insert(instrument.id().symbol.inner(), instrument.clone());
         }
 
-        // Send command to handler if connected
-        if let Err(e) = self
-            .cmd_tx
-            .send(HandlerCommand::InitializeInstruments(instruments))
+        // Before connect() the handler isn't running; this send will fail and that's expected
+        // because connect() replays the instruments via InitializeInstruments
+        if !instruments.is_empty()
+            && let Ok(cmd_tx) = self.cmd_tx.try_read()
+            && let Err(e) = cmd_tx.send(HandlerCommand::InitializeInstruments(instruments))
         {
             tracing::debug!("Failed to send InitializeInstruments command to handler: {e}");
         }
@@ -309,6 +321,9 @@ impl DydxWebSocketClient {
             return Ok(());
         }
 
+        // Reset stop signal from any previous disconnect
+        self.signal.store(false, Ordering::Relaxed);
+
         let (message_handler, raw_rx) = channel_message_handler();
 
         let cfg = WebSocketConfig {
@@ -326,7 +341,7 @@ impl DydxWebSocketClient {
             reconnect_max_attempts: None,
         };
 
-        let client = WebSocketClient::connect(cfg, None, vec![], None)
+        let client = WebSocketClient::connect(cfg, None, vec![], Some(*DYDX_WS_SUBSCRIPTION_QUOTA))
             .await
             .map_err(|e| DydxWsError::Transport(e.to_string()))?;
 
@@ -337,7 +352,11 @@ impl DydxWebSocketClient {
         let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel::<HandlerCommand>();
         let (out_tx, out_rx) = tokio::sync::mpsc::unbounded_channel::<NautilusWsMessage>();
 
-        self.cmd_tx = Arc::new(cmd_tx.clone());
+        // Update the shared cmd_tx so all clones see the new sender
+        {
+            let mut guard = self.cmd_tx.write().await;
+            *guard = cmd_tx;
+        }
         self.out_rx = Some(out_rx);
 
         // Replay cached instruments to the new handler
@@ -347,7 +366,10 @@ impl DydxWebSocketClient {
                 .iter()
                 .map(|entry| entry.value().clone())
                 .collect();
-            if let Err(e) = cmd_tx.send(HandlerCommand::InitializeInstruments(cached_instruments)) {
+            let cmd_tx_guard = self.cmd_tx.read().await;
+            if let Err(e) =
+                cmd_tx_guard.send(HandlerCommand::InitializeInstruments(cached_instruments))
+            {
                 tracing::error!("Failed to replay instruments to handler: {e}");
             }
         }
@@ -355,9 +377,18 @@ impl DydxWebSocketClient {
         // Spawn handler task
         let account_id = self.account_id;
         let signal = self.signal.clone();
+        let subscriptions = self.subscriptions.clone();
 
         let handler_task = tokio::spawn(async move {
-            let mut handler = FeedHandler::new(account_id, cmd_rx, out_tx, raw_rx, client, signal);
+            let mut handler = FeedHandler::new(
+                account_id,
+                cmd_rx,
+                out_tx,
+                raw_rx,
+                client,
+                signal,
+                subscriptions,
+            );
             handler.run().await;
         });
 
@@ -375,6 +406,11 @@ impl DydxWebSocketClient {
         // Set stop signal
         self.signal.store(true, Ordering::Relaxed);
 
+        // Reset connection mode to Closed so is_connected() returns false
+        // and subsequent connect() calls will create new channels
+        self.connection_mode
+            .store(Arc::new(AtomicU8::new(ConnectionMode::Closed as u8)));
+
         // Abort handler task if it exists
         if let Some(handle) = self.handler_task.take() {
             handle.abort();
@@ -390,6 +426,8 @@ impl DydxWebSocketClient {
     /// Sends a text message via the handler.
     async fn send_text_inner(&self, text: &str) -> DydxWsResult<()> {
         self.cmd_tx
+            .read()
+            .await
             .send(HandlerCommand::SendText(text.to_string()))
             .map_err(|e| {
                 DydxWsError::Transport(format!("Failed to send command to handler: {e}"))
@@ -403,9 +441,15 @@ impl DydxWebSocketClient {
     ///
     /// Returns an error if the handler task has terminated.
     pub fn send_command(&self, cmd: HandlerCommand) -> DydxWsResult<()> {
-        self.cmd_tx.send(cmd).map_err(|e| {
-            DydxWsError::Transport(format!("Failed to send command to handler: {e}"))
-        })?;
+        if let Ok(guard) = self.cmd_tx.try_read() {
+            guard.send(cmd).map_err(|e| {
+                DydxWsError::Transport(format!("Failed to send command to handler: {e}"))
+            })?;
+        } else {
+            return Err(DydxWsError::Transport(
+                "Failed to acquire lock on command channel".to_string(),
+            ));
+        }
         Ok(())
     }
 
@@ -415,6 +459,44 @@ impl DydxWebSocketClient {
             s = stripped.to_string();
         }
         s
+    }
+
+    fn topic(channel: super::enums::DydxWsChannel, id: Option<&str>) -> String {
+        match id {
+            Some(id) => format!("{}{}{}", channel.as_ref(), DYDX_WS_TOPIC_DELIMITER, id),
+            None => channel.as_ref().to_string(),
+        }
+    }
+
+    async fn send_and_track_subscribe(
+        &self,
+        sub: super::messages::DydxSubscription,
+        topic: &str,
+    ) -> DydxWsResult<()> {
+        self.subscriptions.mark_subscribe(topic);
+        let payload = serde_json::to_string(&sub)?;
+        if let Err(e) = self.send_text_inner(&payload).await {
+            self.subscriptions.mark_failure(topic);
+            self.subscriptions.remove_reference(topic);
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    async fn send_and_track_unsubscribe(
+        &self,
+        sub: super::messages::DydxSubscription,
+        topic: &str,
+    ) -> DydxWsResult<()> {
+        self.subscriptions.mark_unsubscribe(topic);
+        let payload = serde_json::to_string(&sub)?;
+        if let Err(e) = self.send_text_inner(&payload).await {
+            // Restore reference so the subscription remains active if the unsubscribe fails.
+            self.subscriptions.add_reference(topic);
+            self.subscriptions.mark_subscribe(topic);
+            return Err(e);
+        }
+        Ok(())
     }
 
     /// Subscribes to public trade updates for a specific instrument.
@@ -428,13 +510,18 @@ impl DydxWebSocketClient {
     /// <https://docs.dydx.trade/developers/indexer/websockets#trades-channel>
     pub async fn subscribe_trades(&self, instrument_id: InstrumentId) -> DydxWsResult<()> {
         let ticker = Self::ticker_from_instrument_id(&instrument_id);
+        let topic = Self::topic(super::enums::DydxWsChannel::Trades, Some(&ticker));
+        if !self.subscriptions.add_reference(&topic) {
+            return Ok(());
+        }
+
         let sub = super::messages::DydxSubscription {
             op: super::enums::DydxWsOperation::Subscribe,
             channel: super::enums::DydxWsChannel::Trades,
             id: Some(ticker),
         };
-        let payload = serde_json::to_string(&sub)?;
-        self.send_text_inner(&payload).await
+
+        self.send_and_track_subscribe(sub, &topic).await
     }
 
     /// Unsubscribes from public trade updates for a specific instrument.
@@ -444,13 +531,18 @@ impl DydxWebSocketClient {
     /// Returns an error if the unsubscription request fails.
     pub async fn unsubscribe_trades(&self, instrument_id: InstrumentId) -> DydxWsResult<()> {
         let ticker = Self::ticker_from_instrument_id(&instrument_id);
+        let topic = Self::topic(super::enums::DydxWsChannel::Trades, Some(&ticker));
+        if !self.subscriptions.remove_reference(&topic) {
+            return Ok(());
+        }
+
         let sub = super::messages::DydxSubscription {
             op: super::enums::DydxWsOperation::Unsubscribe,
             channel: super::enums::DydxWsChannel::Trades,
             id: Some(ticker),
         };
-        let payload = serde_json::to_string(&sub)?;
-        self.send_text_inner(&payload).await
+
+        self.send_and_track_unsubscribe(sub, &topic).await
     }
 
     /// Subscribes to orderbook updates for a specific instrument.
@@ -464,13 +556,18 @@ impl DydxWebSocketClient {
     /// <https://docs.dydx.trade/developers/indexer/websockets#orderbook-channel>
     pub async fn subscribe_orderbook(&self, instrument_id: InstrumentId) -> DydxWsResult<()> {
         let ticker = Self::ticker_from_instrument_id(&instrument_id);
+        let topic = Self::topic(super::enums::DydxWsChannel::Orderbook, Some(&ticker));
+        if !self.subscriptions.add_reference(&topic) {
+            return Ok(());
+        }
+
         let sub = super::messages::DydxSubscription {
             op: super::enums::DydxWsOperation::Subscribe,
             channel: super::enums::DydxWsChannel::Orderbook,
             id: Some(ticker),
         };
-        let payload = serde_json::to_string(&sub)?;
-        self.send_text_inner(&payload).await
+
+        self.send_and_track_subscribe(sub, &topic).await
     }
 
     /// Unsubscribes from orderbook updates for a specific instrument.
@@ -480,13 +577,18 @@ impl DydxWebSocketClient {
     /// Returns an error if the unsubscription request fails.
     pub async fn unsubscribe_orderbook(&self, instrument_id: InstrumentId) -> DydxWsResult<()> {
         let ticker = Self::ticker_from_instrument_id(&instrument_id);
+        let topic = Self::topic(super::enums::DydxWsChannel::Orderbook, Some(&ticker));
+        if !self.subscriptions.remove_reference(&topic) {
+            return Ok(());
+        }
+
         let sub = super::messages::DydxSubscription {
             op: super::enums::DydxWsOperation::Unsubscribe,
             channel: super::enums::DydxWsChannel::Orderbook,
             id: Some(ticker),
         };
-        let payload = serde_json::to_string(&sub)?;
-        self.send_text_inner(&payload).await
+
+        self.send_and_track_unsubscribe(sub, &topic).await
     }
 
     /// Subscribes to candle/kline updates for a specific instrument.
@@ -505,13 +607,18 @@ impl DydxWebSocketClient {
     ) -> DydxWsResult<()> {
         let ticker = Self::ticker_from_instrument_id(&instrument_id);
         let id = format!("{ticker}/{resolution}");
+        let topic = Self::topic(super::enums::DydxWsChannel::Candles, Some(&id));
+        if !self.subscriptions.add_reference(&topic) {
+            return Ok(());
+        }
+
         let sub = super::messages::DydxSubscription {
             op: super::enums::DydxWsOperation::Subscribe,
             channel: super::enums::DydxWsChannel::Candles,
             id: Some(id),
         };
-        let payload = serde_json::to_string(&sub)?;
-        self.send_text_inner(&payload).await
+
+        self.send_and_track_subscribe(sub, &topic).await
     }
 
     /// Unsubscribes from candle/kline updates for a specific instrument.
@@ -526,13 +633,18 @@ impl DydxWebSocketClient {
     ) -> DydxWsResult<()> {
         let ticker = Self::ticker_from_instrument_id(&instrument_id);
         let id = format!("{ticker}/{resolution}");
+        let topic = Self::topic(super::enums::DydxWsChannel::Candles, Some(&id));
+        if !self.subscriptions.remove_reference(&topic) {
+            return Ok(());
+        }
+
         let sub = super::messages::DydxSubscription {
             op: super::enums::DydxWsOperation::Unsubscribe,
             channel: super::enums::DydxWsChannel::Candles,
             id: Some(id),
         };
-        let payload = serde_json::to_string(&sub)?;
-        self.send_text_inner(&payload).await
+
+        self.send_and_track_unsubscribe(sub, &topic).await
     }
 
     /// Subscribes to market updates for all instruments.
@@ -545,13 +657,18 @@ impl DydxWebSocketClient {
     ///
     /// <https://docs.dydx.trade/developers/indexer/websockets#markets-channel>
     pub async fn subscribe_markets(&self) -> DydxWsResult<()> {
+        let topic = Self::topic(super::enums::DydxWsChannel::Markets, None);
+        if !self.subscriptions.add_reference(&topic) {
+            return Ok(());
+        }
+
         let sub = super::messages::DydxSubscription {
             op: super::enums::DydxWsOperation::Subscribe,
             channel: super::enums::DydxWsChannel::Markets,
             id: None,
         };
-        let payload = serde_json::to_string(&sub)?;
-        self.send_text_inner(&payload).await
+
+        self.send_and_track_subscribe(sub, &topic).await
     }
 
     /// Unsubscribes from market updates.
@@ -560,13 +677,18 @@ impl DydxWebSocketClient {
     ///
     /// Returns an error if the unsubscription request fails.
     pub async fn unsubscribe_markets(&self) -> DydxWsResult<()> {
+        let topic = Self::topic(super::enums::DydxWsChannel::Markets, None);
+        if !self.subscriptions.remove_reference(&topic) {
+            return Ok(());
+        }
+
         let sub = super::messages::DydxSubscription {
             op: super::enums::DydxWsOperation::Unsubscribe,
             channel: super::enums::DydxWsChannel::Markets,
             id: None,
         };
-        let payload = serde_json::to_string(&sub)?;
-        self.send_text_inner(&payload).await
+
+        self.send_and_track_unsubscribe(sub, &topic).await
     }
 
     /// Subscribes to subaccount updates (orders, fills, positions, balances).
@@ -593,13 +715,18 @@ impl DydxWebSocketClient {
             ));
         }
         let id = format!("{address}/{subaccount_number}");
+        let topic = Self::topic(super::enums::DydxWsChannel::Subaccounts, Some(&id));
+        if !self.subscriptions.add_reference(&topic) {
+            return Ok(());
+        }
+
         let sub = super::messages::DydxSubscription {
             op: super::enums::DydxWsOperation::Subscribe,
             channel: super::enums::DydxWsChannel::Subaccounts,
             id: Some(id),
         };
-        let payload = serde_json::to_string(&sub)?;
-        self.send_text_inner(&payload).await
+
+        self.send_and_track_subscribe(sub, &topic).await
     }
 
     /// Unsubscribes from subaccount updates.
@@ -613,13 +740,18 @@ impl DydxWebSocketClient {
         subaccount_number: u32,
     ) -> DydxWsResult<()> {
         let id = format!("{address}/{subaccount_number}");
+        let topic = Self::topic(super::enums::DydxWsChannel::Subaccounts, Some(&id));
+        if !self.subscriptions.remove_reference(&topic) {
+            return Ok(());
+        }
+
         let sub = super::messages::DydxSubscription {
             op: super::enums::DydxWsOperation::Unsubscribe,
             channel: super::enums::DydxWsChannel::Subaccounts,
             id: Some(id),
         };
-        let payload = serde_json::to_string(&sub)?;
-        self.send_text_inner(&payload).await
+
+        self.send_and_track_unsubscribe(sub, &topic).await
     }
 
     /// Subscribes to block height updates.
@@ -632,13 +764,18 @@ impl DydxWebSocketClient {
     ///
     /// <https://docs.dydx.trade/developers/indexer/websockets#block-height-channel>
     pub async fn subscribe_block_height(&self) -> DydxWsResult<()> {
+        let topic = Self::topic(super::enums::DydxWsChannel::BlockHeight, None);
+        if !self.subscriptions.add_reference(&topic) {
+            return Ok(());
+        }
+
         let sub = super::messages::DydxSubscription {
             op: super::enums::DydxWsOperation::Subscribe,
             channel: super::enums::DydxWsChannel::BlockHeight,
             id: None,
         };
-        let payload = serde_json::to_string(&sub)?;
-        self.send_text_inner(&payload).await
+
+        self.send_and_track_subscribe(sub, &topic).await
     }
 
     /// Unsubscribes from block height updates.
@@ -647,12 +784,17 @@ impl DydxWebSocketClient {
     ///
     /// Returns an error if the unsubscription request fails.
     pub async fn unsubscribe_block_height(&self) -> DydxWsResult<()> {
+        let topic = Self::topic(super::enums::DydxWsChannel::BlockHeight, None);
+        if !self.subscriptions.remove_reference(&topic) {
+            return Ok(());
+        }
+
         let sub = super::messages::DydxSubscription {
             op: super::enums::DydxWsOperation::Unsubscribe,
             channel: super::enums::DydxWsChannel::BlockHeight,
             id: None,
         };
-        let payload = serde_json::to_string(&sub)?;
-        self.send_text_inner(&payload).await
+
+        self.send_and_track_unsubscribe(sub, &topic).await
     }
 }

@@ -104,7 +104,7 @@ For datasets that don't fit in memory, use the streaming API:
 
 ```python
 def data_generator():
-    # Yield chunks of pre-sorted data
+    # Yield chunks of data (each chunk is a list of Data objects)
     yield load_chunk_1()
     yield load_chunk_2()
     yield load_chunk_3()
@@ -114,6 +114,10 @@ engine.add_data_iterator(
     generator=data_generator(),
 )
 ```
+
+:::note
+The streaming API processes data chunks on-demand during the backtest run, avoiding the need to load all data into memory upfront.
+:::
 
 :::tip Performance impact
 For a backtest with 10 instruments, each with 1M bars:
@@ -130,9 +134,10 @@ The `BacktestEngine` enforces important invariants to ensure data integrity:
 
 **Requirements:**
 
-- All data must be sorted and synced to the internal iterator before calling `run()`.
-- When using `sort=False`, you **must** call `sort_data()` or add more data with `sort=True` before running.
-- The engine validates this requirement and raises `RuntimeError` if violated.
+- All data must be sorted before calling `run()`.
+- When using `sort=False`, you **must** call `sort_data()` before running.
+- The engine validates this and raises `RuntimeError` if unsorted data is detected.
+- Calling `sort_data()` multiple times is safe (idempotent).
 
 **Safety guarantees:**
 
@@ -167,15 +172,15 @@ The `.reset()` method returns all stateful fields to their **initial value**, ex
 
 **What gets reset:**
 
-- All trading state (orders, positions, account balances)
-- Strategy state
-- Engine counters and timestamps
+- All trading state (orders, positions, account balances).
+- Strategy instances are removed (you must re-add strategies before the next run).
+- Engine counters and timestamps.
 
 **What persists:**
 
-- Data added via `.add_data()` (use `.clear_data()` to drop it)
-- Instruments (required to match the persisted data)
-- Venue configurations
+- Data added via `.add_data()` (use `.clear_data()` to remove).
+- Instruments (must match the persisted data).
+- Venue configurations.
 
 **Instrument handling:**
 
@@ -259,20 +264,37 @@ a complete representation of every price level or order in the market, reflectin
 This ensures the highest level of execution granularity and realism. However, if granular order book data is either not
 available or necessary, then the platform has the capability of processing market data in the following descending order of detail:
 
+```mermaid
+flowchart LR
+    L3["L3 Order Book<br/>(market-by-order)"]
+    L2["L2 Order Book<br/>(market-by-price)"]
+    L1["L1 Quotes<br/>(top of book)"]
+    T["Trades"]
+    B["Bars"]
+
+    L3 --> L2 --> L1 --> T --> B
+
+    style L3 fill:#2d5a3d,color:#fff
+    style L2 fill:#3d6a4d,color:#fff
+    style L1 fill:#4d7a5d,color:#fff
+    style T fill:#5d8a6d,color:#fff
+    style B fill:#6d9a7d,color:#fff
+```
+
 1. **Order Book Data/Deltas (L3 market-by-order)**:
-   - Providing comprehensive market depth and detailed order flow, with visibility of all individual orders.
+   - Comprehensive market depth with visibility of all individual orders.
 
 2. **Order Book Data/Deltas (L2 market-by-price)**:
-   - Providing market depth visibility across all price levels.
+   - Market depth visibility across all price levels.
 
 3. **Quote Ticks (L1 market-by-price)**:
-   - Representing the "top of the book" by capturing only the best bid and ask prices and sizes.
+   - Top of book only - best bid and ask prices and sizes.
 
 4. **Trade Ticks**:
-   - Reflecting actual executed trades, offering a precise view of transaction activity.
+   - Actual executed trades.
 
 5. **Bars**:
-   - Aggregating trading activity - typically over fixed time intervals, such as 1-minute, 1-hour, or 1-day.
+   - Aggregated trading activity over fixed time intervals (e.g., 1-minute, 1-hour, 1-day).
 
 ### Choosing data: cost vs. accuracy
 
@@ -362,8 +384,8 @@ If your data source provides bars timestamped at the **opening time** (common in
 
 **Approach 2: Use `ts_init_delta` parameter**
 
-- When calling `BarDataWrangler.process()`, set `ts_init_delta` to the bar's duration in nanoseconds.
-- The wrangler will compute `ts_init = ts_event + ts_init_delta`, shifting execution timing to the close.
+- When calling `BarDataWrangler.process()`, set `ts_init_delta` to the bar's duration in nanoseconds (e.g., `60_000_000_000` for 1-minute bars).
+- The wrangler computes `ts_init = ts_event + ts_init_delta`, shifting execution timing to the close.
 - Use this when you cannot or prefer not to modify source data timestamps.
 
 Always verify your data's timestamp convention with a small sample to avoid simulation inaccuracies. Incorrect timestamp handling can lead to look-ahead bias and unrealistic backtest results.
@@ -409,10 +431,11 @@ During backtest execution, each bar is converted into a sequence of four price p
 3. Low price
 4. Closing price
 
-The trading volume for that bar is **split evenly** among these four points (25% each). In marginal cases,
-if the original bar's volume divided by 4 is less than the instrument's minimum `size_increment`,
-we still use the minimum `size_increment` per price point to ensure valid market activity (e.g., 1 contract
-for CME group exchanges).
+The trading volume for that bar is **split evenly** among these four points (25% each), with any
+remainder added to the closing price trade to preserve total volume. In marginal cases, if the
+bar's volume divided by 4 is less than the instrument's minimum `size_increment`, we use the
+minimum `size_increment` per price point to ensure valid market activity (e.g., 1 contract for
+CME group exchanges).
 
 How these price points are sequenced can be controlled via the `bar_adaptive_high_low_ordering` parameter when configuring a venue.
 
@@ -464,6 +487,16 @@ the spread is not permanently corrupted by the transient trade price.
 
 - **SELLER trade at P**: The engine temporarily sets the Best Ask to P. Resting BUY LIMIT orders at P or higher will fill (as they are willing to buy at P or more).
 - **BUYER trade at P**: The engine temporarily sets the Best Bid to P. Resting SELL LIMIT orders at P or lower will fill (as they are willing to sell at P or less).
+
+**Fill quantity capping:**
+
+Fill quantities are capped to ensure realistic execution simulation:
+
+- **Per-order capping**: Each order's fill quantity is limited to the minimum of the order's remaining quantity and the trade tick's size. For example, if you have a BUY LIMIT order for 100,000 units and a 200-unit SELLER trade occurs at your limit price, the order will be partially filled for 200 units (not the full 100,000).
+
+- **Multi-order capping**: When multiple orders match the same trade tick, the total filled quantity across all orders will not exceed the trade tick's size. For example, if two BUY LIMIT orders (40 and 60 units) are resting and a 50-unit SELLER trade occurs, the first order fills for 40 units and the second fills for 10 units (the remaining trade size), totaling 50 units.
+
+This behavior ensures that backtests don't overstate execution volumes beyond what the historical trade data indicates was actually available in the market.
 
 **Example:**
 

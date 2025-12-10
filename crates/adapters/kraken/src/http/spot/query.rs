@@ -57,10 +57,20 @@ pub struct KrakenSpotAddOrderParams {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cl_ord_id: Option<String>,
 
-    /// Order flags (comma-separated: post, ioc, fcib, fciq, nompp, viqc).
+    /// Order flags (comma-separated: post, fcib, fciq, nompp, viqc).
     #[builder(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub oflags: Option<String>,
+
+    /// Time in force: GTC, IOC, GTD.
+    #[builder(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeinforce: Option<String>,
+
+    /// Expiration time for GTD orders (Unix timestamp or "+<seconds>").
+    #[builder(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expiretm: Option<String>,
 
     /// Partner/broker attribution ID.
     #[builder(default)]
@@ -92,6 +102,7 @@ impl KrakenSpotAddOrderParamsBuilder {
 #[builder(setter(into, strip_option))]
 pub struct KrakenSpotCancelOrderParams {
     /// Transaction ID (venue order ID) to cancel.
+    /// Note: The Kraken v0 API uses `txid` as the parameter name.
     #[builder(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub txid: Option<String>,
@@ -102,19 +113,36 @@ pub struct KrakenSpotCancelOrderParams {
     pub cl_ord_id: Option<String>,
 }
 
+/// Parameters for batch cancelling orders via `POST /0/private/CancelOrderBatch`.
+///
+/// # References
+/// - <https://docs.kraken.com/api/docs/rest-api/cancel-order-batch>
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct KrakenSpotCancelOrderBatchParams {
+    /// List of transaction IDs (venue order IDs) or client order IDs to cancel.
+    /// Maximum 50 IDs.
+    pub orders: Vec<String>,
+}
+
 /// Parameters for editing an order via `POST /0/private/EditOrder`.
+///
+/// Note: Consider using `KrakenSpotAmendOrderParams` with `AmendOrder` instead,
+/// which is faster and keeps queue priority.
 ///
 /// # References
 /// - <https://docs.kraken.com/api/docs/rest-api/edit-order>
 #[derive(Clone, Debug, Serialize, Deserialize, Builder)]
 #[builder(setter(into, strip_option))]
 pub struct KrakenSpotEditOrderParams {
+    /// Asset pair (e.g., "XXBTZUSD"). Required.
+    pub pair: Ustr,
+
     /// Transaction ID (venue order ID) of the order to edit.
     #[builder(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub txid: Option<String>,
 
-    /// Client order ID of the order to edit.
+    /// Client order ID of the order to edit. Note: Not supported by Kraken EditOrder.
     #[builder(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cl_ord_id: Option<String>,
@@ -133,6 +161,42 @@ pub struct KrakenSpotEditOrderParams {
     #[builder(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub price2: Option<String>,
+}
+
+/// Parameters for amending an order via `POST /0/private/AmendOrder`.
+///
+/// This is Kraken's atomic amend endpoint which modifies order parameters
+/// in-place without cancelling the original order. Faster and keeps queue priority.
+///
+/// # References
+/// - <https://docs.kraken.com/api/docs/rest-api/amend-order>
+#[derive(Clone, Debug, Serialize, Deserialize, Builder)]
+#[builder(setter(into, strip_option))]
+pub struct KrakenSpotAmendOrderParams {
+    /// Transaction ID (venue order ID) of the order to amend.
+    #[builder(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub txid: Option<String>,
+
+    /// Client order ID of the order to amend.
+    #[builder(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cl_ord_id: Option<String>,
+
+    /// New order quantity in base currency.
+    #[builder(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub order_qty: Option<String>,
+
+    /// New limit price.
+    #[builder(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit_price: Option<String>,
+
+    /// New trigger price for stop/conditional orders.
+    #[builder(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trigger_price: Option<String>,
 }
 
 ////////////////////////////////////////////////////////////////////////////////

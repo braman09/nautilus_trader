@@ -45,7 +45,7 @@ use nautilus_model::{
 use nautilus_network::{
     RECONNECTED,
     retry::{RetryManager, create_websocket_retry_manager},
-    websocket::WebSocketClient,
+    websocket::{SubscriptionState, WebSocketClient},
 };
 use rust_decimal::Decimal;
 use tokio_tungstenite::tungstenite::Message;
@@ -54,23 +54,16 @@ use ustr::Ustr;
 use super::{
     DydxWsError, DydxWsResult,
     client::DYDX_RATE_LIMIT_KEY_SUBSCRIPTION,
-    enums::DydxWsChannel,
+    enums::{DydxWsChannel, DydxWsMessage, NautilusWsMessage},
     error::DydxWebSocketError,
     messages::{
-        DydxWsChannelBatchDataMsg, DydxWsChannelDataMsg, DydxWsConnectedMsg, DydxWsGenericMsg,
-        DydxWsMessage, DydxWsSubscriptionMsg, NautilusWsMessage,
-    },
-    types::{
         DydxCandle, DydxMarketsContents, DydxOrderbookContents, DydxOrderbookSnapshotContents,
-        DydxTradeContents,
+        DydxTradeContents, DydxWsChannelBatchDataMsg, DydxWsChannelDataMsg, DydxWsConnectedMsg,
+        DydxWsGenericMsg, DydxWsSubaccountsChannelContents, DydxWsSubaccountsChannelData,
+        DydxWsSubaccountsSubscribed, DydxWsSubscriptionMsg,
     },
 };
-use crate::{
-    common::parse::parse_instrument_id,
-    schemas::ws::{
-        DydxWsSubaccountsChannelContents, DydxWsSubaccountsChannelData, DydxWsSubaccountsSubscribed,
-    },
-};
+use crate::common::parse::parse_instrument_id;
 
 /// Commands sent to the feed handler.
 #[derive(Debug, Clone)]
@@ -110,6 +103,8 @@ pub struct FeedHandler {
     instruments: AHashMap<Ustr, InstrumentAny>,
     /// Cached bar types by topic (e.g., "BTC-USD/1MIN").
     bar_types: AHashMap<String, BarType>,
+    /// Subscription state shared with the outer client for replay/acks.
+    subscriptions: SubscriptionState,
 }
 
 impl Debug for FeedHandler {
@@ -132,6 +127,7 @@ impl FeedHandler {
         raw_rx: tokio::sync::mpsc::UnboundedReceiver<Message>,
         client: WebSocketClient,
         signal: Arc<AtomicBool>,
+        subscriptions: SubscriptionState,
     ) -> Self {
         Self {
             account_id,
@@ -143,6 +139,7 @@ impl FeedHandler {
             retry_manager: create_websocket_retry_manager(),
             instruments: AHashMap::new(),
             bar_types: AHashMap::new(),
+            subscriptions,
         }
     }
 
@@ -211,6 +208,9 @@ impl FeedHandler {
         match msg {
             Message::Text(txt) => {
                 if txt == RECONNECTED {
+                    if let Err(e) = self.replay_subscriptions().await {
+                        tracing::error!("Failed to replay subscriptions after reconnect: {e}");
+                    }
                     return Some(NautilusWsMessage::Reconnected);
                 }
 
@@ -252,15 +252,18 @@ impl FeedHandler {
                                 } else if meta.is_error() {
                                     serde_json::from_value::<DydxWebSocketError>(val)
                                         .map(DydxWsMessage::Error)
+                                } else if meta.is_unknown() {
+                                    tracing::debug!("Received unknown WebSocket message type");
+                                    Ok(DydxWsMessage::Raw(val))
                                 } else {
                                     Ok(DydxWsMessage::Raw(val))
                                 };
 
                                 match result {
-                                    Ok(dydx_msg) => self.handle_dydx_message(dydx_msg),
+                                    Ok(dydx_msg) => self.handle_dydx_message(dydx_msg).await,
                                     Err(e) => {
-                                        let err = DydxWebSocketError::from_message(e.to_string());
-                                        Some(NautilusWsMessage::Error(err))
+                                        tracing::warn!("Failed to parse WebSocket message: {e}");
+                                        None
                                     }
                                 }
                             }
@@ -288,8 +291,8 @@ impl FeedHandler {
     }
 
     /// Handles a parsed dYdX WebSocket message.
-    fn handle_dydx_message(&self, msg: DydxWsMessage) -> Option<NautilusWsMessage> {
-        match self.handle_message(msg) {
+    async fn handle_dydx_message(&self, msg: DydxWsMessage) -> Option<NautilusWsMessage> {
+        match self.handle_message(msg).await {
             Ok(opt_msg) => opt_msg,
             Err(e) => {
                 tracing::error!("Error handling message: {e}");
@@ -341,13 +344,71 @@ impl FeedHandler {
         self.bar_types.remove(topic);
     }
 
+    fn topic_from_msg(&self, channel: &super::enums::DydxWsChannel, id: &Option<String>) -> String {
+        match id {
+            Some(id) => format!(
+                "{}{}{}",
+                channel.as_ref(),
+                self.subscriptions.delimiter(),
+                id
+            ),
+            None => channel.as_ref().to_string(),
+        }
+    }
+
+    fn subscription_from_topic(
+        &self,
+        topic: &str,
+        op: super::enums::DydxWsOperation,
+    ) -> Option<super::messages::DydxSubscription> {
+        let (channel, symbol) = nautilus_network::websocket::subscription::split_topic(
+            topic,
+            self.subscriptions.delimiter(),
+        );
+        let channel = super::enums::DydxWsChannel::from_str(channel).ok()?;
+        let id = symbol.map(std::string::ToString::to_string);
+
+        Some(super::messages::DydxSubscription { op, channel, id })
+    }
+
+    async fn replay_subscriptions(&self) -> DydxWsResult<()> {
+        let topics = self.subscriptions.all_topics();
+        for topic in topics {
+            let Some(subscription) =
+                self.subscription_from_topic(&topic, super::enums::DydxWsOperation::Subscribe)
+            else {
+                tracing::warn!("Failed to reconstruct subscription from topic: {topic}");
+                continue;
+            };
+
+            let payload = serde_json::to_string(&subscription)?;
+            self.subscriptions.mark_subscribe(&topic);
+
+            if let Err(e) = self
+                .send_with_retry(
+                    payload,
+                    Some(vec![DYDX_RATE_LIMIT_KEY_SUBSCRIPTION.to_string()]),
+                )
+                .await
+            {
+                self.subscriptions.mark_failure(&topic);
+                return Err(e);
+            }
+        }
+
+        Ok(())
+    }
+
     /// Processes a WebSocket message and converts it to Nautilus domain objects.
     ///
     /// # Errors
     ///
     /// Returns an error if message parsing fails.
     #[allow(clippy::result_large_err)]
-    pub fn handle_message(&self, msg: DydxWsMessage) -> DydxWsResult<Option<NautilusWsMessage>> {
+    pub async fn handle_message(
+        &self,
+        msg: DydxWsMessage,
+    ) -> DydxWsResult<Option<NautilusWsMessage>> {
         match msg {
             DydxWsMessage::Connected(_) => {
                 tracing::info!("dYdX WebSocket connected");
@@ -355,20 +416,31 @@ impl FeedHandler {
             }
             DydxWsMessage::Subscribed(sub) => {
                 tracing::debug!("Subscribed to {} (id: {:?})", sub.channel, sub.id);
+                let topic = self.topic_from_msg(&sub.channel, &sub.id);
+                self.subscriptions.confirm_subscribe(&topic);
                 Ok(None)
             }
             DydxWsMessage::SubaccountsSubscribed(msg) => {
                 tracing::debug!("Subaccounts subscribed with initial state");
+                let topic = self.topic_from_msg(&msg.channel, &Some(msg.id.clone()));
+                self.subscriptions.confirm_subscribe(&topic);
                 self.parse_subaccounts_subscribed(&msg)
             }
             DydxWsMessage::Unsubscribed(unsub) => {
                 tracing::debug!("Unsubscribed from {} (id: {:?})", unsub.channel, unsub.id);
+                let topic = self.topic_from_msg(&unsub.channel, &unsub.id);
+                self.subscriptions.confirm_unsubscribe(&topic);
                 Ok(None)
             }
             DydxWsMessage::ChannelData(data) => self.handle_channel_data(data),
             DydxWsMessage::ChannelBatchData(data) => self.handle_channel_batch_data(data),
             DydxWsMessage::Error(err) => Ok(Some(NautilusWsMessage::Error(err))),
-            DydxWsMessage::Reconnected => Ok(Some(NautilusWsMessage::Reconnected)),
+            DydxWsMessage::Reconnected => {
+                if let Err(e) = self.replay_subscriptions().await {
+                    tracing::error!("Failed to replay subscriptions after reconnect message: {e}");
+                }
+                Ok(Some(NautilusWsMessage::Reconnected))
+            }
             DydxWsMessage::Pong => Ok(None),
             DydxWsMessage::Raw(_) => Ok(None),
         }
@@ -383,9 +455,15 @@ impl FeedHandler {
             DydxWsChannel::Orderbook => self.parse_orderbook(&data, false),
             DydxWsChannel::Candles => self.parse_candles(&data),
             DydxWsChannel::Markets => self.parse_markets(&data),
-            DydxWsChannel::Subaccounts => self.parse_subaccounts(&data),
+            DydxWsChannel::Subaccounts | DydxWsChannel::ParentSubaccounts => {
+                self.parse_subaccounts(&data)
+            }
             DydxWsChannel::BlockHeight => {
                 tracing::debug!("Block height update received");
+                Ok(None)
+            }
+            DydxWsChannel::Unknown => {
+                tracing::debug!("Unknown channel data received");
                 Ok(None)
             }
         }

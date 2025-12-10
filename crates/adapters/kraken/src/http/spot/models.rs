@@ -21,7 +21,7 @@ use ustr::Ustr;
 
 use crate::common::enums::{
     KrakenAssetClass, KrakenOrderSide, KrakenOrderStatus, KrakenOrderType, KrakenPairStatus,
-    KrakenSystemStatus,
+    KrakenSpotTrigger, KrakenSystemStatus,
 };
 
 /// Wrapper for Kraken API responses.
@@ -224,7 +224,7 @@ pub struct SpotOrder {
     pub price: String,
     pub stopprice: Option<String>,
     pub limitprice: Option<String>,
-    pub trigger: Option<String>,
+    pub trigger: Option<KrakenSpotTrigger>,
     pub misc: String,
     pub oflags: String,
     #[serde(default)]
@@ -239,6 +239,9 @@ pub struct SpotOrder {
     pub cl_ord_id: Option<String>,
     #[serde(default)]
     pub amended: Option<bool>,
+    /// Average fill price (if returned by the API)
+    #[serde(default)]
+    pub avg_price: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -314,6 +317,11 @@ pub struct SpotCancelOrderResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpotCancelOrderBatchResponse {
+    pub count: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpotEditOrderResponse {
     pub descr: Option<AddOrderDescription>,
     pub txid: Option<String>,
@@ -327,6 +335,13 @@ pub struct SpotEditOrderResponse {
     pub price2: Option<String>,
     #[serde(default)]
     pub orders_cancelled: Option<i32>,
+}
+
+/// Response from `POST /0/private/AmendOrder`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpotAmendOrderResponse {
+    /// The amend transaction ID.
+    pub amend_id: String,
 }
 
 ////////////////////////////////////////////////////////////////////////////////

@@ -335,6 +335,156 @@ impl ExecutionClient for OKXExecutionClient {
         self.core.get_account()
     }
 
+    async fn connect(&mut self) -> anyhow::Result<()> {
+        if self.connected.load(Ordering::Acquire) {
+            return Ok(());
+        }
+
+        // Initialize exec event sender (must be done in async context after runner is set up)
+        if self.exec_event_sender.is_none() {
+            self.exec_event_sender = Some(get_exec_event_sender());
+        }
+
+        let instrument_types = self.instrument_types();
+
+        if !self.instruments_initialized.load(Ordering::Acquire) {
+            let mut all_instruments = Vec::new();
+            for instrument_type in &instrument_types {
+                let instruments = self
+                    .http_client
+                    .request_instruments(*instrument_type, None)
+                    .await
+                    .with_context(|| {
+                        format!("failed to request OKX instruments for {instrument_type:?}")
+                    })?;
+
+                if instruments.is_empty() {
+                    tracing::warn!("No instruments returned for {instrument_type:?}");
+                    continue;
+                }
+
+                self.http_client.cache_instruments(instruments.clone());
+                all_instruments.extend(instruments);
+            }
+
+            if !all_instruments.is_empty() {
+                self.ws_private.cache_instruments(all_instruments);
+            }
+            self.instruments_initialized.store(true, Ordering::Release);
+        }
+
+        let Some(sender) = self.exec_event_sender.as_ref() else {
+            tracing::error!("Execution event sender not initialized");
+            anyhow::bail!("Execution event sender not initialized");
+        };
+
+        self.ws_private.connect().await?;
+        self.ws_private.wait_until_active(10.0).await?;
+
+        if self.ws_stream_handle.is_none() {
+            let stream = self.ws_private.stream();
+            let sender = sender.clone();
+            let handle = tokio::spawn(async move {
+                pin_mut!(stream);
+                while let Some(message) = stream.next().await {
+                    dispatch_ws_message(message, &sender);
+                }
+            });
+            self.ws_stream_handle = Some(handle);
+        }
+
+        self.ws_business.connect().await?;
+        self.ws_business.wait_until_active(10.0).await?;
+
+        if self.ws_business_stream_handle.is_none() {
+            let stream = self.ws_business.stream();
+            let sender = sender.clone();
+            let handle = tokio::spawn(async move {
+                pin_mut!(stream);
+                while let Some(message) = stream.next().await {
+                    dispatch_ws_message(message, &sender);
+                }
+            });
+            self.ws_business_stream_handle = Some(handle);
+        }
+
+        for inst_type in &instrument_types {
+            tracing::info!(
+                "Subscribing to channels for instrument type: {:?}",
+                inst_type
+            );
+            self.ws_private.subscribe_orders(*inst_type).await?;
+
+            if self.config.use_fills_channel
+                && let Err(e) = self.ws_private.subscribe_fills(*inst_type).await
+            {
+                tracing::warn!("Failed to subscribe to fills channel ({inst_type:?}): {e}");
+            }
+        }
+
+        self.ws_private.subscribe_account().await?;
+
+        // Subscribe to algo orders on business WebSocket (OKX requires this endpoint)
+        for inst_type in &instrument_types {
+            if *inst_type != OKXInstrumentType::Option {
+                self.ws_business.subscribe_orders_algo(*inst_type).await?;
+            }
+        }
+
+        let account_state = self
+            .http_client
+            .request_account_state(self.core.account_id)
+            .await
+            .context("failed to request OKX account state")?;
+
+        dispatch_account_state(account_state, sender);
+
+        self.connected.store(true, Ordering::Release);
+        tracing::info!(client_id = %self.core.client_id, "Connected");
+        Ok(())
+    }
+
+    async fn disconnect(&mut self) -> anyhow::Result<()> {
+        if !self.connected.load(Ordering::Acquire) {
+            return Ok(());
+        }
+
+        self.abort_pending_tasks();
+        self.http_client.cancel_all_requests();
+
+        if let Err(e) = self.ws_private.close().await {
+            tracing::warn!("Error closing private websocket: {e:?}");
+        }
+
+        if let Err(e) = self.ws_business.close().await {
+            tracing::warn!("Error closing business websocket: {e:?}");
+        }
+
+        if let Some(handle) = self.ws_stream_handle.take() {
+            handle.abort();
+        }
+
+        if let Some(handle) = self.ws_business_stream_handle.take() {
+            handle.abort();
+        }
+
+        self.connected.store(false, Ordering::Release);
+        tracing::info!(client_id = %self.core.client_id, "Disconnected");
+        Ok(())
+    }
+
+    fn query_account(&self, _cmd: &QueryAccount) -> anyhow::Result<()> {
+        self.update_account_state()
+    }
+
+    fn query_order(&self, cmd: &QueryOrder) -> anyhow::Result<()> {
+        tracing::debug!(
+            "query_order not implemented for OKX execution client (client_order_id={})",
+            cmd.client_order_id
+        );
+        Ok(())
+    }
+
     fn generate_account_state(
         &self,
         balances: Vec<AccountBalance>,
@@ -384,7 +534,7 @@ impl ExecutionClient for OKXExecutionClient {
                 );
             } else {
                 ws_private.cache_instruments(all_instruments);
-                tracing::info!("OKX execution client instruments initialized");
+                tracing::info!("Instruments initialized");
             }
         });
 
@@ -398,7 +548,7 @@ impl ExecutionClient for OKXExecutionClient {
             is_demo = self.config.is_demo,
             http_proxy_url = ?self.config.http_proxy_url,
             ws_proxy_url = ?self.config.ws_proxy_url,
-            "OKX execution client started"
+            "Started"
         );
         Ok(())
     }
@@ -414,7 +564,7 @@ impl ExecutionClient for OKXExecutionClient {
             handle.abort();
         }
         self.abort_pending_tasks();
-        tracing::info!("OKX execution client {} stopped", self.core.client_id);
+        tracing::info!(client_id = %self.core.client_id, "Stopped");
         Ok(())
     }
 
@@ -422,7 +572,8 @@ impl ExecutionClient for OKXExecutionClient {
         let order = &cmd.order;
 
         if order.is_closed() {
-            tracing::warn!("Cannot submit closed order {}", order.client_order_id());
+            let client_order_id = order.client_order_id();
+            tracing::warn!("Cannot submit closed order {client_order_id}");
             return Ok(());
         }
 
@@ -436,10 +587,13 @@ impl ExecutionClient for OKXExecutionClient {
             cmd.ts_init,
             get_atomic_clock_realtime().get_time_ns(),
         );
-        if let Some(sender) = &self.exec_event_sender
-            && let Err(e) = sender.send(ExecutionEvent::Order(OrderEventAny::Submitted(event)))
-        {
-            tracing::warn!("Failed to send OrderSubmitted event: {e}");
+        if let Some(sender) = &self.exec_event_sender {
+            tracing::debug!("OrderSubmitted client_order_id={}", order.client_order_id());
+            if let Err(e) = sender.send(ExecutionEvent::Order(OrderEventAny::Submitted(event))) {
+                tracing::warn!("Failed to send OrderSubmitted event: {e}");
+            }
+        } else {
+            tracing::warn!("Cannot send OrderSubmitted: exec_event_sender not initialized");
         }
 
         let result = if self.is_conditional_order(order.order_type()) {
@@ -462,12 +616,14 @@ impl ExecutionClient for OKXExecutionClient {
                 false,
                 false,
             );
-            if let Some(sender) = &self.exec_event_sender
-                && let Err(e) = sender.send(ExecutionEvent::Order(OrderEventAny::Rejected(
+            if let Some(sender) = &self.exec_event_sender {
+                if let Err(e) = sender.send(ExecutionEvent::Order(OrderEventAny::Rejected(
                     rejected_event,
-                )))
-            {
-                tracing::warn!("Failed to send OrderRejected event: {e}");
+                ))) {
+                    tracing::warn!("Failed to send OrderRejected event: {e}");
+                }
+            } else {
+                tracing::warn!("Cannot send OrderRejected: exec_event_sender not initialized");
             }
             return Err(e);
         }
@@ -510,7 +666,43 @@ impl ExecutionClient for OKXExecutionClient {
     }
 
     fn cancel_all_orders(&self, cmd: &CancelAllOrders) -> anyhow::Result<()> {
-        self.mass_cancel_instrument(cmd.instrument_id)
+        if self.config.use_mm_mass_cancel {
+            // Use OKX's mass-cancel endpoint (requires market maker permissions)
+            self.mass_cancel_instrument(cmd.instrument_id)
+        } else {
+            // Cancel orders individually via batch cancel (works for all users)
+            let cache = self.core.cache().borrow();
+            let open_orders = cache.orders_open(None, Some(&cmd.instrument_id), None, None);
+
+            if open_orders.is_empty() {
+                tracing::debug!("No open orders to cancel for {}", cmd.instrument_id);
+                return Ok(());
+            }
+
+            let mut payload = Vec::with_capacity(open_orders.len());
+            for order in open_orders {
+                payload.push((
+                    order.instrument_id(),
+                    Some(order.client_order_id()),
+                    order.venue_order_id(),
+                ));
+            }
+            drop(cache);
+
+            tracing::info!(
+                "Canceling {} open orders for {} via batch cancel",
+                payload.len(),
+                cmd.instrument_id
+            );
+
+            let ws_private = self.ws_private.clone();
+            self.spawn_task("batch_cancel_orders", async move {
+                ws_private.batch_cancel_orders(payload).await?;
+                Ok(())
+            });
+
+            Ok(())
+        }
     }
 
     fn batch_cancel_orders(&self, cmd: &BatchCancelOrders) -> anyhow::Result<()> {
@@ -530,156 +722,6 @@ impl ExecutionClient for OKXExecutionClient {
             Ok(())
         });
 
-        Ok(())
-    }
-
-    fn query_account(&self, _cmd: &QueryAccount) -> anyhow::Result<()> {
-        self.update_account_state()
-    }
-
-    fn query_order(&self, cmd: &QueryOrder) -> anyhow::Result<()> {
-        tracing::debug!(
-            "query_order not implemented for OKX execution client (client_order_id={})",
-            cmd.client_order_id
-        );
-        Ok(())
-    }
-
-    async fn connect(&mut self) -> anyhow::Result<()> {
-        if self.connected.load(Ordering::Acquire) {
-            return Ok(());
-        }
-
-        // Initialize exec event sender (must be done in async context after runner is set up)
-        if self.exec_event_sender.is_none() {
-            self.exec_event_sender = Some(get_exec_event_sender());
-        }
-
-        let instrument_types = self.instrument_types();
-
-        if !self.instruments_initialized.load(Ordering::Acquire) {
-            let mut all_instruments = Vec::new();
-            for instrument_type in &instrument_types {
-                let instruments = self
-                    .http_client
-                    .request_instruments(*instrument_type, None)
-                    .await
-                    .with_context(|| {
-                        format!("failed to request OKX instruments for {instrument_type:?}")
-                    })?;
-
-                if instruments.is_empty() {
-                    tracing::warn!("No instruments returned for {instrument_type:?}");
-                    continue;
-                }
-
-                self.http_client.cache_instruments(instruments.clone());
-                all_instruments.extend(instruments);
-            }
-
-            if !all_instruments.is_empty() {
-                self.ws_private.cache_instruments(all_instruments);
-            }
-            self.instruments_initialized.store(true, Ordering::Release);
-        }
-
-        self.ws_private.connect().await?;
-        self.ws_private.wait_until_active(10.0).await?;
-
-        for inst_type in &instrument_types {
-            tracing::info!(
-                "Subscribing to channels for instrument type: {:?}",
-                inst_type
-            );
-            self.ws_private.subscribe_orders(*inst_type).await?;
-
-            if self.config.use_fills_channel
-                && let Err(e) = self.ws_private.subscribe_fills(*inst_type).await
-            {
-                tracing::warn!("Failed to subscribe to fills channel ({inst_type:?}): {e}");
-            }
-        }
-
-        self.ws_private.subscribe_account().await?;
-
-        self.ws_business.connect().await?;
-        self.ws_business.wait_until_active(10.0).await?;
-
-        // Subscribe to algo orders on business WebSocket (OKX requires this endpoint)
-        for inst_type in &instrument_types {
-            if *inst_type != OKXInstrumentType::Option {
-                self.ws_business.subscribe_orders_algo(*inst_type).await?;
-            }
-        }
-
-        let Some(sender) = self.exec_event_sender.as_ref() else {
-            tracing::error!("Execution event sender not initialized");
-            anyhow::bail!("Execution event sender not initialized");
-        };
-
-        if self.ws_stream_handle.is_none() {
-            let stream = self.ws_private.stream();
-            let sender = sender.clone();
-            let handle = tokio::spawn(async move {
-                pin_mut!(stream);
-                while let Some(message) = stream.next().await {
-                    dispatch_ws_message(message, &sender);
-                }
-            });
-            self.ws_stream_handle = Some(handle);
-        }
-
-        if self.ws_business_stream_handle.is_none() {
-            let stream = self.ws_business.stream();
-            let sender = sender.clone();
-            let handle = tokio::spawn(async move {
-                pin_mut!(stream);
-                while let Some(message) = stream.next().await {
-                    dispatch_ws_message(message, &sender);
-                }
-            });
-            self.ws_business_stream_handle = Some(handle);
-        }
-
-        let account_state = self
-            .http_client
-            .request_account_state(self.core.account_id)
-            .await
-            .context("failed to request OKX account state")?;
-
-        dispatch_account_state(account_state, sender);
-
-        self.connected.store(true, Ordering::Release);
-        tracing::info!(client_id = %self.core.client_id, "Connected");
-        Ok(())
-    }
-
-    async fn disconnect(&mut self) -> anyhow::Result<()> {
-        if !self.connected.load(Ordering::Acquire) {
-            return Ok(());
-        }
-
-        self.abort_pending_tasks();
-        self.http_client.cancel_all_requests();
-
-        if let Err(e) = self.ws_private.close().await {
-            tracing::warn!("Error while closing OKX private websocket: {e:?}");
-        }
-
-        if let Err(e) = self.ws_business.close().await {
-            tracing::warn!("Error while closing OKX business websocket: {e:?}");
-        }
-
-        if let Some(handle) = self.ws_stream_handle.take() {
-            handle.abort();
-        }
-
-        if let Some(handle) = self.ws_business_stream_handle.take() {
-            handle.abort();
-        }
-
-        self.connected.store(false, Ordering::Release);
-        tracing::info!(client_id = %self.core.client_id, "Disconnected");
         Ok(())
     }
 }
@@ -876,9 +918,20 @@ fn dispatch_ws_message(
             dispatch_position_status_report(report, sender);
         }
         NautilusWsMessage::ExecutionReports(reports) => {
+            tracing::debug!("Processing {} execution report(s)", reports.len());
             for report in reports {
                 dispatch_execution_report(report, sender);
             }
+        }
+        NautilusWsMessage::OrderAccepted(event) => {
+            tracing::info!("OrderAccepted client_order_id={}", event.client_order_id);
+            dispatch_order_event(OrderEventAny::Accepted(event), sender);
+        }
+        NautilusWsMessage::OrderCanceled(event) => {
+            dispatch_order_event(OrderEventAny::Canceled(event), sender);
+        }
+        NautilusWsMessage::OrderExpired(event) => {
+            dispatch_order_event(OrderEventAny::Expired(event), sender);
         }
         NautilusWsMessage::OrderRejected(event) => {
             dispatch_order_event(OrderEventAny::Rejected(event), sender);
@@ -889,26 +942,32 @@ fn dispatch_ws_message(
         NautilusWsMessage::OrderModifyRejected(event) => {
             dispatch_order_event(OrderEventAny::ModifyRejected(event), sender);
         }
+        NautilusWsMessage::OrderTriggered(event) => {
+            dispatch_order_event(OrderEventAny::Triggered(event), sender);
+        }
+        NautilusWsMessage::OrderUpdated(event) => {
+            dispatch_order_event(OrderEventAny::Updated(event), sender);
+        }
         NautilusWsMessage::Error(e) => {
             tracing::warn!(
-                "OKX websocket error: code={} message={} conn_id={:?}",
+                "Websocket error: code={} message={} conn_id={:?}",
                 e.code,
                 e.message,
                 e.conn_id
             );
         }
         NautilusWsMessage::Reconnected => {
-            tracing::info!("OKX websocket reconnected");
+            tracing::info!("Websocket reconnected");
         }
         NautilusWsMessage::Authenticated => {
-            tracing::debug!("OKX websocket authenticated");
+            tracing::debug!("Websocket authenticated");
         }
         NautilusWsMessage::Deltas(_)
         | NautilusWsMessage::Raw(_)
         | NautilusWsMessage::Data(_)
         | NautilusWsMessage::FundingRates(_)
         | NautilusWsMessage::Instrument(_) => {
-            tracing::debug!("Ignoring OKX websocket data message");
+            tracing::debug!("Ignoring websocket data message");
         }
     }
 }

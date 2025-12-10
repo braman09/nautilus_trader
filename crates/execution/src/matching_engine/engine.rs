@@ -352,8 +352,12 @@ impl OrderMatchingEngine {
     }
 
     fn process_trade_ticks_from_bar(&mut self, bar: &Bar) {
-        // Split the bar into 4 trades with quarter volume
-        let size = Quantity::new(bar.volume.as_f64() / 4.0, bar.volume.precision);
+        // Split the bar into 4 trades, adding remainder to close trade
+        let quarter_raw = bar.volume.raw / 4;
+        let remainder_raw = bar.volume.raw % 4;
+        let size = Quantity::from_raw(quarter_raw, bar.volume.precision);
+        let close_size = Quantity::from_raw(quarter_raw + remainder_raw, bar.volume.precision);
+
         let aggressor_side = if !self.core.is_last_initialized || bar.open > self.core.last.unwrap()
         {
             AggressorSide::Buyer
@@ -413,6 +417,7 @@ impl OrderMatchingEngine {
         // Assumption: if close price is lower then last, aggressor is seller
         if self.core.last.is_some_and(|last| bar.close != last) {
             trade_tick.price = bar.close;
+            trade_tick.size = close_size;
             trade_tick.aggressor_side = if bar.close > self.core.last.unwrap() {
                 AggressorSide::Buyer
             } else {
@@ -437,8 +442,17 @@ impl OrderMatchingEngine {
         }
         let bid_bar = self.last_bar_bid.unwrap();
         let ask_bar = self.last_bar_ask.unwrap();
-        let bid_size = Quantity::new(bid_bar.volume.as_f64() / 4.0, bar.volume.precision);
-        let ask_size = Quantity::new(ask_bar.volume.as_f64() / 4.0, bar.volume.precision);
+
+        // Split bar volume into 4, adding remainder to close quote
+        let bid_quarter = bid_bar.volume.raw / 4;
+        let bid_remainder = bid_bar.volume.raw % 4;
+        let ask_quarter = ask_bar.volume.raw / 4;
+        let ask_remainder = ask_bar.volume.raw % 4;
+
+        let bid_size = Quantity::from_raw(bid_quarter, bar.volume.precision);
+        let ask_size = Quantity::from_raw(ask_quarter, bar.volume.precision);
+        let bid_close_size = Quantity::from_raw(bid_quarter + bid_remainder, bar.volume.precision);
+        let ask_close_size = Quantity::from_raw(ask_quarter + ask_remainder, bar.volume.precision);
 
         // Create reusable quote tick
         let mut quote_tick = QuoteTick::new(
@@ -470,6 +484,8 @@ impl OrderMatchingEngine {
         // Close
         quote_tick.bid_price = bid_bar.close;
         quote_tick.ask_price = ask_bar.close;
+        quote_tick.bid_size = bid_close_size;
+        quote_tick.ask_size = ask_close_size;
         self.book.update_quote_tick(&quote_tick).unwrap();
         self.iterate(quote_tick.ts_init);
 
@@ -1756,7 +1772,8 @@ impl OrderMatchingEngine {
     ) {
         match self.cached_filled_qty.get(&order.client_order_id()) {
             Some(filled_qty) => {
-                let leaves_qty = order.quantity() - *filled_qty;
+                // Use saturating_sub to prevent panic if filled_qty > quantity
+                let leaves_qty = order.quantity().saturating_sub(*filled_qty);
                 let last_qty = min(last_qty, leaves_qty);
                 let new_filled_qty = *filled_qty + last_qty;
                 // update cached filled qty
@@ -2294,6 +2311,27 @@ impl OrderMatchingEngine {
         let update_contingencies = update_contingencies.unwrap_or(true);
         let quantity = quantity.unwrap_or(order.quantity());
 
+        // Use cached_filled_qty since PassiveOrderAny in core is not updated with fills
+        let filled_qty = self
+            .cached_filled_qty
+            .get(&order.client_order_id())
+            .copied()
+            .unwrap_or(order.filled_qty());
+        if quantity < filled_qty {
+            self.generate_order_modify_rejected(
+                order.trader_id(),
+                order.strategy_id(),
+                order.instrument_id(),
+                order.client_order_id(),
+                Ustr::from(&format!(
+                    "Cannot reduce order quantity {quantity} below filled quantity {filled_qty}",
+                )),
+                order.venue_order_id(),
+                order.account_id(),
+            );
+            return;
+        }
+
         match order {
             OrderAny::Limit(_) | OrderAny::MarketToLimit(_) => {
                 let price = price.unwrap_or(order.price().unwrap());
@@ -2335,6 +2373,22 @@ impl OrderMatchingEngine {
             }
         }
 
+        // If order now has zero leaves after update, cancel it
+        let new_leaves_qty = quantity.saturating_sub(filled_qty);
+        if new_leaves_qty.is_zero() {
+            if self.config.support_contingent_orders
+                && order
+                    .contingency_type()
+                    .is_some_and(|c| c != ContingencyType::NoContingency)
+                && update_contingencies
+            {
+                self.update_contingent_order(order);
+            }
+            // Pass false since we already handled contingents above
+            self.cancel_order(order, Some(false));
+            return;
+        }
+
         if self.config.support_contingent_orders
             && order
                 .contingency_type()
@@ -2352,6 +2406,13 @@ impl OrderMatchingEngine {
     fn update_contingent_order(&mut self, order: &OrderAny) {
         log::debug!("Updating OUO orders from {}", order.client_order_id());
         if let Some(linked_order_ids) = order.linked_order_ids() {
+            let parent_filled_qty = self
+                .cached_filled_qty
+                .get(&order.client_order_id())
+                .copied()
+                .unwrap_or(order.filled_qty());
+            let parent_leaves_qty = order.quantity().saturating_sub(parent_filled_qty);
+
             for client_order_id in linked_order_ids {
                 let mut child_order = match self.cache.borrow().order(client_order_id) {
                     Some(order) => order.clone(),
@@ -2362,18 +2423,30 @@ impl OrderMatchingEngine {
                     continue;
                 }
 
-                if order.leaves_qty().is_zero() {
-                    self.cancel_order(&child_order, None);
-                } else if child_order.leaves_qty() != order.leaves_qty() {
-                    let price = child_order.price();
-                    let trigger_price = child_order.trigger_price();
-                    self.update_order(
-                        &mut child_order,
-                        Some(order.leaves_qty()),
-                        price,
-                        trigger_price,
-                        Some(false),
-                    );
+                let child_filled_qty = self
+                    .cached_filled_qty
+                    .get(&child_order.client_order_id())
+                    .copied()
+                    .unwrap_or(child_order.filled_qty());
+
+                if parent_leaves_qty.is_zero() {
+                    self.cancel_order(&child_order, Some(false));
+                } else if child_filled_qty >= parent_leaves_qty {
+                    // Child already filled beyond parent's remaining qty, cancel it
+                    self.cancel_order(&child_order, Some(false));
+                } else {
+                    let child_leaves_qty = child_order.quantity().saturating_sub(child_filled_qty);
+                    if child_leaves_qty != parent_leaves_qty {
+                        let price = child_order.price();
+                        let trigger_price = child_order.trigger_price();
+                        self.update_order(
+                            &mut child_order,
+                            Some(parent_leaves_qty),
+                            price,
+                            trigger_price,
+                            Some(false),
+                        );
+                    }
                 }
             }
         }
