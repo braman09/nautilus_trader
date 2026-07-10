@@ -1,10 +1,9 @@
 # Strategies
 
-The heart of the NautilusTrader user experience is in writing and working with
-trading strategies. Defining a strategy involves inheriting the `Strategy` class and
-implementing the methods required by the strategy's logic.
+A strategy inherits the `Strategy` class and implements
+the methods its logic requires.
 
-**Key capabilities**:
+**Capabilities**:
 
 - All `Actor` capabilities.
 - Order management.
@@ -17,17 +16,14 @@ plus order management capabilities.
 We recommend reviewing the [Actors](actors.md) guide before diving into strategy development.
 :::
 
-Strategies can be added to Nautilus systems in any [environment contexts](/concepts/architecture.md#environment-contexts) and will start sending commands and receiving
+Strategies can be added to Nautilus systems in any [environment contexts](architecture.md#environment-contexts) and will start sending commands and receiving
 events based on their logic as soon as the system starts.
 
-Using the basic building blocks of data ingest, event handling, and order management (which we will discuss
-below), it's possible to implement any type of strategy including directional, momentum, re-balancing,
-pairs, market making etc.
+With these building blocks of data ingest, event handling, and order management (discussed below),
+you can build any type of strategy including directional, momentum, re-balancing,
+pairs, market making, etc.
 
-:::info
-See the `Strategy` [API Reference](../api_reference/trading.md) for a complete description
-of all available methods.
-:::
+See the [`Strategy` API Reference](/docs/python-api-latest/trading.html) for all available methods.
 
 There are two main parts of a Nautilus trading strategy:
 
@@ -47,10 +43,20 @@ The main capabilities of a strategy include:
 - Portfolio access.
 - Creating and managing orders and positions.
 
+:::info Rust implementation
+Rust strategy authors implement the `DataActor` callbacks they need and use
+`nautilus_strategy!` to generate the `Strategy` implementation, then call facade
+methods such as `clock()`, `cache()`, `order()`, and `portfolio()` on `self`.
+`DataActorNative` is native-only access to runtime wiring and actor-core state;
+`StrategyNative` exposes borrowed strategy state such as order factory, order
+manager, and portfolio access. Import them only for same-binary performance
+paths or internal runtime wiring.
+:::
+
 ## Strategy implementation
 
-Since a trading strategy is a class which inherits from `Strategy`, you must define
-a constructor where you can handle initialization. Minimally the base/super class needs to be initialized:
+A trading strategy inherits from `Strategy`, so you must define a constructor.
+At minimum, initialize the base class:
 
 ```python
 from nautilus_trader.trading.strategy import Strategy
@@ -70,18 +76,17 @@ This is because the systems clock and logging subsystem have not yet been initia
 
 ### Handlers
 
-Handlers are methods within the `Strategy` class which may perform actions based on different types of events or on state changes.
-These methods are named with the prefix `on_*`. You can choose to implement any or all of these handler
-methods depending on the specific goals and needs of your strategy.
+Handlers are methods on the `Strategy` class that perform actions based on events or state changes.
+These methods use the `on_*` prefix. Implement any or all of them as your strategy requires.
 
-The purpose of having multiple handlers for similar types of events is to provide flexibility in handling granularity.
-This means that you can choose to respond to specific events with a dedicated handler, or use a more generic
-handler to react to a range of related events (using typical switch statement logic).
-The handlers are called in sequence from the most specific to the most general.
+Multiple handlers exist for similar event types to give you control over granularity.
+Respond to a specific event with a dedicated handler, or use a generic handler for a range
+of related events (using typical switch statement logic).
+The system calls handlers in sequence from most specific to most general.
 
 #### Stateful actions
 
-These handlers are triggered by lifecycle state changes of the `Strategy`. It's recommended to:
+Lifecycle state changes trigger these handlers. Recommendations:
 
 - Use the `on_start` method to initialize your strategy (e.g., fetch instruments, subscribe to data).
 - Use the `on_stop` method for cleanup tasks (e.g., cancel open orders, close open positions, unsubscribe from data).
@@ -101,7 +106,6 @@ def on_load(self, state: dict[str, bytes]) -> None:
 #### Data handling
 
 These handlers receive data updates, including built-in market data and custom user-defined data.
-You can use these handlers to define actions upon receiving data object instances.
 
 ```python
 from nautilus_trader.core import Data
@@ -112,6 +116,8 @@ from nautilus_trader.model import TradeTick
 from nautilus_trader.model import OrderBookDeltas
 from nautilus_trader.model import InstrumentClose
 from nautilus_trader.model import InstrumentStatus
+from nautilus_trader.model import OptionChainSlice
+from nautilus_trader.model import OptionGreeks
 from nautilus_trader.model.instruments import Instrument
 
 def on_order_book_deltas(self, deltas: OrderBookDeltas) -> None:
@@ -122,6 +128,8 @@ def on_bar(self, bar: Bar) -> None:
 def on_instrument(self, instrument: Instrument) -> None:
 def on_instrument_status(self, data: InstrumentStatus) -> None:
 def on_instrument_close(self, data: InstrumentClose) -> None:
+def on_option_greeks(self, greeks: OptionGreeks) -> None:
+def on_option_chain(self, chain: OptionChainSlice) -> None:
 def on_historical_data(self, data: Data) -> None:
 def on_data(self, data: Data) -> None:  # Custom data passed to this handler
 def on_signal(self, signal: Data) -> None:  # Custom signals passed to this handler
@@ -215,6 +223,9 @@ Here we can see the following:
 - Historical data being requested (to hydrate the indicators).
 - Live data being subscribed to.
 
+The cache check matters in live trading. Direct subscriptions assume the instrument was
+loaded by the instrument provider config or by an earlier instrument request.
+
 ```python
 def on_start(self) -> None:
     """
@@ -230,22 +241,25 @@ def on_start(self) -> None:
     self.register_indicator_for_bars(self.bar_type, self.fast_ema)
     self.register_indicator_for_bars(self.bar_type, self.slow_ema)
 
-    # Get historical data
-    self.request_bars(self.bar_type)
-
-    # Subscribe to live data
-    self.subscribe_bars(self.bar_type)
+    # Get historical data and subscribe to live data
+    self.request_bars(
+        self.bar_type,
+        callback=lambda _: self.subscribe_bars(self.bar_type),
+    )
     self.subscribe_quote_ticks(self.instrument_id)
 ```
+
+Live bars are subscribed via the `request_bars()` `callback` so the stream starts only
+once history has loaded; see
+[Working with bars: request vs. subscribe](data/index.md#working-with-bars-request-vs-subscribe)
+for why this matters under `validate_data_sequence=True`.
 
 ### Clock and timers
 
 Strategies have access to a `Clock` which provides a number of methods for creating
 different timestamps, as well as setting time alerts or timers to trigger `TimeEvent`s.
 
-:::info
-See the `Clock` [API reference](../api_reference/common.md) for a complete list of available methods.
-:::
+See the [`Clock` API Reference](/docs/python-api-latest/common.html) for all available methods.
 
 #### Current timestamps
 
@@ -302,12 +316,12 @@ self.clock.set_timer(
 
 ### Cache access
 
-The trader instances central `Cache` can be accessed to fetch data and execution objects (orders, positions etc).
-There are many methods available often with filtering functionality, here we go through some basic use cases.
+The trader's central `Cache` stores data and execution objects (orders, positions, etc).
+Many methods are available with filtering. Here are some basic use cases.
 
 #### Fetching data
 
-The following example shows how data can be fetched from the cache (assuming some instrument ID attribute is assigned).
+The following example fetches data from the cache (assuming some instrument ID attribute is assigned).
 These methods return `None` if the requested data is not available.
 
 ```python
@@ -323,17 +337,13 @@ The following example shows how individual order and position objects can be fet
 ```python
 order = self.cache.order(client_order_id)
 position = self.cache.position(position_id)
-
 ```
 
-:::info
-See the `Cache` [API Reference](../api_reference/cache.md) for a complete description
-of all available methods.
-:::
+See the [`Cache` API Reference](/docs/python-api-latest/cache.html) for all available methods.
 
 ### Portfolio access
 
-The traders central `Portfolio` can be accessed to fetch account and positional information.
+The trader's central `Portfolio` provides account and positional information.
 The following shows a general outline of available methods.
 
 #### Account and positional information
@@ -367,36 +377,20 @@ def is_flat(self, instrument_id: InstrumentId) -> bool
 def is_completely_flat(self) -> bool
 ```
 
-:::info
-See the `Portfolio` [API Reference](../api_reference/portfolio.md) for a complete description
-of all available methods.
-:::
+See the [`Portfolio` API Reference](/docs/python-api-latest/portfolio.html) for all available methods.
 
 #### Reports and analysis
 
-The `Portfolio` also makes a `PortfolioAnalyzer` available, which can be fed with a flexible amount of data
-(to accommodate different lookback windows). The analyzer can provide tracking for and generating of performance
+The `Portfolio` also exposes a `PortfolioAnalyzer`, which accepts a flexible amount of data
+(to accommodate different lookback windows). The analyzer tracks and generates performance
 metrics and statistics.
 
-:::info
-See the `PortfolioAnalyzer` [API Reference](../api_reference/analysis.md) for a complete description
-of all available methods.
-:::
-
-:::info
-See the [Portfolio statistics](portfolio.md#portfolio-statistics) guide.
-:::
+See the [`PortfolioAnalyzer` API Reference](/docs/python-api-latest/analysis.html) and [Portfolio statistics](portfolio.md#portfolio-statistics) guide.
 
 ### Trading commands
 
-NautilusTrader offers a comprehensive suite of trading commands, enabling granular order management
-tailored for algorithmic trading. These commands are essential for executing strategies, managing risk,
-and ensuring seamless interaction with various trading venues. In the following sections, we will
-delve into the specifics of each command and its use cases.
-
-:::info
-The [Execution](../concepts/execution.md) guide explains the flow through the system, and can be helpful to read in conjunction with the below.
-:::
+The following trading commands are available for order management.
+See also the [Execution](../concepts/execution.md) guide for the full flow through the system.
 
 #### Submitting orders
 
@@ -410,7 +404,7 @@ The component a `SubmitOrder` or `SubmitOrderList` command will flow to for exec
 - If an `exec_algorithm_id` is specified (with no `emulation_trigger`), the command will *firstly* be sent to the relevant `ExecAlgorithm`.
 - Otherwise, the command will *firstly* be sent to the `RiskEngine`.
 
-This example submits a `LIMIT` BUY order for emulation (see [Emulated Orders](orders.md#emulated-orders)):
+This example submits a `LIMIT` BUY order for emulation (see [Emulated Orders](orders/emulated.md)):
 
 ```python
 from nautilus_trader.model.enums import OrderSide
@@ -483,9 +477,7 @@ Any managed GTD timer will also be canceled after the command has left the strat
 The following shows how to cancel an individual order:
 
 ```python
-
 self.cancel_order(order)
-
 ```
 
 The following shows how to cancel a batch of orders:
@@ -496,15 +488,12 @@ from nautilus_trader.model.orders import Order
 
 my_order_list: list[Order] = [order1, order2, order3]
 self.cancel_orders(my_order_list)
-
 ```
 
 The following shows how to cancel all orders:
 
 ```python
-
 self.cancel_all_orders()
-
 ```
 
 #### Modifying orders
@@ -535,24 +524,82 @@ from nautilus_trader.model import Quantity
 
 new_quantity: Quantity = Quantity.from_int(5)
 self.modify_order(order, new_quantity)
-
 ```
 
 :::info
 The price and trigger price can also be modified (when emulated or supported by a venue).
 :::
 
+#### Market exit
+
+The `market_exit()` method provides a graceful way to exit all positions and cancel all orders
+for a strategy. The strategy remains running after the exit completes, allowing you to re-enter
+positions later if desired.
+
+```python
+self.market_exit()
+```
+
+The market exit process:
+
+1. Cancels all open and in-flight orders for the strategy.
+2. Closes all open positions with market orders.
+3. Periodically checks (at `market_exit_interval_ms`) until all orders resolve and positions close.
+4. Calls `post_market_exit()` once flat, or after `market_exit_max_attempts` is reached.
+
+Two hooks are available for custom logic:
+
+- `on_market_exit()` - Called when the exit process begins.
+- `post_market_exit()` - Called when the exit process completes.
+
+```python
+class MyStrategy(Strategy):
+    def on_market_exit(self) -> None:
+        self.log.info("Beginning market exit...")
+
+    def post_market_exit(self) -> None:
+        self.log.info("Market exit complete")
+```
+
+During a market exit, non-reduce-only orders are automatically denied. For order lists,
+if any order in the list is non-reduce-only, the entire list is denied to preserve list
+semantics (e.g., bracket orders with interdependencies).
+
+To check if an exit is in progress (e.g., to skip order submission logic), use `is_exiting()`:
+
+```python
+def on_quote_tick(self, tick: QuoteTick) -> None:
+    if self.is_exiting():
+        return  # Skip order logic during exit
+    # ... normal order logic
+```
+
+To automatically perform a market exit when the strategy is stopped, set `manage_stop=True`:
+
+```python
+config = StrategyConfig(manage_stop=True)
+```
+
+With this option, calling `stop()` will first perform a market exit, then stop the strategy
+once flat.
+
+Configuration options in `StrategyConfig`:
+
+- `manage_stop` (default: False) - If True, `stop()` performs a market exit before stopping.
+- `market_exit_interval_ms` (default: 100) - Interval between exit completion checks.
+- `market_exit_max_attempts` (default: 100) - Maximum checks before completing the exit.
+- `market_exit_time_in_force` (default: None/GTC) - Time in force for closing market orders.
+- `market_exit_reduce_only` (default: True) - If closing market orders should be reduce only.
+
 ## Strategy configuration
 
-The main purpose of a separate configuration class is to provide total flexibility
-over where and how a trading strategy can be instantiated. This includes being able
-to serialize strategies and their configurations over the wire, making distributed backtesting
-and firing up remote live trading possible.
+A separate configuration class gives full flexibility over where and how a strategy
+is instantiated. Configurations serialize over the wire, enabling distributed backtesting
+and remote live trading.
 
-This configuration flexibility is actually opt-in, in that you can actually choose not to have
-any strategy configuration beyond the parameters you choose to pass into your
-strategies' constructor. If you would like to run distributed backtests or launch
-live trading servers remotely, then you will need to define a configuration.
+This is opt-in. You can skip configuration and pass parameters directly to your
+strategy constructor. If you want distributed backtests or remote live trading,
+define a configuration.
 
 Here is an example configuration:
 
@@ -607,7 +654,7 @@ config = MyStrategyConfig(
 strategy = MyStrategy(config=config)
 ```
 
-When implementing strategies, it's recommended to access configuration values directly through `self.config`.
+Access configuration values through `self.config`.
 This provides clear separation between:
 
 - Configuration data (accessed via `self.config`):
@@ -641,8 +688,20 @@ Some venues (such as Binance Futures) support the GTD time in force, so to avoid
 ### Multiple strategies
 
 If you intend running multiple instances of the same strategy, with different
-configurations (such as trading different instruments), then you will need to define
-a unique `order_id_tag` for each of these strategies (as shown above).
+configurations (such as trading different instruments), then each instance needs a
+unique strategy ID and order ID tag.
+
+If `strategy_id` is not supplied, the platform builds the strategy ID from the
+strategy class name and an order ID tag. The tag can be supplied with `order_id_tag`;
+otherwise registration assigns the next numeric tag, starting with `000`. For example,
+the above config results in a strategy ID of `MyStrategy-001`.
+
+If `strategy_id` is supplied with `order_id_tag`, Rust appends the tag to the
+runtime strategy ID unless the ID already ends with that tag. For example,
+`strategy_id=MyStrategy-PRIMARY` with `order_id_tag=ABC` becomes
+`MyStrategy-PRIMARY-ABC`.
+If `order_id_tag` is omitted, Rust uses the final hyphen-separated part of
+`strategy_id` as the order ID tag.
 
 :::note
 The platform has built-in safety measures: if two strategies share a duplicated strategy ID,
@@ -650,10 +709,24 @@ a `RuntimeError` is raised during registration indicating the strategy ID is alr
 :::
 
 The reason for this is that the system must be able to identify which strategy
-various commands and events belong to. A strategy ID is made up of the
-strategy class name, and the strategies `order_id_tag` separated by a hyphen. For
-example the above config would result in a strategy ID of `MyStrategy-001`.
+various commands and events belong to. The order ID tag also keeps generated client
+order IDs unique across strategies for the same trader.
 
-:::note
-See the `StrategyId` [API Reference](../api_reference/model/identifiers.md) for further details.
+:::info Rust implementation
+Rust treats `StrategyConfig` as immutable construction input. The runtime
+`StrategyId` carries the order ID tag, matching Python/Cython behavior. This keeps
+actor registration, client order ID generation, order list ID generation, and
+position ID generation aligned through `strategy_id.get_tag()`.
+
+If `strategy_id` is omitted, `order_id_tag` overrides the generated suffix, for
+example `MyStrategy-ABC`.
 :::
+
+See the [`StrategyId` API Reference](/docs/python-api-latest/model/identifiers.html) for further details.
+
+## Related guides
+
+- [Actors](actors.md) - Base class that strategies extend.
+- [Events](events/) - Event types and handler dispatch.
+- [Orders](orders/) - Order types and management from strategies.
+- [Backtesting](backtesting/) - Test strategies with historical data.

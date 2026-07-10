@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -13,9 +13,9 @@
 //  limitations under the License.
 // -------------------------------------------------------------------------------------------------
 
-//! Portfolio management and risk analysis for [NautilusTrader](http://nautilustrader.io).
+//! Portfolio management and risk analysis for [NautilusTrader](https://nautilustrader.io).
 //!
-//! The `nautilus-portfolio` crate provides comprehensive portfolio management capabilities including
+//! The `nautilus-portfolio` crate provides portfolio management capabilities including
 //! real-time position tracking, performance calculations, and risk management. This includes
 //! sophisticated portfolio analytics and multi-currency support:
 //!
@@ -29,17 +29,15 @@
 //! The crate handles complex portfolio scenarios including multi-venue trading, currency conversions,
 //! and sophisticated margin calculations for both live trading and backtesting environments.
 //!
-//! # Platform
+//! # NautilusTrader
 //!
-//! [NautilusTrader](http://nautilustrader.io) is an open-source, high-performance, production-grade
-//! algorithmic trading platform, providing quantitative traders with the ability to backtest
-//! portfolios of automated trading strategies on historical data with an event-driven engine,
-//! and also deploy those same strategies live, with no code changes.
+//! [NautilusTrader](https://nautilustrader.io) is an open-source, production-grade, Rust-native
+//! engine for multi-asset, multi-venue trading systems.
 //!
-//! NautilusTrader's design, architecture, and implementation philosophy prioritizes software correctness and safety at the
-//! highest level, with the aim of supporting mission-critical, trading system backtesting and live deployment workloads.
+//! The system spans research, deterministic simulation, and live execution within a single
+//! event-driven architecture, providing research-to-live semantic parity.
 //!
-//! # Feature flags
+//! # Feature Flags
 //!
 //! This crate provides feature flags to control source code inclusion during compilation,
 //! depending on the intended use case, i.e. whether to provide Python bindings
@@ -50,6 +48,7 @@
 //! - `extension-module`: Builds the crate as a Python extension module.
 
 #![warn(rustc::all)]
+#![warn(clippy::pedantic)]
 #![deny(unsafe_code)]
 #![deny(unsafe_op_in_unsafe_fn)]
 #![deny(nonstandard_style)]
@@ -57,13 +56,29 @@
 #![deny(clippy::missing_errors_doc)]
 #![deny(clippy::missing_panics_doc)]
 #![deny(rustdoc::broken_intra_doc_links)]
+#![allow(
+    clippy::similar_names,
+    reason = "portfolio timing and domain terms such as interval_ms/interval_ns are intentionally parallel"
+)]
+#![allow(
+    clippy::manual_let_else,
+    reason = "match and if-let early returns are consistent with surrounding portfolio flow code"
+)]
+#![allow(
+    clippy::single_match_else,
+    reason = "match can be clearer than if-let-else for some portfolio state transitions"
+)]
+#![allow(
+    clippy::too_many_lines,
+    reason = "portfolio calculation and event update flows exceed the default threshold by design"
+)]
 
 pub mod config;
 pub mod manager;
 pub mod portfolio;
 
-#[cfg(test)]
-mod tests;
+#[cfg(feature = "python")]
+pub mod python;
 
 // Re-exports
 pub use portfolio::Portfolio;

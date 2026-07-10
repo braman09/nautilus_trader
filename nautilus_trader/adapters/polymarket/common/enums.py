@@ -1,5 +1,5 @@
 # -------------------------------------------------------------------------------------------------
-#  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+#  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 #  https://nautechsystems.io
 #
 #  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -24,6 +24,7 @@ class PolymarketSignatureType(Enum):
     EOA = 0  # EIP712 signature signed by an EOA
     POLY_PROXY = 1  # EIP712 signature (Polymarket proxy wallet)
     POLY_GNOSIS_SAFE = 2  # EIP712 signature (Polymarket gnosis safe wallet)
+    POLY_1271 = 3  # ERC-1271 deposit wallet signature
 
 
 @unique

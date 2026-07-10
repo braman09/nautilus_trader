@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -18,7 +18,10 @@ use std::{
     hash::{Hash, Hasher},
 };
 
-use nautilus_core::python::{IntoPyObjectNautilusExt, serialization::from_dict_pyo3};
+use nautilus_core::python::{
+    IntoPyObjectNautilusExt,
+    serialization::{from_dict_pyo3, to_dict_pyo3},
+};
 use nautilus_model::{
     enums::OrderSide,
     identifiers::InstrumentId,
@@ -32,6 +35,7 @@ use crate::{
 };
 
 #[pymethods]
+#[pyo3_stub_gen::derive::gen_stub_pymethods]
 impl DatabentoImbalance {
     fn __richcmp__(&self, other: &Self, op: CompareOp, py: Python<'_>) -> Py<PyAny> {
         match op {
@@ -141,19 +145,15 @@ impl DatabentoImbalance {
         from_dict_pyo3(py, values)
     }
 
-    // TODO
-    /// # Errors
-    ///
-    /// Returns a `PyErr` if generating the Python dictionary fails.
+    /// Return a dictionary representation of the object.
     #[pyo3(name = "to_dict")]
-    pub fn py_to_dict(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let dict = PyDict::new(py);
-        dict.set_item("type", stringify!(DatabentoImbalance))?;
-        Ok(dict.into())
+    pub fn py_to_dict(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
+        to_dict_pyo3(py, self)
     }
 }
 
 #[pymethods]
+#[pyo3_stub_gen::derive::gen_stub_pymethods]
 impl DatabentoStatistics {
     fn __richcmp__(&self, other: &Self, op: CompareOp, py: Python<'_>) -> Py<PyAny> {
         match op {
@@ -279,14 +279,41 @@ impl DatabentoStatistics {
         from_dict_pyo3(py, values)
     }
 
-    // TODO
-    /// # Errors
-    ///
-    /// Returns a `PyErr` if generating the Python dictionary fails.
+    /// Return a dictionary representation of the object.
     #[pyo3(name = "to_dict")]
-    pub fn py_to_dict(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let dict = PyDict::new(py);
-        dict.set_item("type", stringify!(DatabentoStatistics))?;
-        Ok(dict.into())
+    pub fn py_to_dict(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
+        to_dict_pyo3(py, self)
+    }
+}
+
+/// Subscription acknowledgement from the Databento gateway.
+#[cfg_attr(
+    feature = "python",
+    pyo3::pyclass(
+        module = "nautilus_trader.core.nautilus_pyo3.databento",
+        from_py_object
+    )
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.adapters.databento")
+)]
+#[derive(Debug, Clone)]
+pub struct DatabentoSubscriptionAck {
+    #[pyo3(get)]
+    pub schema: String,
+    #[pyo3(get)]
+    pub message: String,
+    #[pyo3(get)]
+    pub ts_received: u64,
+}
+
+impl From<crate::types::SubscriptionAckEvent> for DatabentoSubscriptionAck {
+    fn from(event: crate::types::SubscriptionAckEvent) -> Self {
+        Self {
+            schema: event.schema,
+            message: event.message,
+            ts_received: event.ts_received.as_u64(),
+        }
     }
 }

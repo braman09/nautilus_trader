@@ -18,7 +18,7 @@ workspace = true
 
 [lib]
 name = "nautilus_infrastructure"
-crate-type = ["rlib", "cdylib"]
+crate-type = ["rlib"]
 
 [features]
 default = ["redis"] # redis needed by `nautilus_trader` by default for now
@@ -41,7 +41,8 @@ redis = ["dep:redis"]
 postgres = ["dep:sqlx"]
 
 [package.metadata.docs.rs]
-all-features = true
+# Python docs depend on the local pyo3-stub-gen patch for now, which published crates do not carry
+features = ["postgres", "redis"]
 rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
@@ -63,11 +64,9 @@ log = { workspace = true }
 regex = { workspace = true }
 rmp-serde = { workspace = true }
 rust_decimal = { workspace = true }
-semver = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
-tracing = { workspace = true }
 ustr = { workspace = true }
 
 pyo3 = { workspace = true, optional = true }
@@ -77,5 +76,10 @@ redis = { workspace = true, optional = true }
 sqlx = { workspace = true, optional = true }
 
 [dev-dependencies]
+nautilus-live = { workspace = true, features = ["node"] }
+nautilus-persistence = { workspace = true }
+nautilus-serialization = { workspace = true }
+
 rstest = { workspace = true }
 serde = { workspace = true }
+toml = { workspace = true }

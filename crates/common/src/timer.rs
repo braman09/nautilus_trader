@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -20,31 +20,36 @@ use std::{
     fmt::{Debug, Display},
     num::NonZeroU64,
     rc::Rc,
+    sync::Arc,
 };
 
+#[cfg(feature = "python")]
+use nautilus_core::python::IntoPyObjectNautilusExt;
 use nautilus_core::{
     UUID4, UnixNanos,
     correctness::{FAILED, check_valid_string_utf8},
 };
 #[cfg(feature = "python")]
-use pyo3::{Py, PyAny, Python};
+use pyo3::{Py, PyAny, PyResult, Python, types::PyCapsule};
 use ustr::Ustr;
 
 /// Creates a valid nanoseconds interval that is guaranteed to be positive.
 ///
-/// # Panics
-///
-/// Panics if `interval_ns` is zero.
+/// Coerces zero to one to ensure a valid `NonZeroU64`.
 #[must_use]
 pub fn create_valid_interval(interval_ns: u64) -> NonZeroU64 {
-    NonZeroU64::new(std::cmp::max(interval_ns, 1)).expect("`interval_ns` must be positive")
+    NonZeroU64::new(interval_ns).unwrap_or(NonZeroU64::MIN)
 }
 
 #[repr(C)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(
     feature = "python",
-    pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.common")
+    pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.common", from_py_object)
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.common")
 )]
 /// Represents a time event occurring at the event timestamp.
 ///
@@ -63,10 +68,6 @@ pub struct TimeEvent {
 
 impl TimeEvent {
     /// Creates a new [`TimeEvent`] instance.
-    ///
-    /// # Safety
-    ///
-    /// Assumes `name` is a valid string.
     #[must_use]
     pub const fn new(name: Ustr, event_id: UUID4, ts_event: UnixNanos, ts_init: UnixNanos) -> Self {
         Self {
@@ -128,19 +129,106 @@ impl Ord for ScheduledTimeEvent {
     }
 }
 
+#[cfg(feature = "python")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Python time event callback argument mode.
+pub enum PythonTimeEventCallbackArg {
+    /// Callbacks receive the PyO3 `TimeEvent` object.
+    TimeEvent,
+    /// Legacy Cython callbacks receive a `PyCapsule` containing the Rust event.
+    LegacyCapsule,
+}
+
+#[cfg(feature = "python")]
+/// Python callback for time events.
+pub struct PythonTimeEventCallback {
+    callback: Py<PyAny>,
+    arg: PythonTimeEventCallbackArg,
+}
+
+#[cfg(feature = "python")]
+impl PythonTimeEventCallback {
+    /// Creates a new [`PythonTimeEventCallback`] instance.
+    #[must_use]
+    pub const fn new(callback: Py<PyAny>, arg: PythonTimeEventCallbackArg) -> Self {
+        Self { callback, arg }
+    }
+
+    /// Returns the Python callable.
+    #[must_use]
+    pub const fn callback(&self) -> &Py<PyAny> {
+        &self.callback
+    }
+
+    /// Invokes the Python callback for the given `TimeEvent`.
+    pub fn call(&self, event: TimeEvent) {
+        Python::attach(|py| {
+            let result = match self.arg {
+                PythonTimeEventCallbackArg::TimeEvent => self.callback.call1(py, (event,)),
+                PythonTimeEventCallbackArg::LegacyCapsule => {
+                    call_legacy_python_time_event_callback(py, event, &self.callback)
+                }
+            };
+
+            if let Err(e) = result {
+                log::error!("Python time event callback raised exception: {e}");
+            }
+        });
+    }
+}
+
+#[cfg(feature = "python")]
+impl Debug for PythonTimeEventCallback {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct(stringify!(PythonTimeEventCallback))
+            .field("arg", &self.arg)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Callback type for time events.
+///
+/// # Variants
+///
+/// - `Python`: For Python callbacks (requires `python` feature).
+/// - `Rust`: Thread-safe callbacks using `Arc`. Use when the closure is `Send + Sync`.
+/// - `RustLocal`: Single-threaded callbacks using `Rc`. Use when capturing `Rc<RefCell<...>>`.
+///
+/// # Choosing Between `Rust` and `RustLocal`
+///
+/// Use `Rust` (thread-safe) when:
+/// - The callback doesn't capture `Rc<RefCell<...>>` or other non-`Send` types.
+/// - The closure is `Send + Sync` (most simple closures qualify).
+///
+/// Use `RustLocal` when:
+/// - The callback captures `Rc<RefCell<...>>` for shared mutable state.
+/// - Thread safety constraints prevent using `Arc`.
+///
+/// `RustLocal` works with `TestClock`. With `LiveClock`, use it only for existing
+/// single-threaded callback paths; live timer callback registry dispatch is still pending.
+///
+/// # Automatic Conversion
+///
+/// - Closures that are `Fn + Send + Sync + 'static` automatically convert to `Rust`.
+/// - `Rc<dyn Fn(TimeEvent)>` converts to `RustLocal`.
+/// - `Arc<dyn Fn(TimeEvent) + Send + Sync>` converts to `Rust`.
 pub enum TimeEventCallback {
+    /// Python callable for use from Python via PyO3.
     #[cfg(feature = "python")]
-    Python(Py<PyAny>),
-    Rust(Rc<dyn Fn(TimeEvent)>),
+    Python(Arc<PythonTimeEventCallback>),
+    /// Thread-safe Rust callback using `Arc` (`Send + Sync`).
+    Rust(Arc<dyn Fn(TimeEvent) + Send + Sync>),
+    /// Local Rust callback using `Rc` (not `Send`/`Sync`).
+    RustLocal(Rc<dyn Fn(TimeEvent)>),
 }
 
 impl Clone for TimeEventCallback {
     fn clone(&self) -> Self {
         match self {
             #[cfg(feature = "python")]
-            Self::Python(obj) => Self::Python(nautilus_core::python::clone_py_object(obj)),
+            Self::Python(callback) => Self::Python(callback.clone()),
             Self::Rust(cb) => Self::Rust(cb.clone()),
+            Self::RustLocal(cb) => Self::RustLocal(cb.clone()),
         }
     }
 }
@@ -150,74 +238,126 @@ impl Debug for TimeEventCallback {
         match self {
             #[cfg(feature = "python")]
             Self::Python(_) => f.write_str("Python callback"),
-            Self::Rust(_) => f.write_str("Rust callback"),
+            Self::Rust(_) => f.write_str("Rust callback (thread-safe)"),
+            Self::RustLocal(_) => f.write_str("Rust callback (local)"),
         }
     }
 }
 
 impl TimeEventCallback {
-    /// Returns `true` if this is a Rust callback.
-    ///
-    /// Rust callbacks use `Rc` internally and are NOT thread-safe.
-    /// They must only be used with `TestClock`, never with `LiveClock`.
+    /// Returns `true` if this is a thread-safe Rust callback.
     #[must_use]
     pub const fn is_rust(&self) -> bool {
         matches!(self, Self::Rust(_))
     }
 
+    /// Returns `true` if this is a local (non-thread-safe) Rust callback.
+    ///
+    /// Local callbacks use `Rc` internally and require creation, cloning, dropping,
+    /// and invocation to stay on the originating thread.
+    #[must_use]
+    pub const fn is_local(&self) -> bool {
+        matches!(self, Self::RustLocal(_))
+    }
+
     /// Invokes the callback for the given `TimeEvent`.
     ///
-    /// # Panics
-    ///
-    /// Panics if the underlying Python callback invocation fails (e.g., raises an exception).
+    /// For Python callbacks, exceptions are logged as errors rather than panicking.
     pub fn call(&self, event: TimeEvent) {
         match self {
             #[cfg(feature = "python")]
-            Self::Python(callback) => {
-                Python::attach(|py| {
-                    callback.call1(py, (event,)).unwrap();
-                });
-            }
+            Self::Python(callback) => callback.call(event),
             Self::Rust(callback) => callback(event),
+            Self::RustLocal(callback) => callback(event),
         }
     }
 }
 
 impl<F> From<F> for TimeEventCallback
 where
-    F: Fn(TimeEvent) + 'static,
+    F: Fn(TimeEvent) + Send + Sync + 'static,
 {
     fn from(value: F) -> Self {
-        Self::Rust(Rc::new(value))
+        Self::Rust(Arc::new(value))
+    }
+}
+
+impl From<Arc<dyn Fn(TimeEvent) + Send + Sync>> for TimeEventCallback {
+    fn from(value: Arc<dyn Fn(TimeEvent) + Send + Sync>) -> Self {
+        Self::Rust(value)
     }
 }
 
 impl From<Rc<dyn Fn(TimeEvent)>> for TimeEventCallback {
     fn from(value: Rc<dyn Fn(TimeEvent)>) -> Self {
-        Self::Rust(value)
+        Self::RustLocal(value)
     }
 }
 
 #[cfg(feature = "python")]
 impl From<Py<PyAny>> for TimeEventCallback {
     fn from(value: Py<PyAny>) -> Self {
-        Self::Python(value)
+        Self::from_python_time_event(value)
     }
 }
 
-// SAFETY: TimeEventCallback implements Send + Sync with the following invariants:
-// - Python variant: Uses Py<PyAny> which is inherently Send + Sync (GIL acquired when needed)
-// - Rust variant: Uses Rc<dyn Fn> which is NOT Send/Sync. This is only safe because:
-//   * Rust callbacks are ONLY used with TestClock (single-threaded backtesting)
-//   * LiveClock/LiveTimer MUST NOT use Rust callbacks - they will panic at runtime
-//   * Python callbacks are used for all live/async timer contexts
+#[cfg(feature = "python")]
+impl TimeEventCallback {
+    /// Creates a Python callback that receives a PyO3 `TimeEvent`.
+    #[must_use]
+    pub fn from_python_time_event(callback: Py<PyAny>) -> Self {
+        Self::Python(Arc::new(PythonTimeEventCallback::new(
+            callback,
+            PythonTimeEventCallbackArg::TimeEvent,
+        )))
+    }
+
+    /// Creates a legacy Python callback that receives a `PyCapsule`.
+    #[must_use]
+    pub fn from_python_legacy_capsule(callback: Py<PyAny>) -> Self {
+        Self::Python(Arc::new(PythonTimeEventCallback::new(
+            callback,
+            PythonTimeEventCallbackArg::LegacyCapsule,
+        )))
+    }
+}
+
+// SAFETY: TimeEventCallback is Send + Sync with the following invariants:
 //
-// WARNING: Using TimeEventCallback::Rust with LiveClock is undefined behavior.
-// The runtime check in LiveTimer enforces this invariant.
+// - Python variant: Arc clone/drop does not require the GIL, and the callable is
+//   only invoked after acquiring the GIL.
+//
+// - Rust variant: Arc<dyn Fn + Send + Sync> is inherently Send + Sync.
+//
+// - RustLocal variant: Rc<dyn Fn> is not Send/Sync. This unsafe impl preserves
+//   existing API compatibility and relies on callers to keep RustLocal callbacks
+//   on the originating event-loop thread. LiveTimer logs a warning because its
+//   callback registry dispatch follow-up is still pending.
+//
+//   INVARIANT: RustLocal callbacks must only be cloned, dropped, or called from
+//   the thread that created them. Violating this invariant causes undefined behavior.
+//   Use the Rust variant with Arc if cross-thread execution is needed.
 #[allow(unsafe_code)]
 unsafe impl Send for TimeEventCallback {}
 #[allow(unsafe_code)]
 unsafe impl Sync for TimeEventCallback {}
+
+#[cfg(feature = "python")]
+fn call_legacy_python_time_event_callback(
+    py: Python<'_>,
+    event: TimeEvent,
+    callback: &Py<PyAny>,
+) -> PyResult<Py<PyAny>> {
+    #[allow(
+        deprecated,
+        reason = "unnamed capsules are required for legacy Cython time-event callbacks"
+    )]
+    let capsule: Py<PyAny> = PyCapsule::new_with_destructor(py, event, None, |_, _| {})
+        .expect("Error creating `PyCapsule`")
+        .into_py_any_unwrap(py);
+
+    callback.call1(py, (capsule,))
+}
 
 #[repr(C)]
 #[derive(Clone, Debug)]
@@ -225,49 +365,65 @@ unsafe impl Sync for TimeEventCallback {}
 ///
 /// `TimeEventHandler` associates a `TimeEvent` with a callback function that is triggered
 /// when the event's timestamp is reached.
-pub struct TimeEventHandlerV2 {
+pub struct TimeEventHandler {
     /// The time event.
     pub event: TimeEvent,
     /// The callable handler for the event.
     pub callback: TimeEventCallback,
 }
 
-impl TimeEventHandlerV2 {
-    /// Creates a new [`TimeEventHandlerV2`] instance.
+impl TimeEventHandler {
+    /// Creates a new [`TimeEventHandler`] instance.
     #[must_use]
     pub const fn new(event: TimeEvent, callback: TimeEventCallback) -> Self {
         Self { event, callback }
     }
 
+    fn cmp_event(&self, other: &Self) -> Ordering {
+        self.event
+            .ts_event
+            .cmp(&other.event.ts_event)
+            .then_with(|| self.event.name.cmp(&other.event.name))
+            .then_with(|| self.event.ts_init.cmp(&other.event.ts_init))
+            .then_with(|| {
+                self.event
+                    .event_id
+                    .as_str()
+                    .cmp(other.event.event_id.as_str())
+            })
+    }
+
     /// Executes the handler by invoking its callback for the associated event.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the underlying callback invocation fails (e.g., a Python callback raises an exception).
     pub fn run(self) {
         let Self { event, callback } = self;
+        crate::msgbus::dispatch_tap_time_event(&event);
         callback.call(event);
     }
 }
 
-impl PartialOrd for TimeEventHandlerV2 {
+impl PartialOrd for TimeEventHandler {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl PartialEq for TimeEventHandlerV2 {
+impl PartialEq for TimeEventHandler {
     fn eq(&self, other: &Self) -> bool {
-        self.event.ts_event == other.event.ts_event
+        self.cmp_event(other).is_eq()
     }
 }
 
-impl Eq for TimeEventHandlerV2 {}
+impl Eq for TimeEventHandler {}
 
-impl Ord for TimeEventHandlerV2 {
+impl Ord for TimeEventHandler {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.event.ts_event.cmp(&other.event.ts_event)
+        self.cmp_event(other)
     }
+}
+
+pub(crate) trait Timer {
+    fn is_expired(&self) -> bool;
+    fn cancel(&mut self);
 }
 
 /// A test timer for user with a `TestClock`.
@@ -278,7 +434,7 @@ impl Ord for TimeEventHandlerV2 {
 /// # Threading
 ///
 /// The timer mutates its internal state and should only be used from its owning thread.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct TestTimer {
     /// The name of the timer.
     pub name: Ustr,
@@ -357,7 +513,8 @@ impl TestTimer {
     pub fn advance(&mut self, to_time_ns: UnixNanos) -> impl Iterator<Item = TimeEvent> + '_ {
         // Calculate how many events should fire up to and including to_time_ns
         let advances = if self.next_time_ns <= to_time_ns {
-            (to_time_ns.as_u64() - self.next_time_ns.as_u64()) / self.interval_ns.get() + 1
+            ((to_time_ns.as_u64() - self.next_time_ns.as_u64()) / self.interval_ns.get())
+                .saturating_add(1)
         } else {
             0
         };
@@ -368,6 +525,16 @@ impl TestTimer {
     ///
     /// Used to stop the timer before its scheduled stop time.
     pub const fn cancel(&mut self) {
+        self.is_expired = true;
+    }
+}
+
+impl Timer for TestTimer {
+    fn is_expired(&self) -> bool {
+        self.is_expired
+    }
+
+    fn cancel(&mut self) {
         self.is_expired = true;
     }
 }
@@ -411,18 +578,34 @@ impl Iterator for TestTimer {
     }
 }
 
-////////////////////////////////////////////////////////////////////////////////
-// Tests
-////////////////////////////////////////////////////////////////////////////////
 #[cfg(test)]
 mod tests {
-    use std::num::NonZeroU64;
+    use std::{cell::RefCell, num::NonZeroU64, rc::Rc};
 
-    use nautilus_core::UnixNanos;
+    use nautilus_core::{UUID4, UnixNanos};
+    #[cfg(feature = "python")]
+    use pyo3::{
+        Bound, PyResult, Python,
+        types::{
+            PyAnyMethods, PyCFunction, PyDict, PyList, PyListMethods, PyTuple, PyTupleMethods,
+            PyTypeMethods,
+        },
+    };
     use rstest::*;
     use ustr::Ustr;
 
-    use super::{TestTimer, TimeEvent};
+    use super::{TestTimer, TimeEvent, TimeEventCallback, TimeEventHandler, create_valid_interval};
+    use crate::msgbus::{
+        BusTap, Endpoint, MStr, MessagingSwitchboard, Topic, clear_bus_tap, set_bus_tap,
+    };
+
+    #[rstest]
+    #[case(0, 1)]
+    #[case(1, 1)]
+    #[case(25, 25)]
+    fn test_create_valid_interval(#[case] interval_ns: u64, #[case] expected: u64) {
+        assert_eq!(create_valid_interval(interval_ns).get(), expected);
+    }
 
     #[rstest]
     fn test_test_timer_pop_event() {
@@ -574,11 +757,163 @@ mod tests {
         assert_eq!(events[0].ts_event, UnixNanos::from(15));
     }
 
-    ////////////////////////////////////////////////////////////////////////////////
-    // Property-based testing
-    ////////////////////////////////////////////////////////////////////////////////
+    #[rstest]
+    fn test_time_event_handler_ordering_uses_tie_breakers() {
+        let callback = TimeEventCallback::from(|_: TimeEvent| {});
 
-    use proptest::prelude::*;
+        let later_name = TimeEventHandler::new(
+            TimeEvent::new(
+                Ustr::from("TIME_BAR_ESM4-2-MINUTE-ASK-INTERNAL"),
+                UUID4::from("00000000-0000-4000-8000-000000000003"),
+                100.into(),
+                100.into(),
+            ),
+            callback.clone(),
+        );
+        let earlier_name = TimeEventHandler::new(
+            TimeEvent::new(
+                Ustr::from("SPREAD_QUOTE_ESM4"),
+                UUID4::from("00000000-0000-4000-8000-000000000002"),
+                100.into(),
+                100.into(),
+            ),
+            callback.clone(),
+        );
+        let later_init = TimeEventHandler::new(
+            TimeEvent::new(
+                Ustr::from("SPREAD_QUOTE_ESM4"),
+                UUID4::from("00000000-0000-4000-8000-000000000004"),
+                100.into(),
+                101.into(),
+            ),
+            callback.clone(),
+        );
+        let later_id = TimeEventHandler::new(
+            TimeEvent::new(
+                Ustr::from("SPREAD_QUOTE_ESM4"),
+                UUID4::from("00000000-0000-4000-8000-000000000005"),
+                100.into(),
+                100.into(),
+            ),
+            callback,
+        );
+
+        assert!(earlier_name < later_name);
+        assert!(earlier_name < later_init);
+        assert!(earlier_name < later_id);
+        assert_ne!(earlier_name, later_id);
+    }
+
+    #[cfg(feature = "python")]
+    #[rstest]
+    fn test_python_callback_modes_pass_expected_argument_types() {
+        Python::initialize();
+
+        Python::attach(|py| {
+            let seen = PyList::empty(py);
+            let seen_obj = seen.clone().unbind().into_any();
+            let callback = new_sync_py_callback(
+                py,
+                move |args: &Bound<'_, PyTuple>,
+                      _kwargs: Option<&Bound<'_, PyDict>>|
+                      -> PyResult<()> {
+                    let arg = args.get_item(0)?;
+                    let type_name = arg.get_type().name()?.to_string();
+                    Python::attach(|py| seen_obj.call_method1(py, "append", (type_name,)))?;
+                    Ok(())
+                },
+            )
+            .expect("callback should create")
+            .into_any()
+            .unbind();
+
+            let event = TimeEvent::new(
+                Ustr::from("PY_CALLBACK_MODE"),
+                UUID4::from("00000000-0000-4000-8000-000000000007"),
+                UnixNanos::from(100),
+                UnixNanos::from(99),
+            );
+
+            TimeEventCallback::from_python_time_event(callback.clone_ref(py)).call(event.clone());
+            TimeEventCallback::from_python_legacy_capsule(callback).call(event);
+
+            assert_eq!(
+                seen.get_item(0).unwrap().extract::<String>().unwrap(),
+                "TimeEvent"
+            );
+            assert_eq!(
+                seen.get_item(1).unwrap().extract::<String>().unwrap(),
+                "PyCapsule"
+            );
+        });
+    }
+
+    #[cfg(feature = "python")]
+    fn new_sync_py_callback<F>(py: Python<'_>, closure: F) -> PyResult<Bound<'_, PyCFunction>>
+    where
+        F: Fn(&Bound<'_, PyTuple>, Option<&Bound<'_, PyDict>>) -> PyResult<()>
+            + Send
+            + Sync
+            + 'static,
+    {
+        PyCFunction::new_closure(py, None, None, closure)
+    }
+
+    #[derive(Default)]
+    struct RecordingTimeEventTap {
+        time_events: RefCell<Vec<(String, TimeEvent)>>,
+    }
+
+    impl RecordingTimeEventTap {
+        fn time_events(&self) -> Vec<(String, TimeEvent)> {
+            self.time_events.borrow().clone()
+        }
+    }
+
+    impl BusTap for RecordingTimeEventTap {
+        fn on_publish(&self, topic: MStr<Topic>, message: &dyn std::any::Any) {
+            if let Some(event) = message.downcast_ref::<TimeEvent>() {
+                self.time_events
+                    .borrow_mut()
+                    .push((topic.to_string(), event.clone()));
+            }
+        }
+
+        fn on_send(&self, _endpoint: MStr<Endpoint>, _message: &dyn std::any::Any) {}
+    }
+
+    #[rstest]
+    fn test_time_event_handler_run_dispatches_tap_before_callback() {
+        let event = TimeEvent::new(
+            Ustr::from("strategy.heartbeat"),
+            UUID4::from("00000000-0000-4000-8000-000000000006"),
+            UnixNanos::from(100),
+            UnixNanos::from(99),
+        );
+        let tap = Rc::new(RecordingTimeEventTap::default());
+        let callback_seen: Rc<RefCell<Vec<TimeEvent>>> = Rc::new(RefCell::new(Vec::new()));
+        let expected_topic = MessagingSwitchboard::time_event_topic().to_string();
+        let callback_expected = event.clone();
+        let callback_expected_topic = expected_topic.clone();
+        let callback_tap = Rc::clone(&tap);
+        let callback_seen_ref = Rc::clone(&callback_seen);
+        let callback: Rc<dyn Fn(TimeEvent)> = Rc::new(move |callback_event| {
+            assert_eq!(
+                callback_tap.time_events(),
+                vec![(callback_expected_topic.clone(), callback_expected.clone())],
+            );
+            callback_seen_ref.borrow_mut().push(callback_event);
+        });
+
+        set_bus_tap(tap.clone());
+        TimeEventHandler::new(event.clone(), TimeEventCallback::from(callback)).run();
+        clear_bus_tap();
+
+        assert_eq!(tap.time_events(), vec![(expected_topic, event.clone())]);
+        assert_eq!(*callback_seen.borrow(), vec![event]);
+    }
+
+    use proptest::{prelude::*, test_runner::TestCaseResult};
 
     #[derive(Clone, Debug)]
     enum TimerOperation {
@@ -610,11 +945,10 @@ mod tests {
         )
     }
 
-    #[allow(clippy::needless_collect)] // Collect needed for indexing and .is_empty()
     fn test_timer_with_operations(
         operations: Vec<TimerOperation>,
         (interval_ns, start_time_ns, stop_time_ns, fire_immediately): (u64, u64, Option<u64>, bool),
-    ) {
+    ) -> TestCaseResult {
         let mut timer = TestTimer::new(
             Ustr::from("PROP_TEST_TIMER"),
             NonZeroU64::new(interval_ns).unwrap(),
@@ -624,104 +958,102 @@ mod tests {
         );
 
         let mut current_time = start_time_ns;
+        let mut expected_next = if fire_immediately {
+            start_time_ns
+        } else {
+            start_time_ns + interval_ns
+        };
+        let mut expected_expired = false;
 
         for operation in operations {
-            if timer.is_expired() {
+            if expected_expired {
                 break;
             }
 
             match operation {
                 TimerOperation::AdvanceTime(delta) => {
                     let to_time = current_time + delta;
-                    let events: Vec<TimeEvent> = timer.advance(UnixNanos::from(to_time)).collect();
+                    let actual: Vec<u64> = timer
+                        .advance(UnixNanos::from(to_time))
+                        .map(|event| event.ts_event.as_u64())
+                        .collect();
+                    let expected = expected_event_times(
+                        to_time,
+                        interval_ns,
+                        stop_time_ns,
+                        &mut expected_next,
+                        &mut expected_expired,
+                    );
                     current_time = to_time;
 
-                    // Verify event ordering and timing
-                    for (i, event) in events.iter().enumerate() {
-                        // Event timestamps should be in order
-                        if i > 0 {
-                            assert!(
-                                event.ts_event >= events[i - 1].ts_event,
-                                "Events should be in chronological order"
-                            );
-                        }
-
-                        // Event timestamp should be within reasonable bounds
-                        assert!(
-                            event.ts_event.as_u64() >= start_time_ns,
-                            "Event timestamp should not be before start time"
-                        );
-
-                        assert!(
-                            event.ts_event.as_u64() <= to_time,
-                            "Event timestamp should not be after advance time"
-                        );
-
-                        // If there's a stop time, event should not exceed it
-                        if let Some(stop_time_ns) = stop_time_ns {
-                            assert!(
-                                event.ts_event.as_u64() <= stop_time_ns,
-                                "Event timestamp should not exceed stop time"
-                            );
-                        }
-                    }
+                    prop_assert_eq!(actual, expected);
                 }
                 TimerOperation::Cancel => {
                     timer.cancel();
-                    assert!(timer.is_expired(), "Timer should be expired after cancel");
+                    expected_expired = true;
                 }
             }
 
-            // Timer invariants
-            if !timer.is_expired() {
-                // Next time should be properly spaced
-                let expected_interval_multiple = if fire_immediately {
-                    timer.next_time_ns().as_u64() >= start_time_ns
-                } else {
-                    timer.next_time_ns().as_u64() >= start_time_ns + interval_ns
-                };
-                assert!(
-                    expected_interval_multiple,
-                    "Next time should respect interval spacing"
-                );
-
-                // If timer has stop time, check if it should be considered logically expired
-                // Note: Timer only becomes actually expired when advance() or next() is called
-                if let Some(stop_time_ns) = stop_time_ns
-                    && timer.next_time_ns().as_u64() > stop_time_ns
-                {
-                    // The timer should expire on the next advance/iteration
-                    let mut test_timer = timer;
-                    let events: Vec<TimeEvent> = test_timer
-                        .advance(UnixNanos::from(stop_time_ns + 1))
-                        .collect();
-                    assert!(
-                        events.is_empty() || test_timer.is_expired(),
-                        "Timer should not generate events beyond stop time"
-                    );
-                }
+            prop_assert_eq!(timer.is_expired(), expected_expired);
+            if !expected_expired {
+                prop_assert_eq!(timer.next_time_ns().as_u64(), expected_next);
             }
         }
 
-        // Final consistency check: if timer is not expired and we haven't hit stop time,
-        // advancing far enough should eventually expire it
-        if !timer.is_expired()
-            && let Some(stop_time_ns) = stop_time_ns
-        {
-            let events: Vec<TimeEvent> = timer
-                .advance(UnixNanos::from(stop_time_ns + 1000))
+        if !expected_expired && let Some(stop_time_ns) = stop_time_ns {
+            let to_time = stop_time_ns.saturating_add(interval_ns);
+            let actual: Vec<u64> = timer
+                .advance(UnixNanos::from(to_time))
+                .map(|event| event.ts_event.as_u64())
                 .collect();
-            assert!(
-                timer.is_expired() || events.is_empty(),
-                "Timer should eventually expire or stop generating events"
+            let expected = expected_event_times(
+                to_time,
+                interval_ns,
+                Some(stop_time_ns),
+                &mut expected_next,
+                &mut expected_expired,
             );
+            prop_assert_eq!(actual, expected);
+            prop_assert!(expected_expired);
+            prop_assert!(timer.is_expired());
         }
+
+        Ok(())
+    }
+
+    fn expected_event_times(
+        to_time: u64,
+        interval_ns: u64,
+        stop_time_ns: Option<u64>,
+        next_time: &mut u64,
+        is_expired: &mut bool,
+    ) -> Vec<u64> {
+        let mut events = Vec::new();
+
+        while !*is_expired && *next_time <= to_time {
+            if let Some(stop_time_ns) = stop_time_ns
+                && *next_time > stop_time_ns
+            {
+                *is_expired = true;
+                break;
+            }
+
+            events.push(*next_time);
+            if Some(*next_time) == stop_time_ns {
+                *is_expired = true;
+                break;
+            }
+
+            *next_time += interval_ns;
+        }
+
+        events
     }
 
     proptest! {
         #[rstest]
         fn prop_timer_advance_operations((operations, config) in timer_test_strategy()) {
-            test_timer_with_operations(operations, config);
+            test_timer_with_operations(operations, config)?;
         }
 
         #[rstest]

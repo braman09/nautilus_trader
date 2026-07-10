@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -28,6 +28,10 @@ use crate::indicator::Indicator;
 #[cfg_attr(
     feature = "python",
     pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.indicators")
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.indicators")
 )]
 pub struct SpreadAnalyzer {
     pub capacity: usize,
@@ -63,14 +67,15 @@ impl Indicator for SpreadAnalyzer {
         self.initialized
     }
 
-    fn handle_quote(&mut self, quote: &QuoteTick) {
+    fn handle_quote(&mut self, quote: &QuoteTick) -> anyhow::Result<()> {
         if quote.instrument_id != self.instrument_id {
-            return;
+            return Ok(());
         }
 
         // Check initialization
         if !self.initialized {
             self.has_inputs = true;
+
             if self.spreads.len() == self.capacity {
                 self.initialized = true;
             }
@@ -83,9 +88,21 @@ impl Indicator for SpreadAnalyzer {
         self.current = spread;
         self.spreads.push(spread);
 
-        // Update average spread
-        self.average =
-            fast_mean_iterated(&self.spreads, spread, self.average, self.capacity, false).unwrap();
+        // Bound the rolling window to `capacity`, matching the Cython
+        // `deque(maxlen=capacity)`. Without this the buffer grows unbounded and
+        // `fast_mean_iterated` errors (panicking on `unwrap`) once the length
+        // exceeds `capacity`.
+        if self.spreads.len() > self.capacity {
+            self.spreads.remove(0);
+        }
+
+        // Recompute the average over the bounded window. The Cython reference uses an
+        // incremental `fast_mean_iterated(..., drop_left=false)` update, but at capacity
+        // that subtracts `values[length - 1]` (the spread just pushed) rather than the
+        // evicted oldest value, so the average freezes for non-constant spreads.
+        // Recomputing from the bounded window is O(capacity) and always correct.
+        self.average = fast_mean(&self.spreads);
+        Ok(())
     }
 
     fn reset(&mut self) {
@@ -113,32 +130,6 @@ impl SpreadAnalyzer {
     }
 }
 
-fn fast_mean_iterated(
-    values: &[f64],
-    next_value: f64,
-    current_value: f64,
-    expected_length: usize,
-    drop_left: bool,
-) -> Result<f64, &'static str> {
-    let length = values.len();
-
-    if length < expected_length {
-        return Ok(fast_mean(values));
-    }
-
-    if length != expected_length {
-        return Err("length of values must equal expected_length");
-    }
-
-    let value_to_drop = if drop_left {
-        values[0]
-    } else {
-        values[length - 1]
-    };
-
-    Ok(current_value + (next_value - value_to_drop) / length as f64)
-}
-
 fn fast_mean(values: &[f64]) -> f64 {
     if values.is_empty() {
         0.0
@@ -147,9 +138,6 @@ fn fast_mean(values: &[f64]) -> f64 {
     }
 }
 
-////////////////////////////////////////////////////////////////////////////////
-// Tests
-////////////////////////////////////////////////////////////////////////////////
 #[cfg(test)]
 mod tests {
 
@@ -179,15 +167,20 @@ mod tests {
             "100.55", "100.50", "100.60", "100.65", "100.57", "100.53", "100.58", "100.62",
             "100.54", "100.56",
         ];
+
         for i in 1..10 {
-            spread_analyzer_10.handle_quote(&stub_quote(bid_price[i], ask_price[i]));
+            spread_analyzer_10
+                .handle_quote(&stub_quote(bid_price[i], ask_price[i]))
+                .unwrap();
         }
         assert!(!spread_analyzer_10.initialized);
     }
 
     #[rstest]
     fn test_value_with_one_input(mut spread_analyzer_10: SpreadAnalyzer) {
-        spread_analyzer_10.handle_quote(&stub_quote("100.50", "100.55"));
+        spread_analyzer_10
+            .handle_quote(&stub_quote("100.50", "100.55"))
+            .unwrap();
         assert_eq!(spread_analyzer_10.average, 0.049_999_999_999_997_16);
     }
 
@@ -204,18 +197,75 @@ mod tests {
             "100.55", "100.50", "100.60", "100.65", "100.57", "100.53", "100.58", "100.62",
             "100.54", "100.56", "100.59", "100.61", "100.63", "100.55", "100.57",
         ];
+
         for i in 0..10 {
-            spread_analyzer_10.handle_quote(&stub_quote(bid_price[i], ask_price[i]));
+            spread_analyzer_10
+                .handle_quote(&stub_quote(bid_price[i], ask_price[i]))
+                .unwrap();
         }
 
-        assert_eq!(spread_analyzer_10.average, 0.050_000_000_000_001_9);
+        assert_eq!(spread_analyzer_10.average, 0.050_000_000_000_001_42);
+    }
+
+    #[rstest]
+    fn test_handles_more_inputs_than_capacity_without_panic(
+        mut spread_analyzer_10: SpreadAnalyzer,
+    ) {
+        // Regression: feeding more than `capacity` quotes must not panic, and the
+        // internal window must stay bounded to `capacity` (matching the Cython
+        // `deque(maxlen=capacity)`). Previously the unbounded buffer caused
+        // `fast_mean_iterated` to error and panic on the (capacity + 1)th quote.
+        let bid_price: [&str; 15] = [
+            "100.50", "100.45", "100.55", "100.60", "100.52", "100.48", "100.53", "100.57",
+            "100.49", "100.51", "100.54", "100.56", "100.58", "100.50", "100.52",
+        ];
+
+        let ask_price: [&str; 15] = [
+            "100.55", "100.50", "100.60", "100.65", "100.57", "100.53", "100.58", "100.62",
+            "100.54", "100.56", "100.59", "100.61", "100.63", "100.55", "100.57",
+        ];
+
+        for i in 0..15 {
+            spread_analyzer_10
+                .handle_quote(&stub_quote(bid_price[i], ask_price[i]))
+                .unwrap();
+        }
+
+        assert!(spread_analyzer_10.initialized());
+        assert_eq!(spread_analyzer_10.spreads.len(), 10);
+        assert!((spread_analyzer_10.average - 0.05).abs() < 1e-9);
+    }
+
+    #[rstest]
+    fn test_average_tracks_varying_spreads_past_capacity(mut spread_analyzer_10: SpreadAnalyzer) {
+        // Regression: with non-constant spreads past `capacity`, the average must keep
+        // tracking the bounded window rather than freezing. Feeding 15 monotonically
+        // increasing spreads (0.01..=0.15) leaves the window holding the last 10
+        // (0.06..=0.15), whose mean is 0.105. The earlier incremental update froze the
+        // average at 0.055 (the mean of the first full window 0.01..=0.10).
+        let bid_price: [&str; 15] = ["100.00"; 15];
+        let ask_price: [&str; 15] = [
+            "100.01", "100.02", "100.03", "100.04", "100.05", "100.06", "100.07", "100.08",
+            "100.09", "100.10", "100.11", "100.12", "100.13", "100.14", "100.15",
+        ];
+
+        for i in 0..15 {
+            spread_analyzer_10
+                .handle_quote(&stub_quote(bid_price[i], ask_price[i]))
+                .unwrap();
+        }
+
+        assert_eq!(spread_analyzer_10.spreads.len(), 10);
+        assert!((spread_analyzer_10.average - 0.105).abs() < 1e-9);
     }
 
     #[rstest]
     fn test_reset_successfully_returns_indicator_to_fresh_state(
         mut spread_analyzer_10: SpreadAnalyzer,
     ) {
-        spread_analyzer_10.handle_quote(&stub_quote("100.50", "100.55"));
+        spread_analyzer_10
+            .handle_quote(&stub_quote("100.50", "100.55"))
+            .unwrap();
         spread_analyzer_10.reset();
         assert!(!spread_analyzer_10.initialized());
         assert_eq!(spread_analyzer_10.current, 0.0);

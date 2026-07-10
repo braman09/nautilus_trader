@@ -1,5 +1,5 @@
 # -------------------------------------------------------------------------------------------------
-#  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+#  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 #  https://nautechsystems.io
 #
 #  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -36,6 +36,7 @@ class BacktestResult:
     total_events: int
     total_orders: int
     total_positions: int
+    summary: dict[str, str]
     stats_pnls: dict[str, dict[str, float]]
     stats_returns: dict[str, float]
 

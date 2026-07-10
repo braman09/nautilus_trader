@@ -1,5 +1,5 @@
 # -------------------------------------------------------------------------------------------------
-#  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+#  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 #  https://nautechsystems.io
 #
 #  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -22,6 +22,7 @@ from nautilus_trader.core.rust.core cimport NANOSECONDS_IN_MILLISECOND
 from nautilus_trader.core.rust.model cimport LiquiditySide
 from nautilus_trader.model.book cimport OrderBook
 from nautilus_trader.model.functions cimport liquidity_side_to_str
+from nautilus_trader.model.identifiers cimport generic_spread_id_n_legs
 from nautilus_trader.model.instruments.base cimport Instrument
 from nautilus_trader.model.objects cimport Money
 from nautilus_trader.model.objects cimport Price
@@ -103,8 +104,8 @@ cdef class MakerTakerFeeModel(FeeModel):
             )
 
         cdef Money commission
-        if instrument.is_inverse:  # Not using quote for inverse (see above):
-            commission = Money(commission_value, instrument.base_currency)
+        if instrument.is_inverse:  # Not using quote for inverse (see above)
+            commission = Money(commission_value, instrument.get_base_currency())
         else:
             commission = Money(commission_value, instrument.quote_currency)
 
@@ -205,4 +206,7 @@ cdef class PerContractFeeModel(FeeModel):
         Price fill_px,
         Instrument instrument,
     ):
-        return Money(self._commission * fill_qty, self._commission.currency)
+        return Money(
+            self._commission * fill_qty * generic_spread_id_n_legs(instrument.id),
+            self._commission.currency,
+        )

@@ -1,5 +1,5 @@
 # -------------------------------------------------------------------------------------------------
-#  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+#  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 #  https://nautechsystems.io
 #
 #  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -50,6 +50,8 @@ class BinanceWebSocketClient:
         The callback handler to be called on reconnect.
     loop : asyncio.AbstractEventLoop
         The event loop for the client.
+    proxy_url : str, optional
+        The proxy URL for the WebSocket connection.
 
     References
     ----------
@@ -67,6 +69,7 @@ class BinanceWebSocketClient:
         handler: Callable[[bytes], None],
         handler_reconnect: Callable[..., Awaitable[None]] | None,
         loop: asyncio.AbstractEventLoop,
+        proxy_url: str | None = None,
     ) -> None:
         self._clock = clock
         self._log: Logger = Logger(type(self).__name__)
@@ -75,6 +78,7 @@ class BinanceWebSocketClient:
         self._handler: Callable[[bytes], None] = handler
         self._handler_reconnect: Callable[..., Awaitable[None]] | None = handler_reconnect
         self._loop = loop
+        self._proxy_url: str | None = proxy_url
         self._tasks: WeakSet[asyncio.Task] = WeakSet()
 
         self._streams: list[str] = []
@@ -178,11 +182,12 @@ class BinanceWebSocketClient:
         Connect websocket clients to the server based on existing subscriptions.
         """
         if not self._streams:
-            self._log.error("Cannot connect: no streams for initial connection")
+            self._log.warning("Cannot connect: no streams for initial connection")
             return
 
         # Group streams by client (using existing assignments or creating new ones)
         client_streams: dict[int, list[str]] = {}
+
         for stream in self._streams:
             client_id = self._get_client_for_stream(stream)
             if client_id == -1:
@@ -209,7 +214,7 @@ class BinanceWebSocketClient:
 
         """
         if not streams:
-            self._log.error(f"Cannot connect client {client_id}: no streams provided")
+            self._log.warning(f"Cannot connect client {client_id}: no streams provided")
             return
 
         # Update client streams tracking
@@ -224,14 +229,16 @@ class BinanceWebSocketClient:
 
         config = WebSocketConfig(
             url=ws_url,
-            handler=self._handler,
-            heartbeat=60,
             headers=[],
-            ping_handler=lambda raw: self._handle_ping(client_id, raw),
+            heartbeat=60,
+            proxy_url=self._proxy_url,
         )
 
         self._clients[client_id] = await WebSocketClient.connect(
+            loop_=self._loop,
             config=config,
+            handler=self._handler,
+            ping_handler=lambda raw: self._handle_ping(client_id, raw),
             post_reconnection=lambda: self._handle_reconnect(client_id),
         )
         self._is_connecting[client_id] = False
@@ -248,7 +255,15 @@ class BinanceWebSocketClient:
 
     def _handle_ping(self, client_id: int, raw: bytes) -> None:
         task = self._loop.create_task(self.send_pong(client_id, raw))
+        task.add_done_callback(self._on_pong_task_done)
         self._tasks.add(task)
+
+    def _on_pong_task_done(self, task: asyncio.Task) -> None:
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            self._log.warning(f"Unhandled exception in send_pong task: {exc!r}")
 
     async def send_pong(self, client_id: int, raw: bytes) -> None:
         """
@@ -261,14 +276,20 @@ class BinanceWebSocketClient:
         try:
             await client.send_pong(raw)
         except WebSocketClientError as e:
-            self._log.error(f"ws-client {client_id}: {e!s}")
+            self._log.warning(f"ws-client {client_id}: {e!s}")
+        except RuntimeError as e:
+            # Connection raced into a non-active state between the ping arriving
+            # and this task running; the Rust controller drives reconnect.
+            self._log.warning(f"ws-client {client_id}: dropped pong: {e!s}")
 
     def _handle_reconnect(self, client_id: int) -> None:
         """
         Handle reconnection for a specific client.
         """
         if client_id not in self._client_streams or not self._client_streams[client_id]:
-            self._log.error(f"ws-client {client_id}: Cannot reconnect: no streams for this client")
+            self._log.warning(
+                f"ws-client {client_id}: Cannot reconnect: no streams for this client",
+            )
             return
 
         self._log.warning(f"ws-client {client_id}: Reconnected to {self._base_url}")
@@ -324,22 +345,10 @@ class BinanceWebSocketClient:
         try:
             await client.disconnect()
         except WebSocketClientError as e:
-            self._log.error(f"ws-client {client_id}: {e!s}")
+            self._log.warning(f"ws-client {client_id}: {e!s}")
 
         self._clients[client_id] = None  # Dispose (will go out of scope)
         self._log.debug(f"ws-client {client_id}: Disconnected from {self._base_url}")
-
-    async def subscribe_listen_key(self, listen_key: str) -> None:
-        """
-        Subscribe to user data stream.
-        """
-        await self._subscribe(listen_key)
-
-    async def unsubscribe_listen_key(self, listen_key: str) -> None:
-        """
-        Unsubscribe from user data stream.
-        """
-        await self._unsubscribe(listen_key)
 
     async def subscribe_agg_trades(self, symbol: str) -> None:
         """
@@ -695,7 +704,7 @@ class BinanceWebSocketClient:
     async def _send(self, client_id: int, msg: dict[str, Any]) -> None:
         client = self._clients.get(client_id)
         if client is None:
-            self._log.error(f"ws-client {client_id}: Cannot send message {msg}: not connected")
+            self._log.warning(f"ws-client {client_id}: Cannot send message {msg}: not connected")
             return
 
         self._log.debug(f"ws-client {client_id}: SENDING: {msg}")
@@ -703,4 +712,4 @@ class BinanceWebSocketClient:
         try:
             await client.send_text(msgspec.json.encode(msg))
         except WebSocketClientError as e:
-            self._log.error(f"ws-client {client_id}: {e!s}")
+            self._log.warning(f"ws-client {client_id}: {e!s}")

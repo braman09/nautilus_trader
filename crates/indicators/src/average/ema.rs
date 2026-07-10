@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -27,6 +27,10 @@ use crate::indicator::{Indicator, MovingAverage};
 #[cfg_attr(
     feature = "python",
     pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.indicators")
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.indicators")
 )]
 pub struct ExponentialMovingAverage {
     pub period: usize,
@@ -57,8 +61,9 @@ impl Indicator for ExponentialMovingAverage {
         self.initialized
     }
 
-    fn handle_quote(&mut self, quote: &QuoteTick) {
-        self.update_raw(quote.extract_price(self.price_type).into());
+    fn handle_quote(&mut self, quote: &QuoteTick) -> anyhow::Result<()> {
+        self.update_raw(quote.extract_price(self.price_type)?.into());
+        Ok(())
     }
 
     fn handle_trade(&mut self, trade: &TradeTick) {
@@ -132,9 +137,6 @@ impl MovingAverage for ExponentialMovingAverage {
     }
 }
 
-////////////////////////////////////////////////////////////////////////////////
-// Tests
-////////////////////////////////////////////////////////////////////////////////
 #[cfg(test)]
 mod tests {
     use nautilus_model::{
@@ -205,7 +207,7 @@ mod tests {
         stub_quote: QuoteTick,
     ) {
         let mut ema = indicator_ema_10;
-        ema.handle_quote(&stub_quote);
+        ema.handle_quote(&stub_quote).unwrap();
         assert!(ema.has_inputs());
         assert_eq!(ema.value, 1501.0);
     }
@@ -215,8 +217,8 @@ mod tests {
         let tick1 = stub_quote("1500.0", "1502.0");
         let tick2 = stub_quote("1502.0", "1504.0");
 
-        indicator_ema_10.handle_quote(&tick1);
-        indicator_ema_10.handle_quote(&tick2);
+        indicator_ema_10.handle_quote(&tick1).unwrap();
+        indicator_ema_10.handle_quote(&tick2).unwrap();
         assert_eq!(indicator_ema_10.count, 2);
         assert_eq!(indicator_ema_10.value, 1_501.363_636_363_636_3);
     }

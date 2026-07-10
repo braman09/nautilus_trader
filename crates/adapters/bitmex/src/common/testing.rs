@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -22,7 +22,7 @@
 /// Panics if the test file cannot be read (should only happen if test data is missing).
 #[cfg(test)]
 #[must_use]
-pub fn load_test_json(file_name: &str) -> String {
+pub(crate) fn load_test_json(file_name: &str) -> String {
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("test_data")
         .join(file_name);

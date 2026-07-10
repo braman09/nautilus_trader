@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -22,7 +22,22 @@ use pyo3::prelude::*;
 use crate::{statistic::PortfolioStatistic, statistics::expectancy::Expectancy};
 
 #[pymethods]
+#[pyo3_stub_gen::derive::gen_stub_pymethods]
 impl Expectancy {
+    /// Calculates the expectancy of a trading strategy based on realized PnLs.
+    ///
+    /// Expectancy is defined as: `(Average Win × Win Rate) + (Average Loss × Loss Rate)`
+    /// This metric provides insight into the expected profitability per trade and helps
+    /// evaluate the overall edge of a trading strategy.
+    ///
+    /// A positive expectancy indicates a profitable system over time, while a negative
+    /// expectancy suggests losses.
+    ///
+    /// # References
+    ///
+    /// - Tharp, V. K. (1998). *Trade Your Way to Financial Freedom*. McGraw-Hill.
+    /// - Elder, A. (1993). *Trading for a Living*. John Wiley & Sons.
+    /// - Vince, R. (1992). *The Mathematics of Money Management*. John Wiley & Sons.
     #[new]
     fn py_new() -> Self {
         Self {}
@@ -39,6 +54,7 @@ impl Expectancy {
     }
 
     #[pyo3(name = "calculate_from_realized_pnls")]
+    #[expect(clippy::needless_pass_by_value)]
     fn py_calculate_from_realized_pnls(&mut self, realized_pnls: Vec<f64>) -> Option<f64> {
         self.calculate_from_realized_pnls(&realized_pnls)
     }

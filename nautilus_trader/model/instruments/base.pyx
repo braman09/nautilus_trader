@@ -1,5 +1,5 @@
 # -------------------------------------------------------------------------------------------------
-#  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+#  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 #  https://nautechsystems.io
 #
 #  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -33,15 +33,22 @@ from nautilus_trader.model.functions cimport instrument_class_to_str
 from nautilus_trader.model.identifiers cimport InstrumentId
 from nautilus_trader.model.instruments.betting cimport BettingInstrument
 from nautilus_trader.model.instruments.binary_option cimport BinaryOption
+from nautilus_trader.model.instruments.cfd cimport Cfd
+from nautilus_trader.model.instruments.commodity cimport Commodity
 from nautilus_trader.model.instruments.crypto_future cimport CryptoFuture
+from nautilus_trader.model.instruments.crypto_futures_spread cimport CryptoFuturesSpread
 from nautilus_trader.model.instruments.crypto_option cimport CryptoOption
+from nautilus_trader.model.instruments.crypto_option_spread cimport CryptoOptionSpread
 from nautilus_trader.model.instruments.crypto_perpetual cimport CryptoPerpetual
 from nautilus_trader.model.instruments.currency_pair cimport CurrencyPair
 from nautilus_trader.model.instruments.equity cimport Equity
 from nautilus_trader.model.instruments.futures_contract cimport FuturesContract
 from nautilus_trader.model.instruments.futures_spread cimport FuturesSpread
+from nautilus_trader.model.instruments.index cimport IndexInstrument
 from nautilus_trader.model.instruments.option_contract cimport OptionContract
 from nautilus_trader.model.instruments.option_spread cimport OptionSpread
+from nautilus_trader.model.instruments.perpetual_contract cimport PerpetualContract
+from nautilus_trader.model.instruments.tokenized_asset cimport TokenizedAsset
 from nautilus_trader.model.objects cimport Currency
 from nautilus_trader.model.objects cimport Quantity
 from nautilus_trader.model.tick_scheme.base cimport TICK_SCHEMES
@@ -55,11 +62,32 @@ EXPIRING_INSTRUMENT_CLASSES = {
     InstrumentClass.OPTION_SPREAD,
 }
 
+# Instrument classes for which the backtest engine runs built-in expiration.
+# Futures: close at market or settlement_prices. Options: exercise/expiry logic in engine.
+ENGINE_EXPIRING_INSTRUMENT_CLASSES = {
+    InstrumentClass.FUTURE,
+    InstrumentClass.FUTURES_SPREAD,
+    InstrumentClass.OPTION,
+    InstrumentClass.OPTION_SPREAD,
+}
+
 NEGATIVE_PRICE_INSTRUMENT_CLASSES = (
     InstrumentClass.OPTION,
     InstrumentClass.FUTURES_SPREAD,
     InstrumentClass.OPTION_SPREAD,
 )
+
+USD_EQUIVALENT_CURRENCY_CODES = frozenset({
+    "BUSD",
+    "FDUSD",
+    "pUSD",
+    "TUSD",
+    "USD",
+    "USDC",
+    "USDC.e",
+    "USDP",
+    "USDT",
+})
 
 
 cdef class Instrument(Data):
@@ -158,8 +186,6 @@ cdef class Instrument(Data):
         If `min_notional` is negative (< 0).
     ValueError
         If `max_price` is not positive (> 0).
-    ValueError
-        If `min_price` is negative (< 0).
 
     """
 
@@ -227,9 +253,6 @@ cdef class Instrument(Data):
 
         if max_price is not None:
             Condition.positive(max_price, "max_price")
-
-        if min_price is not None:
-            Condition.not_negative(min_price, "min_price")
 
         Condition.type(margin_init, Decimal, "margin_init")
         Condition.not_negative(margin_init, "margin_init")
@@ -436,7 +459,36 @@ cdef class Instrument(Data):
         bool
 
         """
-        return False
+        return self.instrument_class in (
+            InstrumentClass.FUTURES_SPREAD,
+            InstrumentClass.OPTION_SPREAD,
+        )
+
+    cpdef bint allows_negative_price(self):
+        """
+        Return whether the instrument allows negative prices.
+
+        Returns
+        -------
+        bool
+
+        """
+        return self.instrument_class in NEGATIVE_PRICE_INSTRUMENT_CLASSES
+
+    cpdef list legs(self):
+        """
+        Return the list of leg tuples (instrument_id, ratio) for this spread.
+
+        Base implementation returns an empty list. Override in spread instrument
+        classes to return the actual legs.
+
+        Returns
+        -------
+        list[tuple[InstrumentId, int]]
+            List of tuples containing (instrument_id, ratio) for each leg.
+
+        """
+        return [(self.id, 1)]
 
     cpdef Currency get_base_currency(self):
         """
@@ -748,12 +800,17 @@ cdef class Instrument(Data):
         Quantity quantity,
         Price price,
         bint use_quote_for_inverse=False,
+        Currency target_currency=None,
+        Price conversion_price=None,
     ):
         """
         Calculate the notional value.
 
         Result will be in quote currency for standard instruments, or base
         currency for inverse instruments.
+
+        If `target_currency` and `conversion_price` are provided, the notional
+        value will be converted to the target currency.
 
         Parameters
         ----------
@@ -763,6 +820,10 @@ cdef class Instrument(Data):
             The price for the calculation.
         use_quote_for_inverse : bool
             If inverse instrument calculations use quote currency (instead of base).
+        target_currency : Currency, optional
+            The target currency for conversion.
+        conversion_price : Price, optional
+            The price to use for currency conversion.
 
         Returns
         -------
@@ -772,14 +833,20 @@ cdef class Instrument(Data):
         Condition.not_none(quantity, "quantity")
         Condition.not_none(price, "price")
 
+        cdef Money notional
         if self.is_inverse:
             if use_quote_for_inverse:
                 # Quantity is notional in quote currency
-                return Money(quantity, self.quote_currency)
-
-            return Money(quantity.as_f64_c() * float(self.multiplier) * (1.0 / price.as_f64_c()), self.base_currency)
+                notional = Money(quantity, self.quote_currency)
+            else:
+                notional = Money(quantity.as_f64_c() * float(self.multiplier) * (1.0 / price.as_f64_c()), self.base_currency)
         else:
-            return Money(quantity.as_f64_c() * float(self.multiplier) * price.as_f64_c(), self.quote_currency)
+            notional = Money(quantity.as_f64_c() * float(self.multiplier) * price.as_f64_c(), self.quote_currency)
+
+        if target_currency is not None and conversion_price is not None:
+            return Money(notional.as_f64_c() * conversion_price.as_f64_c(), target_currency)
+
+        return notional
 
     cpdef Quantity calculate_base_quantity(
         self,
@@ -814,12 +881,20 @@ cpdef list[Instrument] instruments_from_pyo3(list pyo3_instruments):
             instruments.append(BettingInstrument.from_pyo3_c(pyo3_instrument))
         elif isinstance(pyo3_instrument, nautilus_pyo3.BinaryOption):
             instruments.append(BinaryOption.from_pyo3_c(pyo3_instrument))
+        elif isinstance(pyo3_instrument, nautilus_pyo3.Cfd):
+            instruments.append(Cfd.from_pyo3_c(pyo3_instrument))
+        elif isinstance(pyo3_instrument, nautilus_pyo3.Commodity):
+            instruments.append(Commodity.from_pyo3_c(pyo3_instrument))
         elif isinstance(pyo3_instrument, nautilus_pyo3.CryptoPerpetual):
             instruments.append(CryptoPerpetual.from_pyo3_c(pyo3_instrument))
         elif isinstance(pyo3_instrument, nautilus_pyo3.CryptoFuture):
             instruments.append(CryptoFuture.from_pyo3_c(pyo3_instrument))
+        elif isinstance(pyo3_instrument, nautilus_pyo3.CryptoFuturesSpread):
+            instruments.append(CryptoFuturesSpread.from_pyo3_c(pyo3_instrument))
         elif isinstance(pyo3_instrument, nautilus_pyo3.CryptoOption):
             instruments.append(CryptoOption.from_pyo3_c(pyo3_instrument))
+        elif isinstance(pyo3_instrument, nautilus_pyo3.CryptoOptionSpread):
+            instruments.append(CryptoOptionSpread.from_pyo3_c(pyo3_instrument))
         elif isinstance(pyo3_instrument, nautilus_pyo3.CurrencyPair):
             instruments.append(CurrencyPair.from_pyo3_c(pyo3_instrument))
         elif isinstance(pyo3_instrument, nautilus_pyo3.Equity):
@@ -828,11 +903,34 @@ cpdef list[Instrument] instruments_from_pyo3(list pyo3_instruments):
             instruments.append(FuturesContract.from_pyo3_c(pyo3_instrument))
         elif isinstance(pyo3_instrument, nautilus_pyo3.FuturesSpread):
             instruments.append(FuturesSpread.from_pyo3_c(pyo3_instrument))
+        elif isinstance(pyo3_instrument, nautilus_pyo3.IndexInstrument):
+            instruments.append(IndexInstrument.from_pyo3_c(pyo3_instrument))
         elif isinstance(pyo3_instrument, nautilus_pyo3.OptionContract):
             instruments.append(OptionContract.from_pyo3_c(pyo3_instrument))
         elif isinstance(pyo3_instrument, nautilus_pyo3.OptionSpread):
             instruments.append(OptionSpread.from_pyo3_c(pyo3_instrument))
+        elif isinstance(pyo3_instrument, nautilus_pyo3.PerpetualContract):
+            instruments.append(PerpetualContract.from_pyo3_c(pyo3_instrument))
+        elif isinstance(pyo3_instrument, nautilus_pyo3.TokenizedAsset):
+            instruments.append(TokenizedAsset.from_pyo3_c(pyo3_instrument))
         else:
-            RuntimeError(f"Instrument {pyo3_instrument} not supported")
+            raise RuntimeError(f"Instrument {pyo3_instrument} not supported")
 
     return instruments
+
+
+cdef bint settlement_currency_differs_for_quanto(
+    Currency settlement_currency,
+    Currency quote_currency,
+    Currency base_currency,
+):
+    if settlement_currency == base_currency:
+        return False
+
+    if (
+        settlement_currency.code in USD_EQUIVALENT_CURRENCY_CODES
+        and quote_currency.code in USD_EQUIVALENT_CURRENCY_CODES
+    ):
+        return False
+
+    return settlement_currency != quote_currency

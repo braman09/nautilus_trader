@@ -1,5 +1,5 @@
 # -------------------------------------------------------------------------------------------------
-#  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+#  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 #  https://nautechsystems.io
 #
 #  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -194,16 +194,16 @@ def test_unregistered_actor_properties_work():
     assert actor.trader_id is None
     assert actor.actor_id is not None
 
-    # State should be PreInitialized for unregistered actor
+    # State should be PRE_INITIALIZED for unregistered actor
     from nautilus_trader.core.nautilus_pyo3 import ComponentState
 
-    assert actor.state() == ComponentState.PreInitialized  # TODO
+    assert actor.state() == ComponentState.PRE_INITIALIZED
 
     # trader_id should be None for unregistered actor
     assert actor.trader_id is None
 
     # Status checks should work
-    assert not actor.is_ready()  # Should be False in PreInitialized state
+    assert not actor.is_ready()  # Should be False in PRE_INITIALIZED state
     assert not actor.is_running()
     assert not actor.is_stopped()
     assert not actor.is_disposed()
@@ -275,7 +275,6 @@ def test_specialized_subscription_methods_exist(instrument_id, client_id):
     assert hasattr(actor, "subscribe_index_prices")
     assert hasattr(actor, "subscribe_instrument_status")
     assert hasattr(actor, "subscribe_instrument_close")
-    assert hasattr(actor, "subscribe_order_fills")
 
 
 def test_request_methods_exist(instrument_id, client_id, data_type):
@@ -314,7 +313,6 @@ def test_unsubscribe_methods_exist(client_id, data_type):
         "unsubscribe_instrument_status",
         "unsubscribe_instrument_close",
         "unsubscribe_book_at_interval",
-        "unsubscribe_order_fills",
     ]
 
     for method_name in unsubscribe_methods:
@@ -397,7 +395,6 @@ def test_all_subscription_methods_match_legacy_api():
         "subscribe_index_prices",
         "subscribe_instrument_status",
         "subscribe_instrument_close",
-        "subscribe_order_fills",
     ]
 
     for method_name in expected_subscription_methods:

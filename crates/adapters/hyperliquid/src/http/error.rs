@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -16,7 +16,7 @@
 use nautilus_network::http::{HttpClientError, ReqwestError, StatusCode};
 use thiserror::Error;
 
-/// Comprehensive error type for Hyperliquid operations
+/// Error type for Hyperliquid operations
 #[derive(Debug, Error)]
 pub enum Error {
     /// Transport layer errors (network, connection issues)
@@ -137,6 +137,7 @@ impl Error {
     }
 
     /// Map reqwest errors to appropriate error types
+    #[expect(clippy::needless_pass_by_value)]
     pub fn from_reqwest(error: ReqwestError) -> Self {
         if error.is_timeout() {
             Self::Timeout
@@ -157,6 +158,7 @@ impl Error {
     }
 
     /// Map HTTP client errors to appropriate error types
+    #[expect(clippy::needless_pass_by_value)]
     pub fn from_http_client(error: HttpClientError) -> Self {
         Self::transport(format!("HTTP client error: {error}"))
     }
@@ -179,14 +181,23 @@ impl Error {
     pub fn is_auth_error(&self) -> bool {
         matches!(self, Self::Auth(_))
     }
+
+    /// Check if the error is a transport-layer failure with undefined venue outcome.
+    pub fn is_transport_error(&self) -> bool {
+        matches!(self, Self::Transport(_) | Self::Timeout | Self::Io(_))
+    }
+
+    /// Check if the error is an HTTP 422 Unprocessable Entity response.
+    ///
+    /// Hyperliquid returns 422 from info endpoints that depend on the indexer
+    /// (such as `recentTrades`) when served by a node without it.
+    pub fn is_unprocessable_entity(&self) -> bool {
+        matches!(self, Self::Http { status: 422, .. })
+    }
 }
 
 /// Result type alias for Hyperliquid operations
 pub type Result<T> = std::result::Result<T, Error>;
-
-////////////////////////////////////////////////////////////////////////////////
-// Tests
-////////////////////////////////////////////////////////////////////////////////
 
 #[cfg(test)]
 mod tests {
@@ -228,6 +239,36 @@ mod tests {
 
         let err = Error::NonceWindow("Nonce too old".to_string());
         assert_eq!(err.to_string(), "nonce window error: Nonce too old");
+    }
+
+    #[rstest]
+    fn test_is_transport_error() {
+        assert!(Error::transport("conn dropped").is_transport_error());
+        assert!(Error::Timeout.is_transport_error());
+        assert!(
+            Error::Io(std::io::Error::new(
+                std::io::ErrorKind::ConnectionReset,
+                "x"
+            ))
+            .is_transport_error()
+        );
+
+        assert!(!Error::auth("bad signer").is_transport_error());
+        assert!(!Error::bad_request("malformed payload").is_transport_error());
+        assert!(!Error::http(503, "service unavailable").is_transport_error());
+        assert!(!Error::rate_limit("info", 1, None).is_transport_error());
+        assert!(!Error::exchange("HTTP 500").is_transport_error());
+        assert!(!Error::decode("bad json").is_transport_error());
+        assert!(!Error::nonce_window("stale").is_transport_error());
+    }
+
+    #[rstest]
+    fn test_is_unprocessable_entity() {
+        assert!(Error::http(422, "indexer unavailable").is_unprocessable_entity());
+
+        assert!(!Error::http(404, "not found").is_unprocessable_entity());
+        assert!(!Error::http(500, "server error").is_unprocessable_entity());
+        assert!(!Error::bad_request("malformed payload").is_unprocessable_entity());
     }
 
     #[rstest]

@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -13,6 +13,7 @@
 //  limitations under the License.
 // -------------------------------------------------------------------------------------------------
 
+use ahash::AHashMap;
 use log::LevelFilter;
 use nautilus_core::{UUID4, python::to_pyvalue_err};
 use nautilus_model::identifiers::TraderId;
@@ -29,24 +30,87 @@ use crate::{
         parse_level_filter_str,
         writer::FileWriterConfig,
     },
+    python::config_error_to_pyvalue_err,
 };
 
 #[pymethods]
+#[pyo3_stub_gen::derive::gen_stub_pymethods]
 impl LoggerConfig {
-    /// Creates a [`LoggerConfig`] from a spec string.
+    /// Configuration for the Nautilus logger.
+    #[new]
+    #[pyo3(signature = (
+        stdout_level=None,
+        fileout_level=None,
+        component_levels=None,
+        is_colored=None,
+        print_config=None,
+        bypass_logging=None,
+        log_components_only=None,
+        file_config=None,
+        clear_log_file=None,
+        fileout_sync_on_flush=None,
+        buffered_stdout=None,
+    ))]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "PyO3 constructor mirrors LoggerConfig keyword arguments"
+    )]
+    fn py_new(
+        stdout_level: Option<LogLevel>,
+        fileout_level: Option<LogLevel>,
+        component_levels: Option<std::collections::HashMap<String, String>>,
+        is_colored: Option<bool>,
+        print_config: Option<bool>,
+        bypass_logging: Option<bool>,
+        log_components_only: Option<bool>,
+        file_config: Option<FileWriterConfig>,
+        clear_log_file: Option<bool>,
+        fileout_sync_on_flush: Option<bool>,
+        buffered_stdout: Option<bool>,
+    ) -> PyResult<Self> {
+        let component_levels = parse_component_levels(component_levels).map_err(to_pyvalue_err)?;
+        let mut config = Self::new(
+            stdout_level.map_or(LevelFilter::Info, map_log_level_to_filter),
+            fileout_level.map_or(LevelFilter::Off, map_log_level_to_filter),
+            component_levels,
+            AHashMap::new(),
+            log_components_only.unwrap_or(false),
+            is_colored.unwrap_or(true),
+            print_config.unwrap_or(false),
+            false,
+            bypass_logging.unwrap_or(false),
+            file_config,
+            clear_log_file.unwrap_or(false),
+        );
+        config.fileout_sync_on_flush = fileout_sync_on_flush.unwrap_or(true);
+        config.buffered_stdout = buffered_stdout.unwrap_or(false);
+        config.validate().map_err(config_error_to_pyvalue_err)?;
+        Ok(config)
+    }
+
+    /// Parses a configuration from a spec string.
+    ///
+    /// # Format
+    ///
+    /// Semicolon-separated key-value pairs or bare flags:
+    /// ```text
+    /// stdout=Info;fileout=Debug;RiskEngine=Error;my_crate::module=Debug;is_colored
+    /// ```
     ///
     /// # Errors
     ///
-    /// Returns a Python exception if the spec string is invalid.
+    /// Returns an error if the spec string contains invalid syntax or log levels.
     #[staticmethod]
     #[pyo3(name = "from_spec")]
-    pub fn py_from_spec(spec: String) -> PyResult<Self> {
-        Self::from_spec(&spec).map_err(to_pyvalue_err)
+    pub fn py_from_spec(spec: &str) -> PyResult<Self> {
+        Self::from_spec(spec).map_err(to_pyvalue_err)
     }
 }
 
 #[pymethods]
+#[pyo3_stub_gen::derive::gen_stub_pymethods]
 impl FileWriterConfig {
+    /// Creates a new `FileWriterConfig` instance.
     #[new]
     #[pyo3(signature = (directory=None, file_name=None, file_format=None, file_rotate=None))]
     #[must_use]
@@ -60,26 +124,6 @@ impl FileWriterConfig {
     }
 }
 
-/// Initialize tracing.
-///
-/// Tracing is meant to be used to trace/debug async Rust code. It can be
-/// configured to filter modules and write up to a specific level only using
-/// by passing a configuration using the `RUST_LOG` environment variable.
-///
-/// # Safety
-///
-/// Should only be called once during an applications run, ideally at the
-/// beginning of the run.
-///
-/// # Errors
-///
-/// Returns an error if tracing subscriber fails to initialize.
-#[pyfunction()]
-#[pyo3(name = "init_tracing")]
-pub fn py_init_tracing() -> PyResult<()> {
-    logging::init_tracing().map_err(to_pyvalue_err)
-}
-
 /// Initialize logging.
 ///
 /// Logging should be used for Python and sync Rust logic which is most of
@@ -87,19 +131,17 @@ pub fn py_init_tracing() -> PyResult<()> {
 /// Logging can be configured to filter components and write up to a specific level only
 /// by passing a configuration using the `NAUTILUS_LOG` environment variable.
 ///
-/// # Safety
-///
 /// Should only be called once during an applications run, ideally at the
 /// beginning of the run.
-/// Initializes logging via Python interface.
 ///
 /// # Errors
 ///
-/// Returns a Python exception if logger initialization fails.
+/// Returns an error if the logging subsystem fails to initialize.
 #[pyfunction]
+#[pyo3_stub_gen::derive::gen_stub_pyfunction(module = "nautilus_trader.common")]
 #[pyo3(name = "init_logging")]
-#[allow(clippy::too_many_arguments)]
-#[pyo3(signature = (trader_id, instance_id, level_stdout, level_file=None, component_levels=None, directory=None, file_name=None, file_format=None, file_rotate=None, is_colored=None, is_bypassed=None, print_config=None, log_components_only=None))]
+#[expect(clippy::too_many_arguments)]
+#[pyo3(signature = (trader_id, instance_id, level_stdout, level_file=None, component_levels=None, directory=None, file_name=None, file_format=None, file_rotate=None, is_colored=None, is_bypassed=None, print_config=None, log_components_only=None, fileout_sync_on_flush=None, buffered_stdout=None))]
 pub fn py_init_logging(
     trader_id: TraderId,
     instance_id: UUID4,
@@ -114,23 +156,35 @@ pub fn py_init_logging(
     is_bypassed: Option<bool>,
     print_config: Option<bool>,
     log_components_only: Option<bool>,
+    fileout_sync_on_flush: Option<bool>,
+    buffered_stdout: Option<bool>,
 ) -> PyResult<LogGuard> {
     let level_file = level_file.map_or(LevelFilter::Off, map_log_level_to_filter);
 
     let component_levels = parse_component_levels(component_levels).map_err(to_pyvalue_err)?;
 
-    let config = LoggerConfig::new(
+    let file_config = FileWriterConfig::new(directory, file_name, file_format, file_rotate);
+    file_config
+        .validate()
+        .map_err(config_error_to_pyvalue_err)?;
+
+    let mut config = LoggerConfig::new(
         map_log_level_to_filter(level_stdout),
         level_file,
         component_levels,
+        AHashMap::new(), // module_level - not exposed to Python
         log_components_only.unwrap_or(false),
         is_colored.unwrap_or(true),
         print_config.unwrap_or(false),
+        false,                        // use_tracing - Python handles this separately in kernel
+        is_bypassed.unwrap_or(false), // bypass_logging
+        None,                         // file_config - passed separately to init_logging
+        false,                        // clear_log_file
     );
+    config.fileout_sync_on_flush = fileout_sync_on_flush.unwrap_or(true);
+    config.buffered_stdout = buffered_stdout.unwrap_or(false);
 
-    let file_config = FileWriterConfig::new(directory, file_name, file_format, file_rotate);
-
-    if is_bypassed.unwrap_or(false) {
+    if config.bypass_logging {
         logging_set_bypass();
     }
 
@@ -138,17 +192,35 @@ pub fn py_init_logging(
 }
 
 #[pyfunction()]
+#[pyo3_stub_gen::derive::gen_stub_pyfunction(module = "nautilus_trader.common")]
 #[pyo3(name = "logger_flush")]
 pub fn py_logger_flush() {
     log::logger().flush();
 }
 
+/// Flushes and syncs file logs to disk.
+///
+/// This is a no-op when logging is not initialized or file logging is disabled.
+///
+/// # Errors
+///
+/// Returns an error if the sync request cannot be delivered or acknowledged.
+#[pyfunction()]
+#[pyo3_stub_gen::derive::gen_stub_pyfunction(module = "nautilus_trader.common")]
+#[pyo3(name = "logging_sync_to_disk")]
+pub fn py_logging_sync_to_disk() -> PyResult<bool> {
+    logging::logging_sync_to_disk()
+        .map(|()| true)
+        .map_err(to_pyvalue_err)
+}
+
 fn parse_component_levels(
     original_map: Option<std::collections::HashMap<String, String>>,
-) -> anyhow::Result<std::collections::HashMap<Ustr, LevelFilter>> {
+) -> anyhow::Result<AHashMap<Ustr, LevelFilter>> {
     match original_map {
         Some(map) => {
-            let mut new_map = std::collections::HashMap::new();
+            let mut new_map = AHashMap::new();
+
             for (key, value) in map {
                 let ustr_key = Ustr::from(&key);
                 let level = parse_level_filter_str(&value)?;
@@ -156,12 +228,13 @@ fn parse_component_levels(
             }
             Ok(new_map)
         }
-        None => Ok(std::collections::HashMap::new()),
+        None => Ok(AHashMap::new()),
     }
 }
 
 /// Create a new log event.
 #[pyfunction]
+#[pyo3_stub_gen::derive::gen_stub_pyfunction(module = "nautilus_trader.common")]
 #[pyo3(name = "logger_log")]
 pub fn py_logger_log(level: LogLevel, color: LogColor, component: &str, message: &str) {
     logger::log(level, color, Ustr::from(component), message);
@@ -169,6 +242,7 @@ pub fn py_logger_log(level: LogLevel, color: LogColor, component: &str, message:
 
 /// Logs the standard Nautilus system header.
 #[pyfunction]
+#[pyo3_stub_gen::derive::gen_stub_pyfunction(module = "nautilus_trader.common")]
 #[pyo3(name = "log_header")]
 pub fn py_log_header(trader_id: TraderId, machine_id: &str, instance_id: UUID4, component: &str) {
     headers::log_header(trader_id, machine_id, instance_id, Ustr::from(component));
@@ -176,27 +250,67 @@ pub fn py_log_header(trader_id: TraderId, machine_id: &str, instance_id: UUID4, 
 
 /// Logs system information.
 #[pyfunction]
+#[pyo3_stub_gen::derive::gen_stub_pyfunction(module = "nautilus_trader.common")]
 #[pyo3(name = "log_sysinfo")]
 pub fn py_log_sysinfo(component: &str) {
     headers::log_sysinfo(Ustr::from(component));
 }
 
+/// Sets the global logging clock to static mode.
 #[pyfunction]
+#[pyo3_stub_gen::derive::gen_stub_pyfunction(module = "nautilus_trader.common")]
 #[pyo3(name = "logging_clock_set_static_mode")]
 pub fn py_logging_clock_set_static_mode() {
     logging_clock_set_static_mode();
 }
 
+/// Sets the global logging clock to real-time mode.
 #[pyfunction]
+#[pyo3_stub_gen::derive::gen_stub_pyfunction(module = "nautilus_trader.common")]
 #[pyo3(name = "logging_clock_set_realtime_mode")]
 pub fn py_logging_clock_set_realtime_mode() {
     logging_clock_set_realtime_mode();
 }
 
+/// Sets the global logging clock static time with the given UNIX timestamp (nanoseconds).
 #[pyfunction]
+#[pyo3_stub_gen::derive::gen_stub_pyfunction(module = "nautilus_trader.common")]
 #[pyo3(name = "logging_clock_set_static_time")]
 pub fn py_logging_clock_set_static_time(time_ns: u64) {
     logging_clock_set_static_time(time_ns);
+}
+
+/// Returns whether the tracing subscriber has been initialized.
+#[cfg(feature = "tracing-bridge")]
+#[pyfunction]
+#[pyo3_stub_gen::derive::gen_stub_pyfunction(module = "nautilus_trader.common")]
+#[pyo3(name = "tracing_is_initialized")]
+#[must_use]
+pub fn py_tracing_is_initialized() -> bool {
+    crate::logging::bridge::tracing_is_initialized()
+}
+
+/// Initializes a tracing subscriber for external Rust crate logging.
+///
+/// This sets up a standard tracing subscriber that outputs to stdout with
+/// the format controlled by `RUST_LOG` environment variable. The output
+/// format uses nanosecond timestamps to align with Nautilus logging.
+///
+/// # Environment Variables
+///
+/// - `RUST_LOG`: Controls which modules emit tracing events and at what level.
+///   - Example: `RUST_LOG=hyper=debug,tokio=warn`.
+///   - Default: `warn` (if not set).
+///
+/// # Errors
+///
+/// Returns an error if the tracing subscriber has already been initialized.
+#[cfg(feature = "tracing-bridge")]
+#[pyfunction]
+#[pyo3_stub_gen::derive::gen_stub_pyfunction(module = "nautilus_trader.common")]
+#[pyo3(name = "init_tracing")]
+pub fn py_init_tracing() -> PyResult<()> {
+    crate::logging::bridge::init_tracing().map_err(to_pyvalue_err)
 }
 
 /// A thin wrapper around the global Rust logger which exposes ergonomic
@@ -208,8 +322,10 @@ pub fn py_logging_clock_set_static_time(time_ns: u64) {
 #[pyclass(
     module = "nautilus_trader.core.nautilus_pyo3.common",
     name = "Logger",
-    unsendable
+    unsendable,
+    from_py_object
 )]
+#[pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.common")]
 #[derive(Debug, Clone)]
 pub struct PyLogger {
     name: Ustr,
@@ -221,9 +337,15 @@ impl PyLogger {
             name: Ustr::from(name),
         }
     }
+
+    fn log_message(&self, level: LogLevel, color: Option<LogColor>, message: &str) {
+        let color = color.unwrap_or(LogColor::Normal);
+        logger::log(level, color, self.name, message);
+    }
 }
 
 #[pymethods]
+#[pyo3_stub_gen::derive::gen_stub_pymethods]
 impl PyLogger {
     /// Create a new `Logger` instance.
     #[new]
@@ -240,32 +362,37 @@ impl PyLogger {
 
     /// Emit a TRACE level record.
     #[pyo3(name = "trace")]
+    #[pyo3(signature = (message, color=None))]
     fn py_trace(&self, message: &str, color: Option<LogColor>) {
-        self._log(LogLevel::Trace, color, message);
+        self.log_message(LogLevel::Trace, color, message);
     }
 
     /// Emit a DEBUG level record.
     #[pyo3(name = "debug")]
+    #[pyo3(signature = (message, color=None))]
     fn py_debug(&self, message: &str, color: Option<LogColor>) {
-        self._log(LogLevel::Debug, color, message);
+        self.log_message(LogLevel::Debug, color, message);
     }
 
     /// Emit an INFO level record.
     #[pyo3(name = "info")]
+    #[pyo3(signature = (message, color=None))]
     fn py_info(&self, message: &str, color: Option<LogColor>) {
-        self._log(LogLevel::Info, color, message);
+        self.log_message(LogLevel::Info, color, message);
     }
 
     /// Emit a WARNING level record.
     #[pyo3(name = "warning")]
+    #[pyo3(signature = (message, color=None))]
     fn py_warning(&self, message: &str, color: Option<LogColor>) {
-        self._log(LogLevel::Warning, color, message);
+        self.log_message(LogLevel::Warning, color, message);
     }
 
     /// Emit an ERROR level record.
     #[pyo3(name = "error")]
+    #[pyo3(signature = (message, color=None))]
     fn py_error(&self, message: &str, color: Option<LogColor>) {
-        self._log(LogLevel::Error, color, message);
+        self.log_message(LogLevel::Error, color, message);
     }
 
     /// Emit an ERROR level record with the active Python exception info.
@@ -277,6 +404,7 @@ impl PyLogger {
         if pyo3::PyErr::occurred(py) {
             let err = PyErr::fetch(py);
             let err_str = err.to_string();
+
             if full_msg.is_empty() {
                 full_msg = err_str;
             } else {
@@ -284,7 +412,7 @@ impl PyLogger {
             }
         }
 
-        self._log(LogLevel::Error, color, &full_msg);
+        self.log_message(LogLevel::Error, color, &full_msg);
     }
 
     /// Flush buffered log records.
@@ -293,8 +421,10 @@ impl PyLogger {
         log::logger().flush();
     }
 
-    fn _log(&self, level: LogLevel, color: Option<LogColor>, message: &str) {
-        let color = color.unwrap_or(LogColor::Normal);
-        logger::log(level, color, self.name, message);
+    /// Emit a log record at the given level (Python-facing helper).
+    #[pyo3(name = "_log")]
+    #[pyo3(signature = (level, color=None, message=""))]
+    fn py_log(&self, level: LogLevel, color: Option<LogColor>, message: &str) {
+        self.log_message(level, color, message);
     }
 }

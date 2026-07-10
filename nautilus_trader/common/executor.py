@@ -1,5 +1,5 @@
 # -------------------------------------------------------------------------------------------------
-#  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+#  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 #  https://nautechsystems.io
 #
 #  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -146,7 +146,7 @@ class ActorExecutor:
         except asyncio.CancelledError:
             pass  # Ignore the exception since we intentionally cancelled the task
         except TimeoutError:
-            self._log.error("Executor: TimeoutError shutting down worker")
+            self._log.warning("Executor: TimeoutError shutting down worker")
 
         # Use a dedicated thread to avoid self-join issue when the executor
         # is also the loop's default executor

@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -22,7 +22,9 @@ use futures::future::join_all;
 use nautilus_common::{cache::database::CacheMap, enums::SerializationEncoding};
 use nautilus_model::{
     accounts::AccountAny,
-    identifiers::{AccountId, ClientOrderId, InstrumentId, PositionId},
+    data::{CustomData, DataType, HasTsInit},
+    events::{AccountState, OrderEventAny, OrderFilled},
+    identifiers::{AccountId, ClientId, ClientOrderId, InstrumentId, PositionId},
     instruments::{InstrumentAny, SyntheticInstrument},
     orders::OrderAny,
     position::Position,
@@ -32,6 +34,8 @@ use redis::{AsyncCommands, aio::ConnectionManager};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use ustr::Ustr;
+
+use super::get_index_key;
 
 // Collection keys
 const INDEX: &str = "index";
@@ -44,6 +48,7 @@ const ORDERS: &str = "orders";
 const POSITIONS: &str = "positions";
 const ACTORS: &str = "actors";
 const STRATEGIES: &str = "strategies";
+const CUSTOM: &str = "custom";
 const REDIS_DELIMITER: char = ':';
 
 // Index keys
@@ -72,13 +77,25 @@ impl DatabaseQueries {
         encoding: SerializationEncoding,
         payload: &T,
     ) -> anyhow::Result<Vec<u8>> {
-        let mut value = serde_json::to_value(payload)?;
-        convert_timestamps(&mut value);
         match encoding {
-            SerializationEncoding::MsgPack => rmp_serde::to_vec(&value)
-                .map_err(|e| anyhow::anyhow!("Failed to serialize msgpack `payload`: {e}")),
-            SerializationEncoding::Json => serde_json::to_vec(&value)
-                .map_err(|e| anyhow::anyhow!("Failed to serialize json `payload`: {e}")),
+            SerializationEncoding::MsgPack => {
+                let mut value = serde_json::to_value(payload)?;
+                convert_timestamps(&mut value);
+                rmp_serde::to_vec(&value)
+                    .map_err(|e| anyhow::anyhow!("Failed to serialize msgpack `payload`: {e}"))
+            }
+            SerializationEncoding::Json => {
+                let mut value = serde_json::to_value(payload)?;
+                convert_timestamps(&mut value);
+                serde_json::to_vec(&value)
+                    .map_err(|e| anyhow::anyhow!("Failed to serialize json `payload`: {e}"))
+            }
+            SerializationEncoding::Sbe => {
+                anyhow::bail!("SBE encoding is not supported for Redis cache payloads")
+            }
+            SerializationEncoding::Capnp => {
+                anyhow::bail!("Cap'n Proto encoding is not supported for Redis cache payloads")
+            }
         }
     }
 
@@ -96,6 +113,12 @@ impl DatabaseQueries {
                 .map_err(|e| anyhow::anyhow!("Failed to deserialize msgpack `payload`: {e}"))?,
             SerializationEncoding::Json => serde_json::from_slice(payload)
                 .map_err(|e| anyhow::anyhow!("Failed to deserialize json `payload`: {e}"))?,
+            SerializationEncoding::Sbe => {
+                anyhow::bail!("SBE encoding is not supported for Redis cache payloads")
+            }
+            SerializationEncoding::Capnp => {
+                anyhow::bail!("Cap'n Proto encoding is not supported for Redis cache payloads")
+            }
         };
 
         convert_timestamp_strings(&mut value);
@@ -168,6 +191,41 @@ impl DatabaseQueries {
         Ok(bytes_results)
     }
 
+    /// Bulk reads multiple keys from Redis using MGET, batched into chunks.
+    ///
+    /// Keys are batched into chunks of `batch_size` to avoid exceeding Redis
+    /// request size limits on some providers.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `batch_size` is zero or if the underlying Redis MGET operation fails.
+    pub async fn read_bulk_batched(
+        con: &ConnectionManager,
+        keys: &[String],
+        batch_size: usize,
+    ) -> anyhow::Result<Vec<Option<Bytes>>> {
+        if batch_size == 0 {
+            anyhow::bail!("`batch_size` must be greater than zero");
+        }
+
+        if keys.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let mut all_results: Vec<Option<Bytes>> = Vec::with_capacity(keys.len());
+
+        for chunk in keys.chunks(batch_size) {
+            let mut con = con.clone();
+
+            let results: Vec<Option<Vec<u8>>> =
+                redis::cmd("MGET").arg(chunk).query_async(&mut con).await?;
+
+            all_results.extend(results.into_iter().map(|opt| opt.map(Bytes::from)));
+        }
+
+        Ok(all_results)
+    }
+
     /// Reads raw byte payloads for `key` under `trader_key` from Redis.
     ///
     /// # Errors
@@ -185,15 +243,10 @@ impl DatabaseQueries {
 
         match collection {
             INDEX => Self::read_index(&mut con, &full_key).await,
-            GENERAL => Self::read_string(&mut con, &full_key).await,
-            CURRENCIES => Self::read_string(&mut con, &full_key).await,
-            INSTRUMENTS => Self::read_string(&mut con, &full_key).await,
-            SYNTHETICS => Self::read_string(&mut con, &full_key).await,
-            ACCOUNTS => Self::read_list(&mut con, &full_key).await,
-            ORDERS => Self::read_list(&mut con, &full_key).await,
-            POSITIONS => Self::read_list(&mut con, &full_key).await,
-            ACTORS => Self::read_string(&mut con, &full_key).await,
-            STRATEGIES => Self::read_string(&mut con, &full_key).await,
+            GENERAL | CURRENCIES | INSTRUMENTS | SYNTHETICS | ACTORS | STRATEGIES => {
+                Self::read_string(&mut con, &full_key).await
+            }
+            ACCOUNTS | ORDERS | POSITIONS => Self::read_list(&mut con, &full_key).await,
             _ => anyhow::bail!("Unsupported operation: `read` for collection '{collection}'"),
         }
     }
@@ -247,7 +300,7 @@ impl DatabaseQueries {
     ) -> anyhow::Result<AHashMap<Ustr, Currency>> {
         let mut currencies = AHashMap::new();
         let pattern = format!("{trader_key}{REDIS_DELIMITER}{CURRENCIES}*");
-        tracing::debug!("Loading {pattern}");
+        log::debug!("Loading {pattern}");
 
         let mut con = con.clone();
         let keys = Self::scan_keys(&mut con, pattern).await?;
@@ -282,7 +335,7 @@ impl DatabaseQueries {
             }
         }
 
-        tracing::debug!("Loaded {} currencies(s)", currencies.len());
+        log::debug!("Loaded {} currencies(s)", currencies.len());
 
         Ok(currencies)
     }
@@ -304,7 +357,7 @@ impl DatabaseQueries {
     ) -> anyhow::Result<AHashMap<InstrumentId, InstrumentAny>> {
         let mut instruments = AHashMap::new();
         let pattern = format!("{trader_key}{REDIS_DELIMITER}{INSTRUMENTS}*");
-        tracing::debug!("Loading {pattern}");
+        log::debug!("Loading {pattern}");
 
         let mut con = con.clone();
         let keys = Self::scan_keys(&mut con, pattern).await?;
@@ -329,9 +382,8 @@ impl DatabaseQueries {
                             })
                         });
 
-                    let instrument_id = match instrument_id {
-                        Ok(id) => id,
-                        Err(_) => return None,
+                    let Ok(instrument_id) = instrument_id else {
+                        return None;
                     };
 
                     match Self::load_instrument(&con, trader_key, &instrument_id, encoding).await {
@@ -351,7 +403,7 @@ impl DatabaseQueries {
 
         // Insert all Instrument_id (key) and Instrument (value) into the HashMap, filtering out None values.
         instruments.extend(join_all(futures).await.into_iter().flatten());
-        tracing::debug!("Loaded {} instruments(s)", instruments.len());
+        log::debug!("Loaded {} instruments(s)", instruments.len());
 
         Ok(instruments)
     }
@@ -373,7 +425,7 @@ impl DatabaseQueries {
     ) -> anyhow::Result<AHashMap<InstrumentId, SyntheticInstrument>> {
         let mut synthetics = AHashMap::new();
         let pattern = format!("{trader_key}{REDIS_DELIMITER}{SYNTHETICS}*");
-        tracing::debug!("Loading {pattern}");
+        log::debug!("Loading {pattern}");
 
         let mut con = con.clone();
         let keys = Self::scan_keys(&mut con, pattern).await?;
@@ -398,9 +450,8 @@ impl DatabaseQueries {
                             })
                         });
 
-                    let instrument_id = match instrument_id {
-                        Ok(id) => id,
-                        Err(_) => return None,
+                    let Ok(instrument_id) = instrument_id else {
+                        return None;
                     };
 
                     match Self::load_synthetic(&con, trader_key, &instrument_id, encoding).await {
@@ -420,7 +471,7 @@ impl DatabaseQueries {
 
         // Insert all Instrument_id (key) and Synthetic (value) into the HashMap, filtering out None values.
         synthetics.extend(join_all(futures).await.into_iter().flatten());
-        tracing::debug!("Loaded {} synthetics(s)", synthetics.len());
+        log::debug!("Loaded {} synthetics(s)", synthetics.len());
 
         Ok(synthetics)
     }
@@ -442,7 +493,7 @@ impl DatabaseQueries {
     ) -> anyhow::Result<AHashMap<AccountId, AccountAny>> {
         let mut accounts = AHashMap::new();
         let pattern = format!("{trader_key}{REDIS_DELIMITER}{ACCOUNTS}*");
-        tracing::debug!("Loading {pattern}");
+        log::debug!("Loading {pattern}");
 
         let mut con = con.clone();
         let keys = Self::scan_keys(&mut con, pattern).await?;
@@ -476,7 +527,7 @@ impl DatabaseQueries {
 
         // Insert all Account_id (key) and Account (value) into the HashMap, filtering out None values.
         accounts.extend(join_all(futures).await.into_iter().flatten());
-        tracing::debug!("Loaded {} accounts(s)", accounts.len());
+        log::debug!("Loaded {} accounts(s)", accounts.len());
 
         Ok(accounts)
     }
@@ -498,7 +549,7 @@ impl DatabaseQueries {
     ) -> anyhow::Result<AHashMap<ClientOrderId, OrderAny>> {
         let mut orders = AHashMap::new();
         let pattern = format!("{trader_key}{REDIS_DELIMITER}{ORDERS}*");
-        tracing::debug!("Loading {pattern}");
+        log::debug!("Loading {pattern}");
 
         let mut con = con.clone();
         let keys = Self::scan_keys(&mut con, pattern).await?;
@@ -532,7 +583,7 @@ impl DatabaseQueries {
 
         // Insert all Client-Order-Id (key) and Order (value) into the HashMap, filtering out None values.
         orders.extend(join_all(futures).await.into_iter().flatten());
-        tracing::debug!("Loaded {} order(s)", orders.len());
+        log::debug!("Loaded {} order(s)", orders.len());
 
         Ok(orders)
     }
@@ -554,7 +605,7 @@ impl DatabaseQueries {
     ) -> anyhow::Result<AHashMap<PositionId, Position>> {
         let mut positions = AHashMap::new();
         let pattern = format!("{trader_key}{REDIS_DELIMITER}{POSITIONS}*");
-        tracing::debug!("Loading {pattern}");
+        log::debug!("Loading {pattern}");
 
         let mut con = con.clone();
         let keys = Self::scan_keys(&mut con, pattern).await?;
@@ -588,9 +639,126 @@ impl DatabaseQueries {
 
         // Insert all Position_id (key) and Position (value) into the HashMap, filtering out None values.
         positions.extend(join_all(futures).await.into_iter().flatten());
-        tracing::debug!("Loaded {} position(s)", positions.len());
+        log::debug!("Loaded {} position(s)", positions.len());
 
         Ok(positions)
+    }
+
+    /// Loads the order ID to position ID index for `trader_key`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if reading or parsing the index fails.
+    pub async fn load_index_order_position(
+        con: &ConnectionManager,
+        trader_key: &str,
+    ) -> anyhow::Result<AHashMap<ClientOrderId, PositionId>> {
+        let index = Self::read_index_hash(con, trader_key, INDEX_ORDER_POSITION).await?;
+        Ok(index
+            .into_iter()
+            .map(|(k, v)| {
+                (
+                    ClientOrderId::from(k.as_str()),
+                    PositionId::from(v.as_str()),
+                )
+            })
+            .collect())
+    }
+
+    /// Loads the order ID to execution client ID index for `trader_key`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if reading or parsing the index fails.
+    pub async fn load_index_order_client(
+        con: &ConnectionManager,
+        trader_key: &str,
+    ) -> anyhow::Result<AHashMap<ClientOrderId, ClientId>> {
+        let index = Self::read_index_hash(con, trader_key, INDEX_ORDER_CLIENT).await?;
+        Ok(index
+            .into_iter()
+            .map(|(k, v)| (ClientOrderId::from(k.as_str()), ClientId::from(v.as_str())))
+            .collect())
+    }
+
+    async fn read_index_hash(
+        con: &ConnectionManager,
+        trader_key: &str,
+        key: &str,
+    ) -> anyhow::Result<HashMap<String, String>> {
+        let result = Self::read(con, trader_key, key).await?;
+        if result.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        serde_json::from_slice(&result[0])
+            .map_err(|e| anyhow::anyhow!("Failed to parse index hash '{key}': {e}"))
+    }
+
+    /// Loads all custom data for `trader_key` matching the given `data_type`.
+    ///
+    /// Keys are stored as `custom:<ts_init_020>:<uuid>`; value is full `CustomData` JSON.
+    /// Scans all custom keys, deserializes, filters by `type_name` (full or short), metadata,
+    /// and identifier to match SQL semantics, then sorts by `ts_init` ascending.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if scanning, bulk read, or deserialization fails.
+    pub async fn load_custom_data(
+        con: &ConnectionManager,
+        trader_key: &str,
+        data_type: &DataType,
+    ) -> anyhow::Result<Vec<CustomData>> {
+        let pattern = format!("{trader_key}{REDIS_DELIMITER}{CUSTOM}*");
+        log::debug!("Loading custom data {pattern}");
+
+        let mut con = con.clone();
+        let keys = Self::scan_keys(&mut con, pattern).await?;
+
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let values = Self::read_bulk(&con, &keys).await?;
+        let request_type_name = data_type.type_name();
+        let request_short = request_type_name
+            .rsplit([':', '.'])
+            .next()
+            .unwrap_or(request_type_name);
+        let request_identifier = data_type.identifier().unwrap_or("");
+
+        let mut results = Vec::new();
+
+        for value_opt in values {
+            let Some(value_bytes) = value_opt else {
+                continue;
+            };
+            let custom = match CustomData::from_json_bytes(value_bytes.as_ref()) {
+                Ok(c) => c,
+                Err(e) => {
+                    log::warn!("Failed to deserialize custom data from Redis: {e}");
+                    continue;
+                }
+            };
+            let stored_type_name = custom.data_type.type_name();
+            let type_match =
+                stored_type_name == request_type_name || stored_type_name == request_short;
+            let identifier_match =
+                custom.data_type.identifier().unwrap_or("") == request_identifier;
+            let metadata_match = match (data_type.metadata(), custom.data_type.metadata()) {
+                (None, None) => true,
+                (Some(a), Some(b)) => serde_json::to_value(a).ok() == serde_json::to_value(b).ok(),
+                _ => false,
+            };
+
+            if type_match && identifier_match && metadata_match {
+                results.push(custom);
+            }
+        }
+
+        results.sort_by_key(HasTsInit::ts_init);
+        log::debug!("Loaded {} custom data item(s)", results.len());
+        Ok(results)
     }
 
     /// Loads a single currency for `trader_key` and `code` using the specified `encoding`.
@@ -674,7 +842,11 @@ impl DatabaseQueries {
             return Ok(None);
         }
 
-        let account: AccountAny = Self::deserialize_payload(encoding, &result[0])?;
+        let events: Vec<AccountState> = result
+            .iter()
+            .map(|payload| Self::deserialize_payload(encoding, payload))
+            .collect::<anyhow::Result<_>>()?;
+        let account = AccountAny::from_events(&events)?;
         Ok(Some(account))
     }
 
@@ -695,7 +867,11 @@ impl DatabaseQueries {
             return Ok(None);
         }
 
-        let order: OrderAny = Self::deserialize_payload(encoding, &result[0])?;
+        let events: Vec<OrderEventAny> = result
+            .iter()
+            .map(|payload| Self::deserialize_payload(encoding, payload))
+            .collect::<anyhow::Result<_>>()?;
+        let order = OrderAny::from_events(events)?;
         Ok(Some(order))
     }
 
@@ -716,7 +892,34 @@ impl DatabaseQueries {
             return Ok(None);
         }
 
-        let position: Position = Self::deserialize_payload(encoding, &result[0])?;
+        let fills: Vec<OrderFilled> = result
+            .iter()
+            .map(|payload| Self::deserialize_payload(encoding, payload))
+            .collect::<anyhow::Result<_>>()?;
+        let Some((first_fill, remaining_fills)) = fills.split_first() else {
+            return Ok(None);
+        };
+        let Some(instrument) =
+            Self::load_instrument(con, trader_key, &first_fill.instrument_id, encoding).await?
+        else {
+            log::error!(
+                "Instrument not found for position {position_id}: {}",
+                first_fill.instrument_id
+            );
+            return Ok(None);
+        };
+
+        let mut position = Position::new(&instrument, first_fill.clone());
+        for fill in remaining_fills {
+            if position.trade_ids().contains(&fill.trade_id) {
+                anyhow::bail!(
+                    "Duplicate fill event for position {position_id}: {}",
+                    fill.trade_id
+                );
+            }
+            position.apply(fill);
+        }
+
         Ok(Some(position))
     }
 
@@ -729,19 +932,18 @@ impl DatabaseQueries {
     }
 
     async fn read_index(conn: &mut ConnectionManager, key: &str) -> anyhow::Result<Vec<Bytes>> {
-        let index_key = Self::get_index_key(key)?;
+        let index_key = get_index_key(key)?;
         match index_key {
-            INDEX_ORDER_IDS => Self::read_set(conn, key).await,
-            INDEX_ORDER_POSITION => Self::read_hset(conn, key).await,
-            INDEX_ORDER_CLIENT => Self::read_hset(conn, key).await,
-            INDEX_ORDERS => Self::read_set(conn, key).await,
-            INDEX_ORDERS_OPEN => Self::read_set(conn, key).await,
-            INDEX_ORDERS_CLOSED => Self::read_set(conn, key).await,
-            INDEX_ORDERS_EMULATED => Self::read_set(conn, key).await,
-            INDEX_ORDERS_INFLIGHT => Self::read_set(conn, key).await,
-            INDEX_POSITIONS => Self::read_set(conn, key).await,
-            INDEX_POSITIONS_OPEN => Self::read_set(conn, key).await,
-            INDEX_POSITIONS_CLOSED => Self::read_set(conn, key).await,
+            INDEX_ORDER_IDS
+            | INDEX_ORDERS
+            | INDEX_ORDERS_OPEN
+            | INDEX_ORDERS_CLOSED
+            | INDEX_ORDERS_EMULATED
+            | INDEX_ORDERS_INFLIGHT
+            | INDEX_POSITIONS
+            | INDEX_POSITIONS_OPEN
+            | INDEX_POSITIONS_CLOSED => Self::read_set(conn, key).await,
+            INDEX_ORDER_POSITION | INDEX_ORDER_CLIENT => Self::read_hset(conn, key).await,
             _ => anyhow::bail!("Index unknown '{index_key}' on read"),
         }
     }
@@ -771,14 +973,6 @@ impl DatabaseQueries {
         let result: Vec<Bytes> = conn.lrange(key, 0, -1).await?;
         Ok(result)
     }
-
-    fn get_index_key(key: &str) -> anyhow::Result<&str> {
-        key.split_once(REDIS_DELIMITER)
-            .map(|(_, index_key)| index_key)
-            .ok_or_else(|| {
-                anyhow::anyhow!("Invalid `key`, missing a '{REDIS_DELIMITER}' delimiter, was {key}")
-            })
-    }
 }
 
 fn is_timestamp_field(key: &str) -> bool {
@@ -795,7 +989,7 @@ fn convert_timestamps(value: &mut Value) {
                     && let Value::Number(n) = v
                     && let Some(n) = n.as_u64()
                 {
-                    let dt = DateTime::<Utc>::from_timestamp_nanos(n as i64);
+                    let dt = DateTime::<Utc>::from_timestamp_nanos(n.cast_signed());
                     *v = Value::String(dt.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true));
                 }
                 convert_timestamps(v);
@@ -821,8 +1015,9 @@ fn convert_timestamp_strings(value: &mut Value) {
                     *v = Value::Number(
                         (dt.with_timezone(&Utc)
                             .timestamp_nanos_opt()
-                            .expect("Invalid DateTime") as u64)
-                            .into(),
+                            .expect("Invalid DateTime")
+                            .cast_unsigned())
+                        .into(),
                     );
                 }
                 convert_timestamp_strings(v);

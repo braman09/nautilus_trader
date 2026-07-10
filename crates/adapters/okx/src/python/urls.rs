@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -17,34 +17,53 @@
 
 use pyo3::prelude::*;
 
-use crate::common::urls;
+use crate::common::{
+    enums::{OKXEnvironment, OKXRegion},
+    urls,
+};
 
-/// Gets the OKX HTTP base URL.
+/// Returns the OKX HTTP base URL for the given region.
 #[pyfunction]
-pub fn get_okx_http_base_url() -> String {
-    urls::get_http_base_url()
+#[pyo3(signature = (region = None))]
+#[pyo3_stub_gen::derive::gen_stub_pyfunction(module = "nautilus_trader.adapters.okx")]
+pub fn get_okx_http_base_url(region: Option<OKXRegion>) -> String {
+    urls::get_http_base_url(region.unwrap_or_default()).to_string()
 }
 
-/// Gets the OKX WebSocket URL for public data (market data).
+/// Returns the OKX WebSocket URL for public data (market data).
 #[pyfunction]
-pub fn get_okx_ws_url_public(is_demo: bool) -> String {
-    urls::get_ws_base_url_public(is_demo)
+#[pyo3(signature = (environment, region = None))]
+#[pyo3_stub_gen::derive::gen_stub_pyfunction(module = "nautilus_trader.adapters.okx")]
+pub fn get_okx_ws_url_public(environment: OKXEnvironment, region: Option<OKXRegion>) -> String {
+    urls::get_ws_base_url_public(region.unwrap_or_default(), environment).to_string()
 }
 
-/// Gets the OKX WebSocket URL for private data (account/order management).
+/// Returns the OKX WebSocket URL for private data (account/order management).
 #[pyfunction]
-pub fn get_okx_ws_url_private(is_demo: bool) -> String {
-    urls::get_ws_base_url_private(is_demo)
+#[pyo3(signature = (environment, region = None))]
+#[pyo3_stub_gen::derive::gen_stub_pyfunction(module = "nautilus_trader.adapters.okx")]
+pub fn get_okx_ws_url_private(environment: OKXEnvironment, region: Option<OKXRegion>) -> String {
+    urls::get_ws_base_url_private(region.unwrap_or_default(), environment).to_string()
 }
 
-/// Gets the OKX WebSocket URL for business data (bars/candlesticks).
+/// Returns the OKX WebSocket URL for business data (bars/candlesticks).
 #[pyfunction]
-pub fn get_okx_ws_url_business(is_demo: bool) -> String {
-    urls::get_ws_base_url_business(is_demo)
+#[pyo3(signature = (environment, region = None))]
+#[pyo3_stub_gen::derive::gen_stub_pyfunction(module = "nautilus_trader.adapters.okx")]
+pub fn get_okx_ws_url_business(environment: OKXEnvironment, region: Option<OKXRegion>) -> String {
+    urls::get_ws_base_url_business(region.unwrap_or_default(), environment).to_string()
+}
+
+/// Derives a WebSocket URL for a given channel from a base URL.
+#[pyfunction]
+#[pyo3_stub_gen::derive::gen_stub_pyfunction(module = "nautilus_trader.adapters.okx")]
+pub fn derive_okx_ws_url(base_url: &str, channel: &str) -> String {
+    urls::derive_ws_url(base_url, channel)
 }
 
 /// Checks if OKX endpoint requires authentication.
 #[pyfunction]
+#[pyo3_stub_gen::derive::gen_stub_pyfunction(module = "nautilus_trader.adapters.okx")]
 pub fn okx_requires_authentication(endpoint_type: urls::OKXEndpointType) -> bool {
     urls::requires_authentication(endpoint_type)
 }

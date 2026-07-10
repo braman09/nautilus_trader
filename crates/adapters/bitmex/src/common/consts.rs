@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -17,10 +17,18 @@
 
 use std::sync::LazyLock;
 
-use nautilus_model::identifiers::Venue;
+use nautilus_model::identifiers::{ClientId, Venue};
 use ustr::Ustr;
 
+/// Venue identifier string.
 pub const BITMEX: &str = "BITMEX";
+
+/// Static venue instance.
+pub static BITMEX_VENUE: LazyLock<Venue> = LazyLock::new(|| Venue::new(Ustr::from(BITMEX)));
+
+/// Static client ID instance.
+pub static BITMEX_CLIENT_ID: LazyLock<ClientId> =
+    LazyLock::new(|| ClientId::new(Ustr::from(BITMEX)));
 
 pub const BITMEX_WS_URL: &str = "wss://ws.bitmex.com/realtime";
 pub const BITMEX_WS_TESTNET_URL: &str = "wss://ws.testnet.bitmex.com/realtime";
@@ -28,5 +36,3 @@ pub const BITMEX_HTTP_URL: &str = "https://www.bitmex.com/api/v1";
 pub const BITMEX_HTTP_TESTNET_URL: &str = "https://testnet.bitmex.com/api/v1";
 
 pub const BITMEX_WS_TOPIC_DELIMITER: char = ':';
-
-pub static BITMEX_VENUE: LazyLock<Venue> = LazyLock::new(|| Venue::new(Ustr::from(BITMEX)));

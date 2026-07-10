@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -14,6 +14,16 @@
 // -------------------------------------------------------------------------------------------------
 
 //! Identifiers for the trading domain model.
+//!
+//! # Design notes
+//!
+//! - `TradeId` remains a fixed-size `StackStr` with a 36-character limit.
+//! - High-cardinality external IDs must not use `Ustr`, because interning
+//!   unique values grows process memory without bound.
+//! - Some identifiers still use fixed-size `repr(C)` storage because the
+//!   current Cython/C ABI shares raw layout by value.
+//! - A deeper storage redesign is deferred to V2, when the ABI can move to
+//!   conversion-based bindings instead of layout sharing.
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -25,9 +35,9 @@ pub mod actor_id;
 pub mod client_id;
 pub mod client_order_id;
 pub mod component_id;
-pub mod default;
 pub mod exec_algorithm_id;
 pub mod instrument_id;
+pub mod option_series_id;
 pub mod order_list_id;
 pub mod position_id;
 pub mod strategy_id;
@@ -42,10 +52,22 @@ pub mod stubs;
 
 // Re-exports
 pub use crate::identifiers::{
-    account_id::AccountId, actor_id::ActorId, client_id::ClientId, client_order_id::ClientOrderId,
-    component_id::ComponentId, exec_algorithm_id::ExecAlgorithmId, instrument_id::InstrumentId,
-    order_list_id::OrderListId, position_id::PositionId, strategy_id::StrategyId, symbol::Symbol,
-    trade_id::TradeId, trader_id::TraderId, venue::Venue, venue_order_id::VenueOrderId,
+    account_id::AccountId,
+    actor_id::ActorId,
+    client_id::ClientId,
+    client_order_id::ClientOrderId,
+    component_id::ComponentId,
+    exec_algorithm_id::ExecAlgorithmId,
+    instrument_id::{GENERIC_SPREAD_ID_SEPARATOR, InstrumentId, InstrumentIdError},
+    option_series_id::{OptionSeriesId, OptionSeriesIdError},
+    order_list_id::OrderListId,
+    position_id::PositionId,
+    strategy_id::{StrategyId, normalize_order_id_tag},
+    symbol::Symbol,
+    trade_id::TradeId,
+    trader_id::TraderId,
+    venue::Venue,
+    venue_order_id::VenueOrderId,
 };
 
 impl_from_str_for_identifier!(account_id::AccountId);

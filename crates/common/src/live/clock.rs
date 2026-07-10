@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -15,16 +15,8 @@
 
 //! Live clock implementation using Tokio for real-time operations.
 
-use std::{
-    collections::BinaryHeap,
-    ops::Deref,
-    pin::Pin,
-    sync::Arc,
-    task::{Context, Poll},
-};
+use std::{collections::BTreeMap, ops::Deref, sync::Arc};
 
-use ahash::AHashMap;
-use futures::Stream;
 use nautilus_core::{
     AtomicTime, UnixNanos, correctness::check_predicate_true, time::get_atomic_clock_realtime,
 };
@@ -32,11 +24,12 @@ use ustr::Ustr;
 
 use super::timer::LiveTimer;
 use crate::{
-    clock::{CallbackRegistry, Clock, validate_and_prepare_time_alert, validate_and_prepare_timer},
-    runner::{TimeEventSender, get_time_event_sender},
-    timer::{
-        ScheduledTimeEvent, TimeEvent, TimeEventCallback, TimeEventHandlerV2, create_valid_interval,
+    clock::{
+        CallbackRegistry, Clock, replace_existing_timer, validate_and_prepare_time_alert,
+        validate_and_prepare_timer,
     },
+    runner::{TimeEventSender, try_get_time_event_sender},
+    timer::{TimeEvent, TimeEventCallback, TimeEventHandler, create_valid_interval},
 };
 
 /// A real-time clock which uses system time.
@@ -49,7 +42,7 @@ use crate::{
 #[derive(Debug)]
 pub struct LiveClock {
     time: &'static AtomicTime,
-    timers: AHashMap<Ustr, LiveTimer>,
+    timers: BTreeMap<Ustr, LiveTimer>,
     callbacks: CallbackRegistry,
     sender: Option<Arc<dyn TimeEventSender>>,
 }
@@ -60,14 +53,14 @@ impl LiveClock {
     pub fn new(sender: Option<Arc<dyn TimeEventSender>>) -> Self {
         Self {
             time: get_atomic_clock_realtime(),
-            timers: AHashMap::new(),
+            timers: BTreeMap::new(),
             callbacks: CallbackRegistry::new(),
             sender,
         }
     }
 
     #[must_use]
-    pub const fn get_timers(&self) -> &AHashMap<Ustr, LiveTimer> {
+    pub const fn get_timers(&self) -> &BTreeMap<Ustr, LiveTimer> {
         &self.timers
     }
 
@@ -76,17 +69,16 @@ impl LiveClock {
     }
 
     fn replace_existing_timer_if_needed(&mut self, name: &Ustr) {
-        if self.timer_exists(name) {
-            self.cancel_timer(name.as_str());
-            log::warn!("Timer '{name}' replaced");
-        }
+        replace_existing_timer(&mut self.timers, name);
     }
 }
 
 impl Default for LiveClock {
     /// Creates a new default [`LiveClock`] instance.
+    ///
+    /// Uses `try_get_time_event_sender()` to allow creation before channels are initialized.
     fn default() -> Self {
-        Self::new(Some(get_time_event_sender()))
+        Self::new(try_get_time_event_sender())
     }
 }
 
@@ -131,11 +123,21 @@ impl Clock for LiveClock {
     }
 
     fn timer_exists(&self, name: &Ustr) -> bool {
-        self.timers.contains_key(name)
+        self.timers
+            .get(name)
+            .is_some_and(|timer| !timer.is_expired())
     }
 
     fn register_default_handler(&mut self, handler: TimeEventCallback) {
         self.callbacks.register_default_handler(handler);
+    }
+
+    fn cancel_default_handler(&mut self) {
+        self.callbacks.cancel_default_handler();
+    }
+
+    fn cancel_callbacks(&mut self) {
+        self.callbacks.clear();
     }
 
     /// # Panics
@@ -143,7 +145,7 @@ impl Clock for LiveClock {
     /// This function panics if:
     /// - The event does not have an associated handler (see trait documentation).
     #[allow(unused_variables)]
-    fn get_handler(&self, event: TimeEvent) -> TimeEventHandlerV2 {
+    fn get_handler(&self, event: TimeEvent) -> TimeEventHandler {
         self.callbacks.get_handler(event)
     }
 
@@ -176,6 +178,7 @@ impl Clock for LiveClock {
 
         // Safe to calculate interval now that we've ensured alert_time_ns >= ts_now
         let interval_ns = create_valid_interval((alert_time_ns - ts_now).into());
+        let fire_immediately = alert_time_ns == ts_now;
 
         let mut timer = LiveTimer::new(
             name,
@@ -183,7 +186,7 @@ impl Clock for LiveClock {
             ts_now,
             Some(alert_time_ns),
             callback,
-            false,
+            fire_immediately,
             self.sender.clone(),
         );
 
@@ -255,7 +258,7 @@ impl Clock for LiveClock {
     fn next_time_ns(&self, name: &str) -> Option<UnixNanos> {
         self.timers
             .get(&Ustr::from(name))
-            .map(|timer| timer.next_time_ns())
+            .map(LiveTimer::next_time_ns)
     }
 
     fn cancel_timer(&mut self, name: &str) {
@@ -279,44 +282,6 @@ impl Clock for LiveClock {
     }
 }
 
-// Helper struct to stream events from the heap
-#[derive(Debug)]
-pub struct TimeEventStream {
-    heap: Arc<tokio::sync::Mutex<BinaryHeap<ScheduledTimeEvent>>>,
-}
-
-impl TimeEventStream {
-    pub const fn new(heap: Arc<tokio::sync::Mutex<BinaryHeap<ScheduledTimeEvent>>>) -> Self {
-        Self { heap }
-    }
-}
-
-impl Stream for TimeEventStream {
-    type Item = TimeEvent;
-
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let mut heap = match self.heap.try_lock() {
-            Ok(guard) => guard,
-            Err(e) => {
-                tracing::error!("Unable to get LiveClock heap lock: {e}");
-                cx.waker().wake_by_ref();
-                return Poll::Pending;
-            }
-        };
-
-        if let Some(event) = heap.pop() {
-            Poll::Ready(Some(event.into_inner()))
-        } else {
-            cx.waker().wake_by_ref();
-            Poll::Pending
-        }
-    }
-}
-
-////////////////////////////////////////////////////////////////////////////////
-// Tests
-////////////////////////////////////////////////////////////////////////////////
-
 #[cfg(test)]
 mod tests {
     use std::{
@@ -333,7 +298,7 @@ mod tests {
         clock::Clock,
         runner::TimeEventSender,
         testing::wait_until,
-        timer::{TimeEvent, TimeEventCallback, TimeEventHandlerV2},
+        timer::{TimeEvent, TimeEventCallback, TimeEventHandler},
     };
 
     #[derive(Debug)]
@@ -348,8 +313,8 @@ mod tests {
     }
 
     impl TimeEventSender for CollectingSender {
-        fn send(&self, handler: TimeEventHandlerV2) {
-            let TimeEventHandlerV2 { event, callback } = handler;
+        fn send(&self, handler: TimeEventHandler) {
+            let TimeEventHandler { event, callback } = handler;
             let now_ns = get_atomic_clock_realtime().get_time_ns();
             let event_clone = event.clone();
             callback.call(event);
@@ -396,8 +361,8 @@ mod tests {
 
         let snapshot = events.lock().expect(MUTEX_POISONED).clone();
         let diffs: Vec<u64> = snapshot
-            .windows(2)
-            .map(|pair| pair[1].0.ts_event.as_u64() - pair[0].0.ts_event.as_u64())
+            .array_windows()
+            .map(|[a, b]| b.0.ts_event.as_u64() - a.0.ts_event.as_u64())
             .collect();
 
         assert!(!diffs.is_empty());
@@ -417,7 +382,7 @@ mod tests {
         clock.register_default_handler(TimeEventCallback::from(|_| {}));
 
         let now = clock.timestamp_ns();
-        let alert_time = now + 1_000_u64;
+        let alert_time = now + Duration::from_mins(1).as_nanos() as u64;
 
         clock
             .set_time_alert_ns("alert-callback", alert_time, None, None)
@@ -476,38 +441,41 @@ mod tests {
     }
 
     #[rstest]
-    fn test_live_timer_short_delay_not_early() {
+    fn test_live_clock_timer_exists_consistent_after_expiry() {
         let events = Arc::new(Mutex::new(Vec::new()));
         let sender = Arc::new(CollectingSender::new(Arc::clone(&events)));
 
         let mut clock = LiveClock::new(Some(sender));
         clock.register_default_handler(TimeEventCallback::from(|_| {}));
 
+        let name = Ustr::from("expiring");
         let now = clock.timestamp_ns();
-        let start_time = UnixNanos::from(*now + 500_000); // 0.5 ms in the future
-        let interval_ns = 1_000_000;
+        let interval_ns = Duration::from_millis(5).as_nanos() as u64;
+        let stop_time = UnixNanos::from(*now + Duration::from_millis(12).as_nanos() as u64);
 
         clock
             .set_timer_ns(
-                "short-delay",
+                name.as_str(),
                 interval_ns,
-                Some(start_time),
+                None,
+                Some(stop_time),
                 None,
                 None,
                 None,
-                Some(true),
             )
             .unwrap();
 
-        wait_for_events(&events, 1, Duration::from_millis(100));
+        assert!(clock.timer_exists(&name));
 
-        let snapshot = events.lock().expect(MUTEX_POISONED).clone();
-        assert!(!snapshot.is_empty());
+        // Wait for the timer task to run past its stop time and finish
+        wait_until(|| clock.timer_count() == 0, Duration::from_secs(2));
 
-        for (event, actual_ts) in &snapshot {
-            assert!(actual_ts.as_u64() >= event.ts_event.as_u64());
-        }
-
-        clock.cancel_timers();
+        // An expired timer is purged only lazily on the next set/cancel call,
+        // so the entry still sits in the map; the three introspection surfaces
+        // must nevertheless agree it is gone
+        assert!(clock.timers.contains_key(&name));
+        assert!(!clock.timer_exists(&name));
+        assert_eq!(clock.timer_count(), 0);
+        assert!(clock.timer_names().is_empty());
     }
 }

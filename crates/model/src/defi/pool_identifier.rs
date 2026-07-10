@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -14,13 +14,13 @@
 // -------------------------------------------------------------------------------------------------
 
 use std::{
-    fmt::{Debug, Display, Formatter},
+    fmt::{Debug, Display},
     hash::{Hash, Hasher},
     str::FromStr,
 };
 
 use alloy_primitives::Address;
-use nautilus_core::correctness::FAILED;
+use nautilus_core::{correctness::FAILED, hex};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use ustr::Ustr;
 
@@ -28,10 +28,18 @@ use ustr::Ustr;
 ///
 /// This enum distinguishes between two types of pool identifiers:
 /// - **Address**: Used by V2/V3 protocols where pool identifier equals pool contract address (42 chars: "0x" + 40 hex)
-/// - **PoolId**: Used by V4 protocols where pool identifier is a bytes32 hash (66 chars: "0x" + 64 hex)
+/// - **`PoolId`**: Used by V4 protocols where pool identifier is a bytes32 hash (66 chars: "0x" + 64 hex)
 ///
 /// The type implements case-insensitive equality and hashing for address comparison,
 /// while preserving the original case for display purposes.
+///
+/// DeFi pool data carries both this `PoolIdentifier` and an `InstrumentId`, which key different
+/// layers. The chain and database layers key on the `PoolIdentifier`: the raw on-chain identity
+/// used for log filters and table lookups. The engine, message bus, and cache key on the
+/// `InstrumentId` (`Symbol(pool_identifier)` at `Venue(chain:dex)`), so pool events flow through
+/// the same instrument-keyed infrastructure as any other data. The `InstrumentId` flattens the
+/// identifier to a string and loses the `Address` versus `PoolId` variant, so it cannot
+/// reconstruct this type: both are stored rather than derived.
 #[derive(Clone, Copy, PartialOrd, Ord)]
 pub enum PoolIdentifier {
     /// V2/V3 pool identifier (checksummed Ethereum address)
@@ -45,7 +53,7 @@ impl PoolIdentifier {
     ///
     /// Automatically detects variant based on string length:
     /// - 42 characters (0x + 40 hex): Address variant
-    /// - 66 characters (0x + 64 hex): PoolId variant
+    /// - 66 characters (0x + 64 hex): `PoolId` variant
     ///
     /// # Errors
     ///
@@ -58,7 +66,7 @@ impl PoolIdentifier {
         let value = value.as_ref();
 
         if !value.starts_with("0x") {
-            anyhow::bail!("Pool identifier must start with '0x', got: {value}");
+            anyhow::bail!("Pool identifier must start with '0x', was: {value}");
         }
 
         match value.len() {
@@ -82,7 +90,7 @@ impl PoolIdentifier {
             }
             len => {
                 anyhow::bail!(
-                    "Pool identifier must be 42 chars (address) or 66 chars (pool ID), got {len} chars: {value}"
+                    "Pool identifier must be 42 chars (address) or 66 chars (pool ID), was {len} chars: {value}"
                 )
             }
         }
@@ -106,7 +114,7 @@ impl PoolIdentifier {
         Self::Address(Ustr::from(address.to_checksum(None).as_str()))
     }
 
-    /// Creates a PoolId variant from raw bytes (32 bytes).
+    /// Creates a `PoolId` variant from raw bytes (32 bytes).
     ///
     /// # Errors
     ///
@@ -114,15 +122,14 @@ impl PoolIdentifier {
     pub fn from_pool_id_bytes(bytes: &[u8]) -> anyhow::Result<Self> {
         anyhow::ensure!(
             bytes.len() == 32,
-            "Pool ID must be 32 bytes, got {}",
+            "Pool ID must be 32 bytes, was {}",
             bytes.len()
         );
 
-        let hex_string = format!("0x{}", hex::encode(bytes));
-        Ok(Self::PoolId(Ustr::from(&hex_string)))
+        Ok(Self::PoolId(Ustr::from(&hex::encode_prefixed(bytes))))
     }
 
-    /// Creates a PoolId variant from a hex string (with or without 0x prefix).
+    /// Creates a `PoolId` variant from a hex string (with or without 0x prefix).
     ///
     /// # Errors
     ///
@@ -133,7 +140,7 @@ impl PoolIdentifier {
 
         anyhow::ensure!(
             hex_str.len() == 64,
-            "Pool ID hex must be 64 characters (32 bytes), got {}",
+            "Pool ID hex must be 64 characters (32 bytes), was {}",
             hex_str.len()
         );
 
@@ -167,7 +174,7 @@ impl PoolIdentifier {
         matches!(self, Self::Address(_))
     }
 
-    /// Returns true if this is a PoolId variant (V4 pools).
+    /// Returns true if this is a `PoolId` variant (V4 pools).
     #[must_use]
     pub fn is_pool_id(&self) -> bool {
         matches!(self, Self::PoolId(_))
@@ -179,7 +186,7 @@ impl PoolIdentifier {
     ///
     /// # Errors
     ///
-    /// Returns error if this is a PoolId variant or if parsing fails.
+    /// Returns error if this is a `PoolId` variant or if parsing fails.
     pub fn to_address(&self) -> anyhow::Result<Address> {
         match self {
             Self::Address(s) => Address::parse_checksummed(s.as_str(), None)
@@ -198,13 +205,9 @@ impl PoolIdentifier {
     pub fn to_pool_id_bytes(&self) -> anyhow::Result<[u8; 32]> {
         match self {
             Self::PoolId(s) => {
-                let hex = s.as_str().strip_prefix("0x").unwrap_or(s.as_str());
-                let bytes = hex::decode(hex)
-                    .map_err(|e| anyhow::anyhow!("Failed to decode pool ID hex: {e}",))?;
-
-                bytes
-                    .try_into()
-                    .map_err(|_| anyhow::anyhow!("Pool ID must be exactly 32 bytes"))
+                let hex_str = s.as_str().strip_prefix("0x").unwrap_or(s.as_str());
+                hex::decode_array::<32>(hex_str)
+                    .map_err(|e| anyhow::anyhow!("Failed to decode pool ID hex: {e}"))
             }
             Self::Address(_) => anyhow::bail!("Cannot convert Address variant to PoolId bytes"),
         }
@@ -252,7 +255,7 @@ impl Hash for PoolIdentifier {
 }
 
 impl Display for PoolIdentifier {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Address(s) | Self::PoolId(s) => write!(f, "{s}"),
         }
@@ -260,7 +263,7 @@ impl Display for PoolIdentifier {
 }
 
 impl Debug for PoolIdentifier {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Address(s) => write!(f, "Address({s:?})"),
             Self::PoolId(s) => write!(f, "PoolId({s:?})"),
@@ -285,8 +288,8 @@ impl<'de> Deserialize<'de> for PoolIdentifier {
     where
         D: Deserializer<'de>,
     {
-        let value_str: &str = Deserialize::deserialize(deserializer)?;
-        Self::new_checked(value_str).map_err(serde::de::Error::custom)
+        let value_str: std::borrow::Cow<'de, str> = Deserialize::deserialize(deserializer)?;
+        Self::new_checked(value_str.as_ref()).map_err(serde::de::Error::custom)
     }
 }
 
@@ -316,9 +319,6 @@ impl AsRef<str> for PoolIdentifier {
     }
 }
 
-////////////////////////////////////////////////////////////////////////////////
-// Tests
-////////////////////////////////////////////////////////////////////////////////
 #[cfg(test)]
 mod tests {
     use rstest::rstest;
@@ -413,6 +413,18 @@ mod tests {
         let deserialized: PoolIdentifier = serde_json::from_str(&json).unwrap();
 
         assert_eq!(original, deserialized);
+    }
+
+    #[rstest]
+    fn test_deserialize_from_owned_value() {
+        let value =
+            serde_json::Value::String("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2".to_string());
+
+        let deserialized: PoolIdentifier = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            deserialized,
+            PoolIdentifier::new("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")
+        );
     }
 
     #[rstest]

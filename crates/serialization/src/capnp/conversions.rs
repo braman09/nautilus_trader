@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -21,7 +21,7 @@ use indexmap::IndexMap;
 use nautilus_model::{
     data::{
         FundingRateUpdate, IndexPriceUpdate, InstrumentClose, InstrumentStatus, MarkPriceUpdate,
-        QuoteTick, TradeTick,
+        OptionGreekValues, OptionGreeks, QuoteTick, TradeTick,
         bar::{Bar, BarSpecification, BarType},
         delta::OrderBookDelta,
         deltas::OrderBookDeltas,
@@ -30,10 +30,10 @@ use nautilus_model::{
     },
     enums::{
         AccountType, AggregationSource, AggressorSide, AssetClass, BarAggregation, BookAction,
-        BookType, ContingencyType, CurrencyType, InstrumentClass, InstrumentCloseType,
-        LiquiditySide, MarketStatusAction, OmsType, OptionKind, OrderSide, OrderStatus, OrderType,
-        PositionAdjustmentType, PositionSide, PriceType, RecordFlag, TimeInForce,
-        TrailingOffsetType, TriggerType,
+        BookType, ContingencyType, CurrencyType, GreeksConvention, InstrumentClass,
+        InstrumentCloseType, LiquiditySide, MarketStatusAction, OmsType, OptionKind, OrderSide,
+        OrderStatus, OrderType, PositionAdjustmentType, PositionSide, PriceType, RecordFlag,
+        TimeInForce, TrailingOffsetType, TriggerType,
     },
     events::{
         OrderAccepted, OrderCancelRejected, OrderCanceled, OrderDenied, OrderEmulated,
@@ -109,10 +109,6 @@ where
     }
 }
 
-// ================================================================================================
-// Base Types
-// ================================================================================================
-
 impl<'a> ToCapnp<'a> for nautilus_core::UUID4 {
     type Builder = base_capnp::u_u_i_d4::Builder<'a>;
 
@@ -184,10 +180,6 @@ impl<'a> FromCapnp<'a> for Decimal {
         Ok(decimal_from_parts(lo, mid, hi, flags))
     }
 }
-
-// ================================================================================================
-// Identifiers
-// ================================================================================================
 
 impl<'a> ToCapnp<'a> for TraderId {
     type Builder = identifiers_capnp::trader_id::Builder<'a>;
@@ -449,29 +441,15 @@ impl<'a> FromCapnp<'a> for InstrumentId {
 impl<'a> ToCapnp<'a> for Price {
     type Builder = types_capnp::price::Builder<'a>;
 
+    #[expect(clippy::useless_conversion)] // Needed for non-high-precision builds
     fn to_capnp(&self, mut builder: Self::Builder) {
-        let raw = self.raw;
+        let raw_i128: i128 = self.raw.into();
+        let lo = raw_i128 as u64;
+        let hi = (raw_i128 >> 64) as u64;
 
-        #[cfg(not(feature = "high-precision"))]
-        {
-            let raw_i128 = raw as i128;
-            let lo = raw_i128 as u64;
-            let hi = (raw_i128 >> 64) as u64;
-
-            let mut raw_builder = builder.reborrow().init_raw();
-            raw_builder.set_lo(lo);
-            raw_builder.set_hi(hi);
-        }
-
-        #[cfg(feature = "high-precision")]
-        {
-            let lo = raw as u64;
-            let hi = (raw >> 64) as u64;
-
-            let mut raw_builder = builder.reborrow().init_raw();
-            raw_builder.set_lo(lo);
-            raw_builder.set_hi(hi);
-        }
+        let mut raw_builder = builder.reborrow().init_raw();
+        raw_builder.set_lo(lo);
+        raw_builder.set_hi(hi);
 
         builder.set_precision(self.precision);
     }
@@ -492,46 +470,30 @@ impl<'a> FromCapnp<'a> for Price {
         let raw_i128 = ((hi as i64 as i128) << 64) | (lo as i128);
 
         #[cfg(not(feature = "high-precision"))]
-        {
-            let raw = i64::try_from(raw_i128).map_err(|_| -> Box<dyn Error> {
-                "Price value overflows i64 in standard precision mode".into()
-            })?;
-            Ok(Price::from_raw(raw.into(), precision))
-        }
+        let raw = i64::try_from(raw_i128).map_err(|_| -> Box<dyn Error> {
+            "Price value overflows i64 in standard precision mode".into()
+        })?;
 
         #[cfg(feature = "high-precision")]
-        {
-            Ok(Self::from_raw(raw_i128, precision))
-        }
+        let raw = raw_i128;
+
+        #[expect(clippy::useless_conversion)] // Needed for non-high-precision builds
+        Ok(Self::from_raw(raw.into(), precision))
     }
 }
 
 impl<'a> ToCapnp<'a> for Quantity {
     type Builder = types_capnp::quantity::Builder<'a>;
 
+    #[expect(clippy::useless_conversion)] // Needed for non-high-precision builds
     fn to_capnp(&self, mut builder: Self::Builder) {
-        let raw = self.raw;
+        let raw_u128: u128 = self.raw.into();
+        let lo = raw_u128 as u64;
+        let hi = (raw_u128 >> 64) as u64;
 
-        #[cfg(not(feature = "high-precision"))]
-        {
-            let raw_u128 = raw as u128;
-            let lo = raw_u128 as u64;
-            let hi = (raw_u128 >> 64) as u64;
-
-            let mut raw_builder = builder.reborrow().init_raw();
-            raw_builder.set_lo(lo);
-            raw_builder.set_hi(hi);
-        }
-
-        #[cfg(feature = "high-precision")]
-        {
-            let lo = raw as u64;
-            let hi = (raw >> 64) as u64;
-
-            let mut raw_builder = builder.reborrow().init_raw();
-            raw_builder.set_lo(lo);
-            raw_builder.set_hi(hi);
-        }
+        let mut raw_builder = builder.reborrow().init_raw();
+        raw_builder.set_lo(lo);
+        raw_builder.set_hi(hi);
 
         builder.set_precision(self.precision);
     }
@@ -550,17 +512,15 @@ impl<'a> FromCapnp<'a> for Quantity {
         let raw_u128 = ((hi as u128) << 64) | (lo as u128);
 
         #[cfg(not(feature = "high-precision"))]
-        {
-            let raw = u64::try_from(raw_u128).map_err(|_| -> Box<dyn Error> {
-                "Quantity value overflows u64 in standard precision mode".into()
-            })?;
-            Ok(Quantity::from_raw(raw.into(), precision))
-        }
+        let raw = u64::try_from(raw_u128).map_err(|_| -> Box<dyn Error> {
+            "Quantity value overflows u64 in standard precision mode".into()
+        })?;
 
         #[cfg(feature = "high-precision")]
-        {
-            Ok(Self::from_raw(raw_u128, precision))
-        }
+        let raw = raw_u128;
+
+        #[expect(clippy::useless_conversion)] // Needed for non-high-precision builds
+        Ok(Self::from_raw(raw.into(), precision))
     }
 }
 
@@ -695,6 +655,22 @@ pub fn option_kind_from_capnp(value: enums_capnp::OptionKind) -> OptionKind {
     match value {
         enums_capnp::OptionKind::Call => OptionKind::Call,
         enums_capnp::OptionKind::Put => OptionKind::Put,
+    }
+}
+
+#[must_use]
+pub fn greeks_convention_to_capnp(value: GreeksConvention) -> enums_capnp::GreeksConvention {
+    match value {
+        GreeksConvention::BlackScholes => enums_capnp::GreeksConvention::BlackScholes,
+        GreeksConvention::PriceAdjusted => enums_capnp::GreeksConvention::PriceAdjusted,
+    }
+}
+
+#[must_use]
+pub fn greeks_convention_from_capnp(value: enums_capnp::GreeksConvention) -> GreeksConvention {
+    match value {
+        enums_capnp::GreeksConvention::BlackScholes => GreeksConvention::BlackScholes,
+        enums_capnp::GreeksConvention::PriceAdjusted => GreeksConvention::PriceAdjusted,
     }
 }
 
@@ -1190,6 +1166,24 @@ pub fn market_status_action_from_capnp(
     }
 }
 
+#[must_use]
+pub fn optional_bool_to_capnp(value: Option<bool>) -> enums_capnp::OptionalBool {
+    match value {
+        None => enums_capnp::OptionalBool::Unknown,
+        Some(true) => enums_capnp::OptionalBool::True,
+        Some(false) => enums_capnp::OptionalBool::False,
+    }
+}
+
+#[must_use]
+pub fn optional_bool_from_capnp(value: enums_capnp::OptionalBool) -> Option<bool> {
+    match value {
+        enums_capnp::OptionalBool::Unknown => None,
+        enums_capnp::OptionalBool::True => Some(true),
+        enums_capnp::OptionalBool::False => Some(false),
+    }
+}
+
 impl<'a> ToCapnp<'a> for Currency {
     type Builder = types_capnp::currency::Builder<'a>;
 
@@ -1219,21 +1213,13 @@ impl<'a> FromCapnp<'a> for Currency {
 impl<'a> ToCapnp<'a> for Money {
     type Builder = types_capnp::money::Builder<'a>;
 
+    #[expect(clippy::useless_conversion)] // Needed for non-high-precision builds
     fn to_capnp(&self, mut builder: Self::Builder) {
         let mut raw_builder = builder.reborrow().init_raw();
 
-        #[cfg(not(feature = "high-precision"))]
-        {
-            let raw_i128 = self.raw as i128;
-            raw_builder.set_lo(raw_i128 as u64);
-            raw_builder.set_hi((raw_i128 >> 64) as u64);
-        }
-
-        #[cfg(feature = "high-precision")]
-        {
-            raw_builder.set_lo(self.raw as u64);
-            raw_builder.set_hi((self.raw >> 64) as u64);
-        }
+        let raw_i128: i128 = self.raw.into();
+        raw_builder.set_lo(raw_i128 as u64);
+        raw_builder.set_hi((raw_i128 >> 64) as u64);
 
         let currency_builder = builder.init_currency();
         self.currency.to_capnp(currency_builder);
@@ -1311,8 +1297,12 @@ impl<'a> ToCapnp<'a> for MarginBalance {
         let maintenance_builder = builder.reborrow().init_maintenance();
         self.maintenance.to_capnp(maintenance_builder);
 
-        let instrument_builder = builder.init_instrument();
-        self.instrument_id.to_capnp(instrument_builder);
+        // Only set the instrument pointer for per-instrument entries; leave
+        // unset to signal account-wide (cross margin) balances.
+        if let Some(instrument_id) = self.instrument_id {
+            let instrument_builder = builder.init_instrument();
+            instrument_id.to_capnp(instrument_builder);
+        }
     }
 }
 
@@ -1326,13 +1316,22 @@ impl<'a> FromCapnp<'a> for MarginBalance {
         let maintenance_reader = reader.get_maintenance()?;
         let maintenance = Money::from_capnp(maintenance_reader)?;
 
-        let instrument_reader = reader.get_instrument()?;
-        let instrument_id = InstrumentId::from_capnp(instrument_reader)?;
+        let instrument_id = if reader.has_instrument() {
+            let instrument_reader = reader.get_instrument()?;
+            Some(InstrumentId::from_capnp(instrument_reader)?)
+        } else {
+            None
+        };
 
         Ok(Self::new(initial, maintenance, instrument_id))
     }
 }
 
+/// Serializes an [`InstrumentId`] to Cap'n Proto bytes.
+///
+/// # Errors
+///
+/// Returns an error if Cap'n Proto serialization fails.
 pub fn serialize_instrument_id(id: &InstrumentId) -> Result<Vec<u8>, Box<dyn Error>> {
     let mut message = capnp::message::Builder::new_default();
     let builder = message.init_root::<identifiers_capnp::instrument_id::Builder>();
@@ -1343,6 +1342,11 @@ pub fn serialize_instrument_id(id: &InstrumentId) -> Result<Vec<u8>, Box<dyn Err
     Ok(bytes)
 }
 
+/// Deserializes an [`InstrumentId`] from Cap'n Proto bytes.
+///
+/// # Errors
+///
+/// Returns an error if Cap'n Proto deserialization fails.
 pub fn deserialize_instrument_id(bytes: &[u8]) -> Result<InstrumentId, Box<dyn Error>> {
     let reader =
         capnp::serialize::read_message(&mut &bytes[..], capnp::message::ReaderOptions::new())?;
@@ -1350,6 +1354,11 @@ pub fn deserialize_instrument_id(bytes: &[u8]) -> Result<InstrumentId, Box<dyn E
     InstrumentId::from_capnp(root)
 }
 
+/// Serializes a [`Price`] to Cap'n Proto bytes.
+///
+/// # Errors
+///
+/// Returns an error if Cap'n Proto serialization fails.
 pub fn serialize_price(price: &Price) -> Result<Vec<u8>, Box<dyn Error>> {
     let mut message = capnp::message::Builder::new_default();
     let builder = message.init_root::<types_capnp::price::Builder>();
@@ -1360,6 +1369,11 @@ pub fn serialize_price(price: &Price) -> Result<Vec<u8>, Box<dyn Error>> {
     Ok(bytes)
 }
 
+/// Deserializes a [`Price`] from Cap'n Proto bytes.
+///
+/// # Errors
+///
+/// Returns an error if Cap'n Proto deserialization fails.
 pub fn deserialize_price(bytes: &[u8]) -> Result<Price, Box<dyn Error>> {
     let reader =
         capnp::serialize::read_message(&mut &bytes[..], capnp::message::ReaderOptions::new())?;
@@ -1367,6 +1381,11 @@ pub fn deserialize_price(bytes: &[u8]) -> Result<Price, Box<dyn Error>> {
     Price::from_capnp(root)
 }
 
+/// Serializes a [`Quantity`] to Cap'n Proto bytes.
+///
+/// # Errors
+///
+/// Returns an error if Cap'n Proto serialization fails.
 pub fn serialize_quantity(qty: &Quantity) -> Result<Vec<u8>, Box<dyn Error>> {
     let mut message = capnp::message::Builder::new_default();
     let builder = message.init_root::<types_capnp::quantity::Builder>();
@@ -1377,6 +1396,11 @@ pub fn serialize_quantity(qty: &Quantity) -> Result<Vec<u8>, Box<dyn Error>> {
     Ok(bytes)
 }
 
+/// Deserializes a [`Quantity`] from Cap'n Proto bytes.
+///
+/// # Errors
+///
+/// Returns an error if Cap'n Proto deserialization fails.
 pub fn deserialize_quantity(bytes: &[u8]) -> Result<Quantity, Box<dyn Error>> {
     let reader =
         capnp::serialize::read_message(&mut &bytes[..], capnp::message::ReaderOptions::new())?;
@@ -1384,6 +1408,11 @@ pub fn deserialize_quantity(bytes: &[u8]) -> Result<Quantity, Box<dyn Error>> {
     Quantity::from_capnp(root)
 }
 
+/// Serializes a [`Currency`] to Cap'n Proto bytes.
+///
+/// # Errors
+///
+/// Returns an error if Cap'n Proto serialization fails.
 pub fn serialize_currency(currency: &Currency) -> Result<Vec<u8>, Box<dyn Error>> {
     let mut message = capnp::message::Builder::new_default();
     let builder = message.init_root::<types_capnp::currency::Builder>();
@@ -1394,6 +1423,11 @@ pub fn serialize_currency(currency: &Currency) -> Result<Vec<u8>, Box<dyn Error>
     Ok(bytes)
 }
 
+/// Deserializes a [`Currency`] from Cap'n Proto bytes.
+///
+/// # Errors
+///
+/// Returns an error if Cap'n Proto deserialization fails.
 pub fn deserialize_currency(bytes: &[u8]) -> Result<Currency, Box<dyn Error>> {
     let reader =
         capnp::serialize::read_message(&mut &bytes[..], capnp::message::ReaderOptions::new())?;
@@ -1401,6 +1435,11 @@ pub fn deserialize_currency(bytes: &[u8]) -> Result<Currency, Box<dyn Error>> {
     Currency::from_capnp(root)
 }
 
+/// Serializes a [`Money`] to Cap'n Proto bytes.
+///
+/// # Errors
+///
+/// Returns an error if Cap'n Proto serialization fails.
 pub fn serialize_money(money: &Money) -> Result<Vec<u8>, Box<dyn Error>> {
     let mut message = capnp::message::Builder::new_default();
     let builder = message.init_root::<types_capnp::money::Builder>();
@@ -1411,6 +1450,11 @@ pub fn serialize_money(money: &Money) -> Result<Vec<u8>, Box<dyn Error>> {
     Ok(bytes)
 }
 
+/// Deserializes a [`Money`] from Cap'n Proto bytes.
+///
+/// # Errors
+///
+/// Returns an error if Cap'n Proto deserialization fails.
 pub fn deserialize_money(bytes: &[u8]) -> Result<Money, Box<dyn Error>> {
     let reader =
         capnp::serialize::read_message(&mut &bytes[..], capnp::message::ReaderOptions::new())?;
@@ -1418,6 +1462,11 @@ pub fn deserialize_money(bytes: &[u8]) -> Result<Money, Box<dyn Error>> {
     Money::from_capnp(root)
 }
 
+/// Serializes an [`AccountBalance`] to Cap'n Proto bytes.
+///
+/// # Errors
+///
+/// Returns an error if Cap'n Proto serialization fails.
 pub fn serialize_account_balance(balance: &AccountBalance) -> Result<Vec<u8>, Box<dyn Error>> {
     let mut message = capnp::message::Builder::new_default();
     let builder = message.init_root::<types_capnp::account_balance::Builder>();
@@ -1428,6 +1477,11 @@ pub fn serialize_account_balance(balance: &AccountBalance) -> Result<Vec<u8>, Bo
     Ok(bytes)
 }
 
+/// Deserializes an [`AccountBalance`] from Cap'n Proto bytes.
+///
+/// # Errors
+///
+/// Returns an error if Cap'n Proto deserialization fails.
 pub fn deserialize_account_balance(bytes: &[u8]) -> Result<AccountBalance, Box<dyn Error>> {
     let reader =
         capnp::serialize::read_message(&mut &bytes[..], capnp::message::ReaderOptions::new())?;
@@ -1435,6 +1489,11 @@ pub fn deserialize_account_balance(bytes: &[u8]) -> Result<AccountBalance, Box<d
     AccountBalance::from_capnp(root)
 }
 
+/// Serializes a [`MarginBalance`] to Cap'n Proto bytes.
+///
+/// # Errors
+///
+/// Returns an error if Cap'n Proto serialization fails.
 pub fn serialize_margin_balance(balance: &MarginBalance) -> Result<Vec<u8>, Box<dyn Error>> {
     let mut message = capnp::message::Builder::new_default();
     let builder = message.init_root::<types_capnp::margin_balance::Builder>();
@@ -1445,6 +1504,11 @@ pub fn serialize_margin_balance(balance: &MarginBalance) -> Result<Vec<u8>, Box<
     Ok(bytes)
 }
 
+/// Deserializes a [`MarginBalance`] from Cap'n Proto bytes.
+///
+/// # Errors
+///
+/// Returns an error if Cap'n Proto deserialization fails.
 pub fn deserialize_margin_balance(bytes: &[u8]) -> Result<MarginBalance, Box<dyn Error>> {
     let reader =
         capnp::serialize::read_message(&mut &bytes[..], capnp::message::ReaderOptions::new())?;
@@ -1674,8 +1738,15 @@ impl<'a> ToCapnp<'a> for FundingRateUpdate {
         let rate_builder = builder.reborrow().init_rate();
         self.rate.to_capnp(rate_builder);
 
-        let mut next_funding_time_builder = builder.reborrow().init_next_funding_time();
-        next_funding_time_builder.set_value(self.next_funding_ns.map_or(0, |ns| *ns));
+        if let Some(interval) = self.interval {
+            builder.reborrow().set_interval(interval);
+            builder.reborrow().set_has_interval(true);
+        }
+
+        if let Some(next_funding_ns) = self.next_funding_ns {
+            let mut next_funding_time_builder = builder.reborrow().init_next_funding_time();
+            next_funding_time_builder.set_value(*next_funding_ns);
+        }
 
         let mut ts_event_builder = builder.reborrow().init_ts_event();
         ts_event_builder.set_value(*self.ts_event);
@@ -1695,12 +1766,17 @@ impl<'a> FromCapnp<'a> for FundingRateUpdate {
         let rate_reader = reader.get_rate()?;
         let rate = Decimal::from_capnp(rate_reader)?;
 
-        let next_funding_time_reader = reader.get_next_funding_time()?;
-        let next_funding_time_value = next_funding_time_reader.get_value();
-        let next_funding_ns = if next_funding_time_value == 0 {
-            None
+        let interval = if reader.get_has_interval() {
+            Some(reader.get_interval())
         } else {
-            Some(next_funding_time_value.into())
+            None
+        };
+
+        let next_funding_ns = if reader.has_next_funding_time() {
+            let next_funding_time_reader = reader.get_next_funding_time()?;
+            Some(next_funding_time_reader.get_value().into())
+        } else {
+            None
         };
 
         let ts_event_reader = reader.get_ts_event()?;
@@ -1712,7 +1788,100 @@ impl<'a> FromCapnp<'a> for FundingRateUpdate {
         Ok(Self {
             instrument_id,
             rate,
+            interval,
             next_funding_ns,
+            ts_event: ts_event.into(),
+            ts_init: ts_init.into(),
+        })
+    }
+}
+
+impl<'a> ToCapnp<'a> for OptionGreeks {
+    type Builder = market_capnp::option_greeks::Builder<'a>;
+
+    fn to_capnp(&self, mut builder: Self::Builder) {
+        let instrument_id_builder = builder.reborrow().init_instrument_id();
+        self.instrument_id.to_capnp(instrument_id_builder);
+
+        builder.set_convention(greeks_convention_to_capnp(self.convention));
+        builder.set_delta(self.greeks.delta);
+        builder.set_gamma(self.greeks.gamma);
+        builder.set_vega(self.greeks.vega);
+        builder.set_theta(self.greeks.theta);
+        builder.set_rho(self.greeks.rho);
+
+        if let Some(mark_iv) = self.mark_iv {
+            builder.reborrow().set_mark_iv(mark_iv);
+            builder.reborrow().set_has_mark_iv(true);
+        }
+
+        if let Some(bid_iv) = self.bid_iv {
+            builder.reborrow().set_bid_iv(bid_iv);
+            builder.reborrow().set_has_bid_iv(true);
+        }
+
+        if let Some(ask_iv) = self.ask_iv {
+            builder.reborrow().set_ask_iv(ask_iv);
+            builder.reborrow().set_has_ask_iv(true);
+        }
+
+        if let Some(underlying_price) = self.underlying_price {
+            builder.reborrow().set_underlying_price(underlying_price);
+            builder.reborrow().set_has_underlying_price(true);
+        }
+
+        if let Some(open_interest) = self.open_interest {
+            builder.reborrow().set_open_interest(open_interest);
+            builder.reborrow().set_has_open_interest(true);
+        }
+
+        let mut ts_event_builder = builder.reborrow().init_ts_event();
+        ts_event_builder.set_value(*self.ts_event);
+
+        let mut ts_init_builder = builder.reborrow().init_ts_init();
+        ts_init_builder.set_value(*self.ts_init);
+    }
+}
+
+impl<'a> FromCapnp<'a> for OptionGreeks {
+    type Reader = market_capnp::option_greeks::Reader<'a>;
+
+    fn from_capnp(reader: Self::Reader) -> Result<Self, Box<dyn Error>> {
+        let instrument_id_reader = reader.get_instrument_id()?;
+        let instrument_id = InstrumentId::from_capnp(instrument_id_reader)?;
+        let convention = greeks_convention_from_capnp(reader.get_convention()?);
+        let greeks = OptionGreekValues {
+            delta: reader.get_delta(),
+            gamma: reader.get_gamma(),
+            vega: reader.get_vega(),
+            theta: reader.get_theta(),
+            rho: reader.get_rho(),
+        };
+        let mark_iv = reader.get_has_mark_iv().then_some(reader.get_mark_iv());
+        let bid_iv = reader.get_has_bid_iv().then_some(reader.get_bid_iv());
+        let ask_iv = reader.get_has_ask_iv().then_some(reader.get_ask_iv());
+        let underlying_price = reader
+            .get_has_underlying_price()
+            .then_some(reader.get_underlying_price());
+        let open_interest = reader
+            .get_has_open_interest()
+            .then_some(reader.get_open_interest());
+
+        let ts_event_reader = reader.get_ts_event()?;
+        let ts_event = ts_event_reader.get_value();
+
+        let ts_init_reader = reader.get_ts_init()?;
+        let ts_init = ts_init_reader.get_value();
+
+        Ok(Self {
+            instrument_id,
+            convention,
+            greeks,
+            mark_iv,
+            bid_iv,
+            ask_iv,
+            underlying_price,
+            open_interest,
             ts_event: ts_event.into(),
             ts_init: ts_init.into(),
         })
@@ -1775,11 +1944,18 @@ impl<'a> ToCapnp<'a> for InstrumentStatus {
         self.instrument_id.to_capnp(instrument_id_builder);
 
         builder.set_action(market_status_action_to_capnp(self.action));
-        builder.set_reason(self.reason.as_ref().map_or("", |s| s.as_str()));
-        builder.set_trading_event(self.trading_event.as_ref().map_or("", |s| s.as_str()));
-        builder.set_is_trading(self.is_trading.unwrap_or(false));
-        builder.set_is_quoting(self.is_quoting.unwrap_or(false));
-        builder.set_is_short_sell_restricted(self.is_short_sell_restricted.unwrap_or(false));
+
+        if let Some(reason) = self.reason {
+            builder.reborrow().set_reason(reason.as_str());
+        }
+
+        if let Some(trading_event) = self.trading_event {
+            builder.reborrow().set_trading_event(trading_event.as_str());
+        }
+
+        builder.set_is_trading(optional_bool_to_capnp(self.is_trading));
+        builder.set_is_quoting(optional_bool_to_capnp(self.is_quoting));
+        builder.set_is_short_sell_restricted(optional_bool_to_capnp(self.is_short_sell_restricted));
 
         let mut ts_event_builder = builder.reborrow().init_ts_event();
         ts_event_builder.set_value(*self.ts_event);
@@ -1798,23 +1974,22 @@ impl<'a> FromCapnp<'a> for InstrumentStatus {
 
         let action = market_status_action_from_capnp(reader.get_action()?);
 
-        let reason_str = reader.get_reason()?.to_str()?;
-        let reason = if reason_str.is_empty() {
-            None
+        let reason = if reader.has_reason() {
+            Some(Ustr::from(reader.get_reason()?.to_str()?))
         } else {
-            Some(Ustr::from(reason_str))
+            None
         };
 
-        let trading_event_str = reader.get_trading_event()?.to_str()?;
-        let trading_event = if trading_event_str.is_empty() {
-            None
+        let trading_event = if reader.has_trading_event() {
+            Some(Ustr::from(reader.get_trading_event()?.to_str()?))
         } else {
-            Some(Ustr::from(trading_event_str))
+            None
         };
 
-        let is_trading = Some(reader.get_is_trading());
-        let is_quoting = Some(reader.get_is_quoting());
-        let is_short_sell_restricted = Some(reader.get_is_short_sell_restricted());
+        let is_trading = optional_bool_from_capnp(reader.get_is_trading()?);
+        let is_quoting = optional_bool_from_capnp(reader.get_is_quoting()?);
+        let is_short_sell_restricted =
+            optional_bool_from_capnp(reader.get_is_short_sell_restricted()?);
 
         let ts_event_reader = reader.get_ts_event()?;
         let ts_event = ts_event_reader.get_value();
@@ -2069,8 +2244,8 @@ impl<'a> ToCapnp<'a> for OrderBookDeltas {
 
         let mut deltas_builder = builder.reborrow().init_deltas(self.deltas.len() as u32);
         for (i, delta) in self.deltas.iter().enumerate() {
-            let delta_builder = deltas_builder.reborrow().get(i as u32);
-            delta.to_capnp(delta_builder);
+            let entry_builder = deltas_builder.reborrow().get(i as u32);
+            delta.to_capnp(entry_builder);
         }
 
         builder.set_flags(self.flags);
@@ -2183,6 +2358,7 @@ impl<'a> FromCapnp<'a> for OrderBookDepth10 {
         // Convert bids (BookLevel list to BookOrder array)
         let bids_reader = reader.get_bids()?;
         let mut bids = [NULL_ORDER; 10];
+
         for (i, level_reader) in bids_reader.iter().enumerate().take(10) {
             let price_reader = level_reader.get_price()?;
             let price = Price::from_capnp(price_reader)?;
@@ -2196,6 +2372,7 @@ impl<'a> FromCapnp<'a> for OrderBookDepth10 {
         // Convert asks (BookLevel list to BookOrder array)
         let asks_reader = reader.get_asks()?;
         let mut asks = [NULL_ORDER; 10];
+
         for (i, level_reader) in asks_reader.iter().enumerate().take(10) {
             let price_reader = level_reader.get_price()?;
             let price = Price::from_capnp(price_reader)?;
@@ -2241,10 +2418,6 @@ impl<'a> FromCapnp<'a> for OrderBookDepth10 {
         })
     }
 }
-
-// ================================================================================================
-// Order Events
-// ================================================================================================
 
 impl<'a> ToCapnp<'a> for OrderDenied {
     type Builder = order_capnp::order_denied::Builder<'a>;
@@ -2305,6 +2478,7 @@ impl<'a> FromCapnp<'a> for OrderDenied {
             event_id,
             ts_event: ts_init.into(), // System event - ts_event = ts_init
             ts_init: ts_init.into(),
+            causation_id: None,
         })
     }
 }
@@ -2363,6 +2537,7 @@ impl<'a> FromCapnp<'a> for OrderEmulated {
             event_id,
             ts_event: ts_init.into(), // System event - ts_event = ts_init
             ts_init: ts_init.into(),
+            causation_id: None,
         })
     }
 }
@@ -2428,6 +2603,7 @@ impl<'a> FromCapnp<'a> for OrderReleased {
             event_id,
             ts_event: ts_init.into(), // System event - ts_event = ts_init
             ts_init: ts_init.into(),
+            causation_id: None,
         })
     }
 }
@@ -2500,6 +2676,7 @@ impl<'a> FromCapnp<'a> for OrderSubmitted {
             event_id,
             ts_event: ts_event.into(),
             ts_init: ts_init.into(),
+            causation_id: None,
         })
     }
 }
@@ -2535,7 +2712,7 @@ impl<'a> ToCapnp<'a> for OrderAccepted {
         let mut ts_init_builder = builder.reborrow().init_ts_init();
         ts_init_builder.set_value(*self.ts_init);
 
-        builder.set_reconciliation(self.reconciliation != 0);
+        builder.set_reconciliation(self.reconciliation);
     }
 }
 
@@ -2570,7 +2747,7 @@ impl<'a> FromCapnp<'a> for OrderAccepted {
         let ts_init_reader = reader.get_ts_init()?;
         let ts_init = ts_init_reader.get_value();
 
-        let reconciliation = reader.get_reconciliation() as u8;
+        let reconciliation = reader.get_reconciliation();
 
         Ok(Self {
             trader_id,
@@ -2583,6 +2760,7 @@ impl<'a> FromCapnp<'a> for OrderAccepted {
             ts_event: ts_event.into(),
             ts_init: ts_init.into(),
             reconciliation,
+            causation_id: None,
         })
     }
 }
@@ -2618,8 +2796,8 @@ impl<'a> ToCapnp<'a> for OrderRejected {
         let mut ts_init_builder = builder.reborrow().init_ts_init();
         ts_init_builder.set_value(*self.ts_init);
 
-        builder.set_reconciliation(self.reconciliation != 0);
-        builder.set_due_post_only(self.due_post_only != 0);
+        builder.set_reconciliation(self.reconciliation);
+        builder.set_due_post_only(self.due_post_only);
     }
 }
 
@@ -2653,8 +2831,8 @@ impl<'a> FromCapnp<'a> for OrderRejected {
         let ts_init_reader = reader.get_ts_init()?;
         let ts_init = ts_init_reader.get_value();
 
-        let reconciliation = reader.get_reconciliation() as u8;
-        let due_post_only = reader.get_due_post_only() as u8;
+        let reconciliation = reader.get_reconciliation();
+        let due_post_only = reader.get_due_post_only();
 
         Ok(Self {
             trader_id,
@@ -2668,6 +2846,7 @@ impl<'a> FromCapnp<'a> for OrderRejected {
             ts_init: ts_init.into(),
             reconciliation,
             due_post_only,
+            causation_id: None,
         })
     }
 }
@@ -2706,7 +2885,7 @@ impl<'a> ToCapnp<'a> for OrderCanceled {
         let mut ts_init_builder = builder.reborrow().init_ts_init();
         ts_init_builder.set_value(*self.ts_init);
 
-        builder.set_reconciliation(self.reconciliation != 0);
+        builder.set_reconciliation(self.reconciliation);
     }
 }
 
@@ -2743,7 +2922,7 @@ impl<'a> FromCapnp<'a> for OrderCanceled {
         let ts_init_reader = reader.get_ts_init()?;
         let ts_init = ts_init_reader.get_value();
 
-        let reconciliation = reader.get_reconciliation() as u8;
+        let reconciliation = reader.get_reconciliation();
 
         Ok(Self {
             trader_id,
@@ -2756,6 +2935,7 @@ impl<'a> FromCapnp<'a> for OrderCanceled {
             ts_event: ts_event.into(),
             ts_init: ts_init.into(),
             reconciliation,
+            causation_id: None,
         })
     }
 }
@@ -2794,7 +2974,7 @@ impl<'a> ToCapnp<'a> for OrderExpired {
         let mut ts_init_builder = builder.reborrow().init_ts_init();
         ts_init_builder.set_value(*self.ts_init);
 
-        builder.set_reconciliation(self.reconciliation != 0);
+        builder.set_reconciliation(self.reconciliation);
     }
 }
 
@@ -2831,7 +3011,7 @@ impl<'a> FromCapnp<'a> for OrderExpired {
         let ts_init_reader = reader.get_ts_init()?;
         let ts_init = ts_init_reader.get_value();
 
-        let reconciliation = reader.get_reconciliation() as u8;
+        let reconciliation = reader.get_reconciliation();
 
         Ok(Self {
             trader_id,
@@ -2844,6 +3024,7 @@ impl<'a> FromCapnp<'a> for OrderExpired {
             ts_event: ts_event.into(),
             ts_init: ts_init.into(),
             reconciliation,
+            causation_id: None,
         })
     }
 }
@@ -2882,7 +3063,7 @@ impl<'a> ToCapnp<'a> for OrderTriggered {
         let mut ts_init_builder = builder.reborrow().init_ts_init();
         ts_init_builder.set_value(*self.ts_init);
 
-        builder.set_reconciliation(self.reconciliation != 0);
+        builder.set_reconciliation(self.reconciliation);
     }
 }
 
@@ -2919,7 +3100,7 @@ impl<'a> FromCapnp<'a> for OrderTriggered {
         let ts_init_reader = reader.get_ts_init()?;
         let ts_init = ts_init_reader.get_value();
 
-        let reconciliation = reader.get_reconciliation() as u8;
+        let reconciliation = reader.get_reconciliation();
 
         Ok(Self {
             trader_id,
@@ -2932,6 +3113,7 @@ impl<'a> FromCapnp<'a> for OrderTriggered {
             ts_event: ts_event.into(),
             ts_init: ts_init.into(),
             reconciliation,
+            causation_id: None,
         })
     }
 }
@@ -2958,8 +3140,10 @@ impl<'a> ToCapnp<'a> for OrderPendingUpdate {
             venue_order_id.to_capnp(venue_order_id_builder);
         }
 
-        let account_id_builder = builder.reborrow().init_account_id();
-        self.account_id.to_capnp(account_id_builder);
+        if let Some(ref account_id) = self.account_id {
+            let account_id_builder = builder.reborrow().init_account_id();
+            account_id.to_capnp(account_id_builder);
+        }
 
         let event_id_builder = builder.reborrow().init_event_id();
         self.event_id.to_capnp(event_id_builder);
@@ -2970,7 +3154,7 @@ impl<'a> ToCapnp<'a> for OrderPendingUpdate {
         let mut ts_init_builder = builder.reborrow().init_ts_init();
         ts_init_builder.set_value(*self.ts_init);
 
-        builder.set_reconciliation(self.reconciliation != 0);
+        builder.set_reconciliation(self.reconciliation);
     }
 }
 
@@ -2997,8 +3181,12 @@ impl<'a> FromCapnp<'a> for OrderPendingUpdate {
             None
         };
 
-        let account_id_reader = reader.get_account_id()?;
-        let account_id = AccountId::from_capnp(account_id_reader)?;
+        let account_id = if reader.has_account_id() {
+            let account_id_reader = reader.get_account_id()?;
+            Some(AccountId::from_capnp(account_id_reader)?)
+        } else {
+            None
+        };
 
         let event_id_reader = reader.get_event_id()?;
         let event_id = nautilus_core::UUID4::from_capnp(event_id_reader)?;
@@ -3009,7 +3197,7 @@ impl<'a> FromCapnp<'a> for OrderPendingUpdate {
         let ts_init_reader = reader.get_ts_init()?;
         let ts_init = ts_init_reader.get_value();
 
-        let reconciliation = reader.get_reconciliation() as u8;
+        let reconciliation = reader.get_reconciliation();
 
         Ok(Self {
             trader_id,
@@ -3022,6 +3210,7 @@ impl<'a> FromCapnp<'a> for OrderPendingUpdate {
             ts_event: ts_event.into(),
             ts_init: ts_init.into(),
             reconciliation,
+            causation_id: None,
         })
     }
 }
@@ -3048,8 +3237,10 @@ impl<'a> ToCapnp<'a> for OrderPendingCancel {
             venue_order_id.to_capnp(venue_order_id_builder);
         }
 
-        let account_id_builder = builder.reborrow().init_account_id();
-        self.account_id.to_capnp(account_id_builder);
+        if let Some(ref account_id) = self.account_id {
+            let account_id_builder = builder.reborrow().init_account_id();
+            account_id.to_capnp(account_id_builder);
+        }
 
         let event_id_builder = builder.reborrow().init_event_id();
         self.event_id.to_capnp(event_id_builder);
@@ -3060,7 +3251,7 @@ impl<'a> ToCapnp<'a> for OrderPendingCancel {
         let mut ts_init_builder = builder.reborrow().init_ts_init();
         ts_init_builder.set_value(*self.ts_init);
 
-        builder.set_reconciliation(self.reconciliation != 0);
+        builder.set_reconciliation(self.reconciliation);
     }
 }
 
@@ -3087,8 +3278,12 @@ impl<'a> FromCapnp<'a> for OrderPendingCancel {
             None
         };
 
-        let account_id_reader = reader.get_account_id()?;
-        let account_id = AccountId::from_capnp(account_id_reader)?;
+        let account_id = if reader.has_account_id() {
+            let account_id_reader = reader.get_account_id()?;
+            Some(AccountId::from_capnp(account_id_reader)?)
+        } else {
+            None
+        };
 
         let event_id_reader = reader.get_event_id()?;
         let event_id = nautilus_core::UUID4::from_capnp(event_id_reader)?;
@@ -3099,7 +3294,7 @@ impl<'a> FromCapnp<'a> for OrderPendingCancel {
         let ts_init_reader = reader.get_ts_init()?;
         let ts_init = ts_init_reader.get_value();
 
-        let reconciliation = reader.get_reconciliation() as u8;
+        let reconciliation = reader.get_reconciliation();
 
         Ok(Self {
             trader_id,
@@ -3112,6 +3307,7 @@ impl<'a> FromCapnp<'a> for OrderPendingCancel {
             ts_event: ts_event.into(),
             ts_init: ts_init.into(),
             reconciliation,
+            causation_id: None,
         })
     }
 }
@@ -3149,7 +3345,7 @@ impl<'a> ToCapnp<'a> for OrderModifyRejected {
         let mut ts_init_builder = builder.reborrow().init_ts_init();
         ts_init_builder.set_value(*self.ts_init);
 
-        builder.set_reconciliation(self.reconciliation != 0);
+        builder.set_reconciliation(self.reconciliation);
     }
 }
 
@@ -3188,7 +3384,7 @@ impl<'a> FromCapnp<'a> for OrderModifyRejected {
         let ts_init_reader = reader.get_ts_init()?;
         let ts_init = ts_init_reader.get_value();
 
-        let reconciliation = reader.get_reconciliation() as u8;
+        let reconciliation = reader.get_reconciliation();
 
         Ok(Self {
             trader_id,
@@ -3202,6 +3398,7 @@ impl<'a> FromCapnp<'a> for OrderModifyRejected {
             ts_event: ts_event.into(),
             ts_init: ts_init.into(),
             reconciliation,
+            causation_id: None,
         })
     }
 }
@@ -3239,7 +3436,7 @@ impl<'a> ToCapnp<'a> for OrderCancelRejected {
         let mut ts_init_builder = builder.reborrow().init_ts_init();
         ts_init_builder.set_value(*self.ts_init);
 
-        builder.set_reconciliation(self.reconciliation != 0);
+        builder.set_reconciliation(self.reconciliation);
     }
 }
 
@@ -3278,7 +3475,7 @@ impl<'a> FromCapnp<'a> for OrderCancelRejected {
         let ts_init_reader = reader.get_ts_init()?;
         let ts_init = ts_init_reader.get_value();
 
-        let reconciliation = reader.get_reconciliation() as u8;
+        let reconciliation = reader.get_reconciliation();
 
         Ok(Self {
             trader_id,
@@ -3292,6 +3489,7 @@ impl<'a> FromCapnp<'a> for OrderCancelRejected {
             ts_event: ts_event.into(),
             ts_init: ts_init.into(),
             reconciliation,
+            causation_id: None,
         })
     }
 }
@@ -3345,7 +3543,8 @@ impl<'a> ToCapnp<'a> for OrderUpdated {
         let mut ts_init_builder = builder.reborrow().init_ts_init();
         ts_init_builder.set_value(*self.ts_init);
 
-        builder.set_reconciliation(self.reconciliation != 0);
+        builder.set_reconciliation(self.reconciliation);
+        builder.set_is_quote_quantity(self.is_quote_quantity);
     }
 }
 
@@ -3406,7 +3605,7 @@ impl<'a> FromCapnp<'a> for OrderUpdated {
         let ts_init_reader = reader.get_ts_init()?;
         let ts_init = ts_init_reader.get_value();
 
-        let reconciliation = reader.get_reconciliation() as u8;
+        let reconciliation = reader.get_reconciliation();
 
         Ok(Self {
             trader_id,
@@ -3419,10 +3618,12 @@ impl<'a> FromCapnp<'a> for OrderUpdated {
             price,
             trigger_price,
             protection_price,
+            is_quote_quantity: reader.get_is_quote_quantity(),
             event_id,
             ts_event: ts_event.into(),
             ts_init: ts_init.into(),
             reconciliation,
+            causation_id: None,
         })
     }
 }
@@ -3486,6 +3687,16 @@ impl<'a> ToCapnp<'a> for OrderFilled {
         if let Some(commission) = &self.commission {
             let commission_builder = builder.reborrow().init_commission();
             commission.to_capnp(commission_builder);
+        }
+
+        if let Some(info) = &self.info {
+            let mut info_builder = builder.reborrow().init_info();
+            let mut entries_builder = info_builder.reborrow().init_entries(info.len() as u32);
+            for (i, (key, value)) in info.iter().enumerate() {
+                let mut entry_builder = entries_builder.reborrow().get(i as u32);
+                entry_builder.set_key(key.as_str());
+                entry_builder.set_value(value.as_str());
+            }
         }
     }
 }
@@ -3554,6 +3765,20 @@ impl<'a> FromCapnp<'a> for OrderFilled {
             None
         };
 
+        let info = if reader.has_info() {
+            let info_reader = reader.get_info()?;
+            let entries_reader = info_reader.get_entries()?;
+            let mut map = IndexMap::with_capacity(entries_reader.len() as usize);
+            for entry_reader in entries_reader {
+                let key = Ustr::from(entry_reader.get_key()?.to_str()?);
+                let value = Ustr::from(entry_reader.get_value()?.to_str()?);
+                map.insert(key, value);
+            }
+            Some(map)
+        } else {
+            None
+        };
+
         Ok(Self {
             trader_id,
             strategy_id,
@@ -3574,6 +3799,8 @@ impl<'a> FromCapnp<'a> for OrderFilled {
             reconciliation,
             position_id,
             commission,
+            info,
+            causation_id: None,
         })
     }
 }
@@ -3620,6 +3847,11 @@ impl<'a> ToCapnp<'a> for OrderInitialized {
         if let Some(price) = self.price {
             let price_builder = builder.reborrow().init_price();
             price.to_capnp(price_builder);
+        }
+
+        if let Some(activation_price) = self.activation_price {
+            let activation_price_builder = builder.reborrow().init_activation_price();
+            activation_price.to_capnp(activation_price_builder);
         }
 
         if let Some(trigger_price) = self.trigger_price {
@@ -3764,6 +3996,13 @@ impl<'a> FromCapnp<'a> for OrderInitialized {
             None
         };
 
+        let activation_price = if reader.has_activation_price() {
+            let activation_price_reader = reader.get_activation_price()?;
+            Some(Price::from_capnp(activation_price_reader)?)
+        } else {
+            None
+        };
+
         let trigger_price = if reader.has_trigger_price() {
             let trigger_price_reader = reader.get_trigger_price()?;
             Some(Price::from_capnp(trigger_price_reader)?)
@@ -3836,7 +4075,7 @@ impl<'a> FromCapnp<'a> for OrderInitialized {
 
         let linked_order_ids = if reader.has_linked_order_ids() {
             let linked_order_ids_reader = reader.get_linked_order_ids()?;
-            let mut linked_order_ids = Vec::new();
+            let mut linked_order_ids = Vec::with_capacity(linked_order_ids_reader.len() as usize);
             for order_id_reader in linked_order_ids_reader {
                 linked_order_ids.push(ClientOrderId::from_capnp(order_id_reader)?);
             }
@@ -3862,7 +4101,7 @@ impl<'a> FromCapnp<'a> for OrderInitialized {
         let exec_algorithm_params = if reader.has_exec_algorithm_params() {
             let params_reader = reader.get_exec_algorithm_params()?;
             let entries_reader = params_reader.get_entries()?;
-            let mut params = IndexMap::new();
+            let mut params = IndexMap::with_capacity(entries_reader.len() as usize);
             for entry_reader in entries_reader {
                 let key = Ustr::from(entry_reader.get_key()?.to_str()?);
                 let value = Ustr::from(entry_reader.get_value()?.to_str()?);
@@ -3882,7 +4121,7 @@ impl<'a> FromCapnp<'a> for OrderInitialized {
 
         let tags = if reader.has_tags() {
             let tags_reader = reader.get_tags()?;
-            let mut tags = Vec::new();
+            let mut tags = Vec::with_capacity(tags_reader.len() as usize);
             for tag in tags_reader {
                 tags.push(Ustr::from(tag?.to_str()?));
             }
@@ -3908,6 +4147,7 @@ impl<'a> FromCapnp<'a> for OrderInitialized {
             ts_event: ts_event.into(),
             ts_init: ts_init.into(),
             price,
+            activation_price,
             trigger_price,
             trigger_type,
             limit_offset,
@@ -3925,13 +4165,10 @@ impl<'a> FromCapnp<'a> for OrderInitialized {
             exec_algorithm_params,
             exec_spawn_id,
             tags,
+            causation_id: None,
         })
     }
 }
-
-// ================================================================================================
-// Position Events
-// ================================================================================================
 
 // PositionOpened
 impl<'a> ToCapnp<'a> for PositionOpened {
@@ -4503,13 +4740,7 @@ impl<'a> FromCapnp<'a> for PositionAdjusted {
         };
 
         let reason = if reader.has_reason() {
-            let reason_reader = reader.get_reason()?;
-            let text = reason_reader.to_str()?;
-            if text.is_empty() {
-                None
-            } else {
-                Some(Ustr::from(text))
-            }
+            Some(Ustr::from(reader.get_reason()?.to_str()?))
         } else {
             None
         };
@@ -4544,7 +4775,10 @@ impl<'a> FromCapnp<'a> for PositionAdjusted {
 mod tests {
     use capnp::message::Builder;
     use nautilus_core::UnixNanos;
-    use nautilus_model::{data::stubs::*, events::order::stubs::*};
+    use nautilus_model::{
+        data::stubs::*,
+        events::order::{spec::OrderCanceledSpec, stubs::*},
+    };
     use rstest::rstest;
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
@@ -4696,9 +4930,9 @@ mod tests {
 
     #[rstest]
     fn test_account_balance_roundtrip() {
-        let total = Money::from_raw(100_000, Currency::USD());
-        let locked = Money::from_raw(10_000, Currency::USD());
-        let free = Money::from_raw(90_000, Currency::USD());
+        let total = Money::new(100.0, Currency::USD());
+        let locked = Money::new(10.0, Currency::USD());
+        let free = Money::new(90.0, Currency::USD());
         let balance = AccountBalance::new(total, locked, free);
         let bytes = serialize_account_balance(&balance).unwrap();
         let decoded = deserialize_account_balance(&bytes).unwrap();
@@ -4707,13 +4941,24 @@ mod tests {
 
     #[rstest]
     fn test_margin_balance_roundtrip() {
-        let initial = Money::from_raw(500_000, Currency::USD());
-        let maintenance = Money::from_raw(250_000, Currency::USD());
+        let initial = Money::new(500.0, Currency::USD());
+        let maintenance = Money::new(250.0, Currency::USD());
         let instrument_id = InstrumentId::from("BTC-USD-PERP.BINANCE");
-        let balance = MarginBalance::new(initial, maintenance, instrument_id);
+        let balance = MarginBalance::new(initial, maintenance, Some(instrument_id));
         let bytes = serialize_margin_balance(&balance).unwrap();
         let decoded = deserialize_margin_balance(&bytes).unwrap();
         assert_eq!(balance, decoded);
+    }
+
+    #[rstest]
+    fn test_margin_balance_account_scope_roundtrip() {
+        let initial = Money::new(500.0, Currency::USD());
+        let maintenance = Money::new(250.0, Currency::USD());
+        let balance = MarginBalance::new(initial, maintenance, None);
+        let bytes = serialize_margin_balance(&balance).unwrap();
+        let decoded = deserialize_margin_balance(&bytes).unwrap();
+        assert_eq!(balance, decoded);
+        assert!(decoded.instrument_id.is_none());
     }
 
     // Identifier round-trip coverage
@@ -4909,6 +5154,20 @@ mod tests {
         FundingRateUpdate
     );
     capnp_simple_roundtrip_test!(
+        option_greeks_capnp_roundtrip,
+        sample_option_greeks(),
+        market_capnp::option_greeks::Builder,
+        market_capnp::option_greeks::Reader,
+        OptionGreeks
+    );
+    capnp_simple_roundtrip_test!(
+        option_greeks_black_scholes_zero_optional_capnp_roundtrip,
+        sample_option_greeks_black_scholes_zero_optional(),
+        market_capnp::option_greeks::Builder,
+        market_capnp::option_greeks::Reader,
+        OptionGreeks
+    );
+    capnp_simple_roundtrip_test!(
         instrument_close_capnp_roundtrip,
         stub_instrument_close(),
         market_capnp::instrument_close::Builder,
@@ -4952,6 +5211,37 @@ mod tests {
         order_capnp::order_initialized::Builder,
         order_capnp::order_initialized::Reader
     );
+    #[rstest]
+    fn order_initialized_activation_price_capnp_roundtrip(
+        order_initialized_buy_limit: OrderInitialized,
+    ) {
+        let initialized = OrderInitialized {
+            activation_price: Some(Price::from("21000")),
+            ..order_initialized_buy_limit
+        };
+        assert_capnp_roundtrip!(
+            initialized,
+            order_capnp::order_initialized::Builder,
+            order_capnp::order_initialized::Reader,
+            OrderInitialized
+        );
+    }
+    #[rstest]
+    fn order_filled_info_capnp_roundtrip(order_filled: OrderFilled) {
+        let mut info = IndexMap::new();
+        info.insert(Ustr::from("liquidation"), Ustr::from("true"));
+        info.insert(Ustr::from("maker_order_id"), Ustr::from("ABC-123"));
+        let filled = OrderFilled {
+            info: Some(info),
+            ..order_filled
+        };
+        assert_capnp_roundtrip!(
+            filled,
+            order_capnp::order_filled::Builder,
+            order_capnp::order_filled::Reader,
+            OrderFilled
+        );
+    }
     order_fixture_roundtrip_test!(
         order_submitted_capnp_roundtrip,
         order_submitted,
@@ -5001,6 +5291,32 @@ mod tests {
         order_capnp::order_pending_cancel::Builder,
         order_capnp::order_pending_cancel::Reader
     );
+    #[rstest]
+    fn order_pending_update_none_account_capnp_roundtrip(order_pending_update: OrderPendingUpdate) {
+        let event = OrderPendingUpdate {
+            account_id: None,
+            ..order_pending_update
+        };
+        assert_capnp_roundtrip!(
+            event,
+            order_capnp::order_pending_update::Builder,
+            order_capnp::order_pending_update::Reader,
+            OrderPendingUpdate
+        );
+    }
+    #[rstest]
+    fn order_pending_cancel_none_account_capnp_roundtrip(order_pending_cancel: OrderPendingCancel) {
+        let event = OrderPendingCancel {
+            account_id: None,
+            ..order_pending_cancel
+        };
+        assert_capnp_roundtrip!(
+            event,
+            order_capnp::order_pending_cancel::Builder,
+            order_capnp::order_pending_cancel::Reader,
+            OrderPendingCancel
+        );
+    }
     order_fixture_roundtrip_test!(
         order_modify_rejected_capnp_roundtrip,
         order_modify_rejected,
@@ -5114,10 +5430,53 @@ mod tests {
         FundingRateUpdate::new(
             InstrumentId::from("BTCUSD-PERP.BINANCE"),
             dec!(0.0001),
+            Some(60),
             Some(UnixNanos::from(1_000_000)),
             UnixNanos::from(5),
             UnixNanos::from(6),
         )
+    }
+
+    fn sample_option_greeks() -> OptionGreeks {
+        OptionGreeks {
+            instrument_id: InstrumentId::from("BTC-30JUN23-40000-C.DERIBIT"),
+            convention: GreeksConvention::PriceAdjusted,
+            greeks: OptionGreekValues {
+                delta: 0.525,
+                gamma: 0.00032,
+                vega: 12.25,
+                theta: -0.72,
+                rho: 0.18,
+            },
+            mark_iv: Some(0.52),
+            bid_iv: None,
+            ask_iv: Some(0.54),
+            underlying_price: Some(41_500.25),
+            open_interest: None,
+            ts_event: UnixNanos::from(7),
+            ts_init: UnixNanos::from(8),
+        }
+    }
+
+    fn sample_option_greeks_black_scholes_zero_optional() -> OptionGreeks {
+        OptionGreeks {
+            instrument_id: InstrumentId::from("ETH-30JUN23-2000-C.DERIBIT"),
+            convention: GreeksConvention::BlackScholes,
+            greeks: OptionGreekValues {
+                delta: 0.12,
+                gamma: 0.002,
+                vega: 8.0,
+                theta: -0.45,
+                rho: 0.06,
+            },
+            mark_iv: Some(0.0),
+            bid_iv: Some(0.0),
+            ask_iv: Some(0.0),
+            underlying_price: Some(0.0),
+            open_interest: Some(0.0),
+            ts_event: UnixNanos::from(9),
+            ts_init: UnixNanos::from(10),
+        }
     }
 
     fn sample_instrument_status_event() -> InstrumentStatus {
@@ -5135,18 +5494,15 @@ mod tests {
     }
 
     fn sample_order_canceled() -> OrderCanceled {
-        OrderCanceled::new(
-            trader_id(),
-            strategy_id_ema_cross(),
-            instrument_id_btc_usdt(),
-            client_order_id(),
-            uuid4(),
-            UnixNanos::from(7),
-            UnixNanos::from(8),
-            true,
-            Some(venue_order_id()),
-            Some(account_id()),
-        )
+        OrderCanceledSpec::builder()
+            .strategy_id(strategy_id_ema_cross())
+            .instrument_id(instrument_id_btc_usdt())
+            .ts_event(UnixNanos::from(7))
+            .ts_init(UnixNanos::from(8))
+            .reconciliation(true)
+            .venue_order_id(venue_order_id())
+            .account_id(account_id())
+            .build()
     }
 
     fn sample_order_book_depth10() -> OrderBookDepth10 {

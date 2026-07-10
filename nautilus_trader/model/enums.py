@@ -1,5 +1,5 @@
 # -------------------------------------------------------------------------------------------------
-#  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+#  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 #  https://nautechsystems.io
 #
 #  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -35,6 +35,8 @@ from nautilus_trader.core.rust.model import OptionKind
 from nautilus_trader.core.rust.model import OrderSide
 from nautilus_trader.core.rust.model import OrderStatus
 from nautilus_trader.core.rust.model import OrderType
+from nautilus_trader.core.rust.model import OtoTriggerMode
+from nautilus_trader.core.rust.model import PositionAdjustmentType
 from nautilus_trader.core.rust.model import PositionSide
 from nautilus_trader.core.rust.model import PriceType
 from nautilus_trader.core.rust.model import RecordFlag
@@ -81,6 +83,10 @@ from nautilus_trader.model.functions import order_status_from_str
 from nautilus_trader.model.functions import order_status_to_str
 from nautilus_trader.model.functions import order_type_from_str
 from nautilus_trader.model.functions import order_type_to_str
+from nautilus_trader.model.functions import oto_trigger_mode_from_str
+from nautilus_trader.model.functions import oto_trigger_mode_to_str
+from nautilus_trader.model.functions import position_adjustment_type_from_str
+from nautilus_trader.model.functions import position_adjustment_type_to_str
 from nautilus_trader.model.functions import position_side_from_str
 from nautilus_trader.model.functions import position_side_to_str
 from nautilus_trader.model.functions import price_type_from_str
@@ -106,6 +112,7 @@ __all__ = [
     "BookAction",
     "BookType",
     "ContingencyType",
+    "ContinuousFutureAdjustmentType",
     "CurrencyType",
     "InstrumentClass",
     "InstrumentCloseType",
@@ -117,6 +124,8 @@ __all__ = [
     "OrderSide",
     "OrderStatus",
     "OrderType",
+    "OtoTriggerMode",
+    "PositionAdjustmentType",
     "PositionSide",
     "PriceType",
     "RecordFlag",
@@ -162,6 +171,10 @@ __all__ = [
     "order_status_to_str",
     "order_type_from_str",
     "order_type_to_str",
+    "oto_trigger_mode_from_str",
+    "oto_trigger_mode_to_str",
+    "position_adjustment_type_from_str",
+    "position_adjustment_type_to_str",
     "position_side_from_str",
     "position_side_to_str",
     "price_type_from_str",
@@ -177,6 +190,67 @@ __all__ = [
     "trigger_type_from_str",
     "trigger_type_to_str",
 ]
+
+
+@unique
+class ContinuousFutureAdjustmentType(Enum):
+    """
+    Represents the price-adjustment scheme applied when stitching segment contracts into
+    a continuous future series.
+
+    The direction (backward vs. forward) selects the anchor contract:
+
+    - Backward modes anchor on the most recent contract; prices in older
+      segments are shifted into the latest contract's frame.
+    - Forward modes anchor on the first contract; prices in later segments
+      are shifted into the first contract's frame.
+
+    The kind (spread vs. ratio) selects how each transition's offset is
+    combined:
+
+    - Spread modes accumulate additive offsets (`post_price - pre_price`).
+    - Ratio modes accumulate multiplicative factors (`post_price / pre_price`)
+      and require strictly positive prices.
+
+    """
+
+    BACKWARD_SPREAD = "backward_spread"
+    """
+    Additive adjustment, anchored on the most recent contract.
+    """
+    FORWARD_SPREAD = "forward_spread"
+    """
+    Additive adjustment, anchored on the first contract.
+    """
+    BACKWARD_RATIO = "backward_ratio"
+    """
+    Multiplicative adjustment, anchored on the most recent contract.
+    """
+    FORWARD_RATIO = "forward_ratio"
+    """
+    Multiplicative adjustment, anchored on the first contract.
+    """
+
+    @property
+    def is_ratio(self) -> bool:
+        """
+        Return whether this mode accumulates multiplicative factors.
+        """
+        return self in (
+            ContinuousFutureAdjustmentType.BACKWARD_RATIO,
+            ContinuousFutureAdjustmentType.FORWARD_RATIO,
+        )
+
+    @property
+    def is_backward(self) -> bool:
+        """
+        Return whether this mode anchors on the most recent contract.
+        """
+        return self in (
+            ContinuousFutureAdjustmentType.BACKWARD_SPREAD,
+            ContinuousFutureAdjustmentType.BACKWARD_RATIO,
+        )
+
 
 # mypy: disable-error-code=no-redef
 
@@ -333,6 +407,16 @@ if TYPE_CHECKING:
         LIMIT_IF_TOUCHED = 7
         TRAILING_STOP_MARKET = 8
         TRAILING_STOP_LIMIT = 9
+
+    @unique
+    class OtoTriggerMode(Enum):
+        PARTIAL = 0
+        FULL = 1
+
+    @unique
+    class PositionAdjustmentType(Enum):
+        COMMISSION = 1
+        FUNDING = 2
 
     @unique
     class PositionSide(Enum):

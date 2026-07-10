@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -16,6 +16,8 @@
 //! Deribit HTTP client error types.
 
 use std::fmt;
+
+use crate::common::consts::should_retry_error_code;
 
 /// Represents HTTP client errors for the Deribit adapter.
 #[derive(Debug, Clone)]
@@ -39,7 +41,7 @@ pub enum DeribitHttpError {
 }
 
 impl fmt::Display for DeribitHttpError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::MissingCredentials => write!(f, "Missing API credentials"),
             Self::DeribitError {
@@ -73,6 +75,17 @@ impl From<anyhow::Error> for DeribitHttpError {
 }
 
 impl DeribitHttpError {
+    /// Returns whether this error is retryable.
+    #[must_use]
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            Self::NetworkError(_) => true,
+            Self::UnexpectedStatus { status, .. } => *status >= 500 || *status == 429,
+            Self::DeribitError { error_code, .. } => should_retry_error_code(*error_code),
+            _ => false,
+        }
+    }
+
     /// Maps a JSON-RPC error to the appropriate error variant.
     ///
     /// Standard JSON-RPC error codes (-32xxx) are mapped to `ValidationError`,
@@ -86,7 +99,7 @@ impl DeribitHttpError {
     pub fn from_jsonrpc_error(
         error_code: i64,
         message: String,
-        data: Option<serde_json::Value>,
+        data: Option<&serde_json::Value>,
     ) -> Self {
         match error_code {
             // JSON-RPC 2.0 standard error codes
@@ -96,7 +109,6 @@ impl DeribitHttpError {
             -32602 => {
                 // Try to extract parameter details from data field
                 let detail = data
-                    .as_ref()
                     .and_then(|d| d.as_object())
                     .and_then(|obj| {
                         let param = obj.get("param")?.as_str()?;
@@ -113,5 +125,30 @@ impl DeribitHttpError {
                 message,
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rstest::rstest;
+
+    use super::*;
+
+    #[rstest]
+    #[case(DeribitHttpError::NetworkError("timeout".to_string()), true)]
+    #[case(DeribitHttpError::Timeout("read".to_string()), false)]
+    #[case(DeribitHttpError::UnexpectedStatus { status: 500, body: String::new() }, true)]
+    #[case(DeribitHttpError::UnexpectedStatus { status: 502, body: String::new() }, true)]
+    #[case(DeribitHttpError::UnexpectedStatus { status: 429, body: String::new() }, true)]
+    #[case(DeribitHttpError::UnexpectedStatus { status: 403, body: String::new() }, false)]
+    #[case(DeribitHttpError::DeribitError { error_code: 10028, message: String::new() }, true)]
+    #[case(DeribitHttpError::DeribitError { error_code: 13888, message: String::new() }, true)]
+    #[case(DeribitHttpError::DeribitError { error_code: -32600, message: String::new() }, false)]
+    #[case(DeribitHttpError::JsonError("bad".to_string()), false)]
+    #[case(DeribitHttpError::ValidationError("bad".to_string()), false)]
+    #[case(DeribitHttpError::MissingCredentials, false)]
+    #[case(DeribitHttpError::Canceled("shutdown".to_string()), false)]
+    fn test_is_retryable(#[case] error: DeribitHttpError, #[case] expected: bool) {
+        assert_eq!(error.is_retryable(), expected);
     }
 }

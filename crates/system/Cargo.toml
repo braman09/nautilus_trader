@@ -18,16 +18,32 @@ workspace = true
 
 [lib]
 name = "nautilus_system"
-crate-type = ["rlib", "cdylib"]
+crate-type = ["rlib"]
 
 [features]
 default = []
-extension-module = ["python", "pyo3/extension-module"]
+defi = ["nautilus-common/defi", "nautilus-data/defi", "nautilus-model/defi"]
+extension-module = ["python", "pyo3/extension-module", "streaming"]
 live = ["nautilus-common/live"]
-python = ["pyo3"]
+python = [
+  "nautilus-common/python",
+  "nautilus-core/python",
+  "nautilus-persistence/python",
+  "nautilus-trading/python",
+  "pyo3",
+  "streaming",
+]
+streaming = ["nautilus-persistence"]
+tracing-bridge = ["nautilus-common/tracing-bridge"]
+
+[package.metadata.cargo-machete]
+ignored = [
+  "nautilus-persistence",
+] # Optional dep activated only via the streaming feature
 
 [package.metadata.docs.rs]
-all-features = true
+# Python docs depend on the local pyo3-stub-gen patch for now, which published crates do not carry
+features = ["defi", "live", "streaming", "tracing-bridge"]
 rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
@@ -36,19 +52,26 @@ nautilus-core = { workspace = true }
 nautilus-data = { workspace = true }
 nautilus-execution = { workspace = true }
 nautilus-model = { workspace = true, features = ["stubs"] }
-nautilus-persistence = { workspace = true }
 nautilus-portfolio = { workspace = true }
 nautilus-risk = { workspace = true }
 nautilus-trading = { workspace = true }
 
+nautilus-persistence = { workspace = true, optional = true }
+
 ahash = { workspace = true }
 anyhow = { workspace = true }
-futures = { workspace = true }
-hostname = { workspace = true }
+bon = { workspace = true }
+indexmap = { workspace = true }
 log = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sysinfo = { workspace = true }
 ustr = { workspace = true }
 
 pyo3 = { workspace = true, optional = true }
 
 [dev-dependencies]
+async-trait = { workspace = true }
+bytes = { workspace = true }
 rstest = { workspace = true }
+toml = { workspace = true }

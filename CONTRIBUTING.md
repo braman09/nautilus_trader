@@ -6,7 +6,8 @@ We highly value involvement from the trading community, and all contributions ar
 >
 > **Integrations:**
 > New integrations are a major undertaking for the project and therefore require additional discussion and approval before opening any PRs.
-> Please see the [ROADMAP: Community-contributed integrations](ROADMAP.md#community-contributed-integrations) for details on the process.
+> Please see the [ROADMAP: Community-contributed integrations](ROADMAP.md#community-contributed-integrations) for details on the process
+> and [ADAPTERS.md](ADAPTERS.md) for adapter tiers, community listings, and support boundaries.
 
 ## Steps
 
@@ -16,12 +17,13 @@ To contribute, follow these steps:
 
 2. Once everyone is aligned, fork the `develop` branch and ensure your fork is up-to-date by regularly merging any upstream changes.
 
-3. Install and configure [pre-commit](https://pre-commit.com/) on your local machine to automatically run code checks, formatters, and linters before each commit.
-   You can install pre-commit with:
+3. Set up your development environment by following the [Environment setup guide](docs/developer_guide/environment_setup.md), which covers Rust, Python, and uv. With those prerequisites in place, install the pinned development tools (this includes [prek](https://github.com/j178/prek), which runs pre-commit checks, formatters, and linters before each commit):
     ```bash
-    pip install pre-commit
-    pre-commit install
+    cargo install cargo-binstall --locked  # one-off prerequisite
+    make install-tools
+    prek install
     ```
+   `make install-tools` installs every pinned tool from `Cargo.toml`, `tools.toml`, and `pyproject.toml`. See [Install development tools](docs/developer_guide/environment_setup.md#2-install-development-tools) for what each pinned tool does.
 
 4. Open a pull request (PR) on the `develop` branch with a summary comment and reference to any relevant GitHub issue(s).
 
@@ -37,5 +39,7 @@ To contribute, follow these steps:
 
 - Follow the established coding practices in the [Developer Guide](https://nautilustrader.io/docs/developer_guide/index.html).
 - For documentation changes, follow the style guide in `docs/developer_guide/docs.md` (use sentence case for headings H2 and below).
+- For v2 PyO3 bindings or wrapped Rust docs, run `make py-stubs-v2` and commit the
+  generated output. See [Generated Python artifacts](docs/developer_guide/rust.md#generated-python-artifacts).
 - Keep PRs small and focused for easier review.
 - Reference the relevant GitHub issue(s) in your PR comment.

@@ -1,5 +1,5 @@
 # -------------------------------------------------------------------------------------------------
-#  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+#  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 #  https://nautechsystems.io
 #
 #  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -17,22 +17,26 @@ from typing import Any
 
 import msgspec
 
+from nautilus_trader.adapters.binance.common.constants import BINANCE_FUTURES_ORDER_COUNT_KEYS
 from nautilus_trader.adapters.binance.common.enums import BinanceAccountType
 from nautilus_trader.adapters.binance.common.enums import BinanceFuturesPositionSide
 from nautilus_trader.adapters.binance.common.enums import BinanceOrderSide
 from nautilus_trader.adapters.binance.common.enums import BinanceOrderType
 from nautilus_trader.adapters.binance.common.enums import BinanceSecurityType
 from nautilus_trader.adapters.binance.common.enums import BinanceTimeInForce
-from nautilus_trader.adapters.binance.common.schemas.account import BinanceOrder
 from nautilus_trader.adapters.binance.common.schemas.account import BinanceStatusCode
 from nautilus_trader.adapters.binance.common.symbol import BinanceSymbol
 from nautilus_trader.adapters.binance.futures.enums import BinanceFuturesMarginType
 from nautilus_trader.adapters.binance.futures.schemas.account import BinanceFuturesAccountInfo
 from nautilus_trader.adapters.binance.futures.schemas.account import BinanceFuturesAlgoOrder
-from nautilus_trader.adapters.binance.futures.schemas.account import BinanceFuturesAlgoOrderCancelResponse
+from nautilus_trader.adapters.binance.futures.schemas.account import (
+    BinanceFuturesAlgoOrderCancelResponse,
+)
 from nautilus_trader.adapters.binance.futures.schemas.account import BinanceFuturesDualSidePosition
 from nautilus_trader.adapters.binance.futures.schemas.account import BinanceFuturesLeverage
-from nautilus_trader.adapters.binance.futures.schemas.account import BinanceFuturesMarginTypeResponse
+from nautilus_trader.adapters.binance.futures.schemas.account import (
+    BinanceFuturesMarginTypeResponse,
+)
 from nautilus_trader.adapters.binance.futures.schemas.account import BinanceFuturesPositionRisk
 from nautilus_trader.adapters.binance.futures.schemas.account import BinanceFuturesSymbolConfig
 from nautilus_trader.adapters.binance.http.account import BinanceAccountHttpAPI
@@ -121,7 +125,7 @@ class BinanceFuturesPositionModeHttp(BinanceHttpEndpoint):
         return self._get_resp_decoder.decode(raw)
 
     async def post(self, params: PostParameters) -> BinanceStatusCode:
-        method_type = HttpMethod.GET
+        method_type = HttpMethod.POST
         raw = await self._method(method_type, params)
         return self._post_resp_decoder.decode(raw)
 
@@ -209,8 +213,12 @@ class BinanceFuturesCancelMultipleOrdersHttp(BinanceHttpEndpoint):
             methods,
             url_path,
         )
+        # Per-item results are heterogeneous: successes match BinanceOrder,
+        # failures are {"code": int, "msg": str}, and msgspec does not support
+        # untagged unions of dict-like types, so decode as raw dicts and
+        # discriminate by the `code` field at the caller.
         self._delete_resp_decoder = msgspec.json.Decoder(
-            list[BinanceOrder] | dict[str, Any],
+            list[dict[str, Any]] | dict[str, Any],
             strict=False,
         )
 
@@ -235,7 +243,7 @@ class BinanceFuturesCancelMultipleOrdersHttp(BinanceHttpEndpoint):
         origClientOrderIdList: str | None = None
         recvWindow: str | None = None
 
-    async def delete(self, params: DeleteParameters) -> list[BinanceOrder]:
+    async def delete(self, params: DeleteParameters) -> list[dict[str, Any]] | dict[str, Any]:
         method_type = HttpMethod.DELETE
         raw = await self._method(method_type, params)
         return self._delete_resp_decoder.decode(raw)
@@ -619,7 +627,7 @@ class BinanceFuturesAlgoOrderHttp(BinanceHttpEndpoint):
             Price protection. Default is false.
         reduceOnly : str, optional
             Reduce only flag. Cannot be used in Hedge Mode.
-        activationPrice : str, optional
+        activatePrice : str, optional
             Activation price for TRAILING_STOP_MARKET orders.
         callbackRate : str, optional
             Callback rate for TRAILING_STOP_MARKET (0.1-10, where 1 = 1%).
@@ -647,7 +655,7 @@ class BinanceFuturesAlgoOrderHttp(BinanceHttpEndpoint):
         closePosition: str | None = None
         priceProtect: str | None = None
         reduceOnly: str | None = None
-        activationPrice: str | None = None
+        activatePrice: str | None = None
         callbackRate: str | None = None
         clientAlgoId: str | None = None
         goodTillDate: int | None = None
@@ -665,8 +673,200 @@ class BinanceFuturesAlgoOrderHttp(BinanceHttpEndpoint):
 
     async def post(self, params: PostParameters) -> BinanceFuturesAlgoOrder:
         method_type = HttpMethod.POST
-        raw = await self._method(method_type, params)
+        ratelimiter_keys = (
+            list(BINANCE_FUTURES_ORDER_COUNT_KEYS)
+            if self.url_path == "/fapi/v1/algoOrder"
+            else None
+        )
+        raw = await self._method(
+            method_type,
+            params,
+            ratelimiter_keys=ratelimiter_keys,
+        )
         return self._post_resp_decoder.decode(raw)
+
+
+class BinanceFuturesOpenAlgoOrdersHttp(BinanceHttpEndpoint):
+    """
+    Endpoint for fetching all open algo (conditional) orders.
+
+    `GET /fapi/v1/openAlgoOrders`
+
+    References
+    ----------
+    https://developers.binance.com/docs/derivatives/usds-margined-futures/trade/rest-api/Current-All-Algo-Open-Orders
+
+    """
+
+    def __init__(
+        self,
+        client: BinanceHttpClient,
+        base_endpoint: str,
+    ):
+        methods = {
+            HttpMethod.GET: BinanceSecurityType.USER_DATA,
+        }
+        url_path = base_endpoint + "openAlgoOrders"
+        super().__init__(
+            client,
+            methods,
+            url_path,
+        )
+
+        self._get_resp_decoder = msgspec.json.Decoder(list[BinanceFuturesAlgoOrder])
+
+    class GetParameters(msgspec.Struct, omit_defaults=True, frozen=True):
+        """
+        Parameters for open algo orders GET request.
+
+        Parameters
+        ----------
+        timestamp : str
+            The millisecond timestamp of the request.
+        algoType : str, optional
+            Filter by algo type.
+        symbol : BinanceSymbol, optional
+            Filter by symbol. If omitted, orders for all symbols returned.
+        algoId : int, optional
+            Filter by specific algo order ID.
+        recvWindow : str, optional
+            The response receive window for the request (cannot be greater than 60000).
+
+        """
+
+        timestamp: str
+        algoType: str | None = None
+        symbol: BinanceSymbol | None = None
+        algoId: int | None = None
+        recvWindow: str | None = None
+
+    async def get(self, params: GetParameters) -> list[BinanceFuturesAlgoOrder]:
+        method_type = HttpMethod.GET
+        raw = await self._method(method_type, params)
+        return self._get_resp_decoder.decode(raw)
+
+
+class BinanceFuturesAllAlgoOrdersHttp(BinanceHttpEndpoint):
+    """
+    Endpoint for querying all algo (conditional) orders including historical.
+
+    `GET /fapi/v1/allAlgoOrders`
+
+    References
+    ----------
+    https://developers.binance.com/docs/derivatives/usds-margined-futures/trade/rest-api/Query-All-Algo-Orders
+
+    """
+
+    def __init__(
+        self,
+        client: BinanceHttpClient,
+        base_endpoint: str,
+    ):
+        methods = {
+            HttpMethod.GET: BinanceSecurityType.USER_DATA,
+        }
+        url_path = base_endpoint + "allAlgoOrders"
+        super().__init__(
+            client,
+            methods,
+            url_path,
+        )
+
+        self._get_resp_decoder = msgspec.json.Decoder(list[BinanceFuturesAlgoOrder])
+
+    class GetParameters(msgspec.Struct, omit_defaults=True, frozen=True):
+        """
+        Parameters for all algo orders GET request.
+
+        Parameters
+        ----------
+        timestamp : str
+            The millisecond timestamp of the request.
+        symbol : BinanceSymbol
+            The symbol to query (required).
+        algoId : int, optional
+            If set, retrieves orders >= that algoId; otherwise returns most recent.
+        startTime : str, optional
+            Query start timestamp in milliseconds.
+        endTime : str, optional
+            Query end timestamp in milliseconds.
+        page : int, optional
+            Pagination index.
+        limit : int, optional
+            Result limit (default 500, max 1000).
+        recvWindow : str, optional
+            The response receive window for the request (cannot be greater than 60000).
+
+        """
+
+        timestamp: str
+        symbol: BinanceSymbol
+        algoId: int | None = None
+        startTime: str | None = None
+        endTime: str | None = None
+        page: int | None = None
+        limit: int | None = None
+        recvWindow: str | None = None
+
+    async def get(self, params: GetParameters) -> list[BinanceFuturesAlgoOrder]:
+        method_type = HttpMethod.GET
+        raw = await self._method(method_type, params)
+        return self._get_resp_decoder.decode(raw)
+
+
+class BinanceFuturesCancelAllAlgoOrdersHttp(BinanceHttpEndpoint):
+    """
+    Endpoint for canceling all open algo (conditional) orders for a symbol.
+
+    `DELETE /fapi/v1/algoOpenOrders`
+
+    References
+    ----------
+    https://developers.binance.com/docs/derivatives/usds-margined-futures/trade/rest-api/Cancel-All-Algo-Open-Orders
+
+    """
+
+    def __init__(
+        self,
+        client: BinanceHttpClient,
+        base_endpoint: str,
+    ):
+        methods = {
+            HttpMethod.DELETE: BinanceSecurityType.TRADE,
+        }
+        url_path = base_endpoint + "algoOpenOrders"
+        super().__init__(
+            client,
+            methods,
+            url_path,
+        )
+
+        self._delete_resp_decoder = msgspec.json.Decoder(BinanceStatusCode)
+
+    class DeleteParameters(msgspec.Struct, omit_defaults=True, frozen=True):
+        """
+        Parameters for cancel all algo open orders DELETE request.
+
+        Parameters
+        ----------
+        timestamp : str
+            The millisecond timestamp of the request.
+        symbol : BinanceSymbol
+            The symbol to cancel all algo orders for.
+        recvWindow : str, optional
+            The response receive window for the request (cannot be greater than 60000).
+
+        """
+
+        timestamp: str
+        symbol: BinanceSymbol
+        recvWindow: str | None = None
+
+    async def delete(self, params: DeleteParameters) -> BinanceStatusCode:
+        method_type = HttpMethod.DELETE
+        raw = await self._method(method_type, params)
+        return self._delete_resp_decoder.decode(raw)
 
 
 class BinanceFuturesAccountHttpAPI(BinanceAccountHttpAPI):
@@ -693,12 +893,14 @@ class BinanceFuturesAccountHttpAPI(BinanceAccountHttpAPI):
             clock=clock,
             account_type=account_type,
         )
+
         if not account_type.is_futures:
             raise RuntimeError(  # pragma: no cover (design-time error)
                 f"`BinanceAccountType` not USDT_FUTURES or COIN_FUTURES, was {account_type}",  # pragma: no cover
             )
         v2_endpoint_base = self.base_endpoint
         v3_endpoint_base = self.base_endpoint
+
         if account_type == BinanceAccountType.USDT_FUTURES:
             v2_endpoint_base = "/fapi/v2/"
             v3_endpoint_base = "/fapi/v3/"
@@ -731,6 +933,18 @@ class BinanceFuturesAccountHttpAPI(BinanceAccountHttpAPI):
             self.base_endpoint,
         )
         self._endpoint_futures_algo_order = BinanceFuturesAlgoOrderHttp(
+            client,
+            self.base_endpoint,
+        )
+        self._endpoint_futures_open_algo_orders = BinanceFuturesOpenAlgoOrdersHttp(
+            client,
+            self.base_endpoint,
+        )
+        self._endpoint_futures_all_algo_orders = BinanceFuturesAllAlgoOrdersHttp(
+            client,
+            self.base_endpoint,
+        )
+        self._endpoint_futures_cancel_all_algo_orders = BinanceFuturesCancelAllAlgoOrdersHttp(
             client,
             self.base_endpoint,
         )
@@ -832,15 +1046,17 @@ class BinanceFuturesAccountHttpAPI(BinanceAccountHttpAPI):
         symbol: str,
         client_order_ids: list[str],
         recv_window: str | None = None,
-    ) -> bool:
+    ) -> list[dict[str, Any]]:
         """
         Delete multiple Futures orders.
 
-        Returns whether successful.
+        Returns the per-item response list in the same order as `client_order_ids`. Each
+        item is either a Binance order dict on success or `{"code": int, "msg": str}` on
+        failure. Callers must discriminate by the presence of `code`.
 
         """
         stringified_client_order_ids = str(client_order_ids).replace(" ", "").replace("'", '"')
-        await self._endpoint_futures_cancel_multiple_orders.delete(
+        response = await self._endpoint_futures_cancel_multiple_orders.delete(
             params=self._endpoint_futures_cancel_multiple_orders.DeleteParameters(
                 timestamp=self._timestamp(),
                 symbol=BinanceSymbol(symbol),
@@ -848,7 +1064,11 @@ class BinanceFuturesAccountHttpAPI(BinanceAccountHttpAPI):
                 recvWindow=recv_window,
             ),
         )
-        return True
+
+        if isinstance(response, list):
+            return response
+
+        return []
 
     async def query_futures_account_info(
         self,
@@ -941,7 +1161,7 @@ class BinanceFuturesAccountHttpAPI(BinanceAccountHttpAPI):
                 closePosition=close_position,
                 priceProtect=price_protect,
                 reduceOnly=reduce_only,
-                activationPrice=activation_price,
+                activatePrice=activation_price,
                 callbackRate=callback_rate,
                 clientAlgoId=client_algo_id,
                 goodTillDate=good_till_date,
@@ -992,3 +1212,105 @@ class BinanceFuturesAccountHttpAPI(BinanceAccountHttpAPI):
                 recvWindow=recv_window,
             ),
         )
+
+    async def query_open_algo_orders(
+        self,
+        symbol: str | None = None,
+        recv_window: str | None = None,
+    ) -> list[BinanceFuturesAlgoOrder]:
+        """
+        Query all currently open algo orders.
+
+        Parameters
+        ----------
+        symbol : str, optional
+            Filter by symbol. If omitted, orders for all symbols returned.
+        recv_window : str, optional
+            The response receive window for the request.
+
+        Returns
+        -------
+        list[BinanceFuturesAlgoOrder]
+
+        """
+        return await self._endpoint_futures_open_algo_orders.get(
+            params=self._endpoint_futures_open_algo_orders.GetParameters(
+                timestamp=self._timestamp(),
+                symbol=BinanceSymbol(symbol) if symbol else None,
+                recvWindow=recv_window,
+            ),
+        )
+
+    async def query_all_algo_orders(
+        self,
+        symbol: str,
+        start_time: int | None = None,
+        end_time: int | None = None,
+        page: int | None = None,
+        limit: int | None = None,
+        recv_window: str | None = None,
+    ) -> list[BinanceFuturesAlgoOrder]:
+        """
+        Query all algo orders including historical (triggered, cancelled, finished).
+
+        Parameters
+        ----------
+        symbol : str
+            The symbol to query (required).
+        start_time : int, optional
+            Query start timestamp in milliseconds.
+        end_time : int, optional
+            Query end timestamp in milliseconds.
+        page : int, optional
+            Pagination index (1-based).
+        limit : int, optional
+            Result limit (default 500, max 1000).
+        recv_window : str, optional
+            The response receive window for the request.
+
+        Returns
+        -------
+        list[BinanceFuturesAlgoOrder]
+
+        """
+        return await self._endpoint_futures_all_algo_orders.get(
+            params=self._endpoint_futures_all_algo_orders.GetParameters(
+                timestamp=self._timestamp(),
+                symbol=BinanceSymbol(symbol),
+                startTime=str(start_time) if start_time else None,
+                endTime=str(end_time) if end_time else None,
+                page=page,
+                limit=limit,
+                recvWindow=recv_window,
+            ),
+        )
+
+    async def cancel_all_open_algo_orders(
+        self,
+        symbol: str,
+        recv_window: str | None = None,
+    ) -> bool:
+        """
+        Cancel all open algo orders for a specific symbol.
+
+        Parameters
+        ----------
+        symbol : str
+            The symbol to cancel all algo orders for.
+        recv_window : str, optional
+            The response receive window for the request.
+
+        Returns
+        -------
+        bool
+            True if successful.
+
+        """
+        response = await self._endpoint_futures_cancel_all_algo_orders.delete(
+            params=self._endpoint_futures_cancel_all_algo_orders.DeleteParameters(
+                timestamp=self._timestamp(),
+                symbol=BinanceSymbol(symbol),
+                recvWindow=recv_window,
+            ),
+        )
+        return response.code == 200

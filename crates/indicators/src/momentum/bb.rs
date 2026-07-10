@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -30,6 +30,10 @@ pub const MAX_PERIOD: usize = 1_024;
 #[cfg_attr(
     feature = "python",
     pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.indicators", unsendable)
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.indicators")
 )]
 pub struct BollingerBands {
     pub period: usize,
@@ -70,11 +74,12 @@ impl Indicator for BollingerBands {
         self.initialized
     }
 
-    fn handle_quote(&mut self, quote: &QuoteTick) {
+    fn handle_quote(&mut self, quote: &QuoteTick) -> anyhow::Result<()> {
         let bid = quote.bid_price.raw as f64;
         let ask = quote.ask_price.raw as f64;
         let mid = f64::midpoint(bid, ask);
         self.update_raw(ask, bid, mid);
+        Ok(())
     }
 
     fn handle_trade(&mut self, trade: &TradeTick) {
@@ -140,6 +145,7 @@ impl BollingerBands {
 
         if !self.initialized {
             self.has_inputs = true;
+
             if self.prices.len() >= self.period {
                 self.initialized = true;
             }
@@ -178,9 +184,6 @@ where
     variance.sqrt()
 }
 
-////////////////////////////////////////////////////////////////////////////////
-// Tests
-////////////////////////////////////////////////////////////////////////////////
 #[cfg(test)]
 mod tests {
     use rstest::rstest;

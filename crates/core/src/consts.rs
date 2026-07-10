@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -15,8 +15,6 @@
 
 //! Core constants.
 
-use std::env;
-
 /// The NautilusTrader string constant.
 pub static NAUTILUS_TRADER: &str = "NautilusTrader";
 
@@ -25,3 +23,6 @@ pub static NAUTILUS_VERSION: &str = env!("NAUTILUS_VERSION");
 
 /// The NautilusTrader common User-Agent string including the current version at compile time.
 pub static NAUTILUS_USER_AGENT: &str = env!("NAUTILUS_USER_AGENT");
+
+/// Prefix for log messages outside the main logging subsystem.
+pub static NAUTILUS_PREFIX: &str = "[NAUTILUS]";

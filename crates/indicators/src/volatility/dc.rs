@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -27,6 +27,10 @@ const MAX_PERIOD: usize = 1_024;
 #[cfg_attr(
     feature = "python",
     pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.indicators")
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.indicators")
 )]
 pub struct DonchianChannel {
     pub period: usize,
@@ -100,11 +104,20 @@ impl DonchianChannel {
     }
 
     pub fn update_raw(&mut self, high: f64, low: f64) {
+        if self.upper_prices.len() == self.period {
+            let _ = self.upper_prices.pop_front();
+        }
+
+        if self.lower_prices.len() == self.period {
+            let _ = self.lower_prices.pop_front();
+        }
+
         let _ = self.upper_prices.push_back(high);
         let _ = self.lower_prices.push_back(low);
 
         if !self.initialized {
             self.has_inputs = true;
+
             if self.upper_prices.len() >= self.period && self.lower_prices.len() >= self.period {
                 self.initialized = true;
             }
@@ -120,13 +133,10 @@ impl DonchianChannel {
             .iter()
             .copied()
             .fold(f64::INFINITY, f64::min);
-        self.middle = 0.5 * (self.upper + self.lower);
+        self.middle = f64::midpoint(self.upper, self.lower);
     }
 }
 
-////////////////////////////////////////////////////////////////////////////////
-// Tests
-////////////////////////////////////////////////////////////////////////////////
 #[cfg(test)]
 mod tests {
     use nautilus_model::data::Bar;
@@ -179,8 +189,23 @@ mod tests {
         }
 
         assert_eq!(dc_10.upper, 15.0);
-        assert_eq!(dc_10.middle, 7.95);
-        assert_eq!(dc_10.lower, 0.9);
+        assert_eq!(dc_10.middle, 10.45);
+        assert_eq!(dc_10.lower, 5.9);
+    }
+
+    #[rstest]
+    fn test_value_respects_period_window() {
+        let mut dc = DonchianChannel::new(3);
+
+        dc.update_raw(1.0, 0.0);
+        dc.update_raw(100.0, 0.0);
+        dc.update_raw(2.0, 0.0);
+        dc.update_raw(3.0, 0.0);
+        dc.update_raw(4.0, 0.0);
+
+        assert_eq!(dc.upper, 4.0);
+        assert_eq!(dc.middle, 2.0);
+        assert_eq!(dc.lower, 0.0);
     }
 
     #[rstest]

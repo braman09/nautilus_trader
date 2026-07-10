@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -13,13 +13,19 @@
 //  limitations under the License.
 // -------------------------------------------------------------------------------------------------
 
+use nautilus_core::python::to_pyvalue_err;
 use nautilus_model::{data::QuoteTick, identifiers::InstrumentId};
 use pyo3::prelude::*;
 
 use crate::{indicator::Indicator, ratio::spread_analyzer::SpreadAnalyzer};
 
 #[pymethods]
+#[pyo3_stub_gen::derive::gen_stub_pymethods]
 impl SpreadAnalyzer {
+    /// An indicator which calculates the efficiency ratio across a rolling window.
+    ///
+    /// The Kaufman Efficiency measures the ratio of the relative market speed in
+    /// relation to the volatility, this could be thought of as a proxy for noise.
     #[new]
     fn py_new(instrument_id: InstrumentId, capacity: usize) -> Self {
         Self::new(capacity, instrument_id)
@@ -59,14 +65,15 @@ impl SpreadAnalyzer {
         self.initialized
     }
 
+    #[getter]
     #[pyo3(name = "has_inputs")]
     fn py_has_inputs(&self) -> bool {
         self.has_inputs()
     }
 
     #[pyo3(name = "handle_quote_tick")]
-    fn py_handle_quote_tick(&mut self, quote: &QuoteTick) {
-        self.handle_quote(quote);
+    fn py_handle_quote_tick(&mut self, quote: &QuoteTick) -> PyResult<()> {
+        self.handle_quote(quote).map_err(to_pyvalue_err)
     }
 
     #[pyo3(name = "reset")]

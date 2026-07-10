@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -35,6 +35,10 @@ const ROUND_DP: f64 = 1_000_000_000_000.0;
     feature = "python",
     pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.indicators")
 )]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.indicators")
+)]
 pub struct AroonOscillator {
     pub period: usize,
     pub aroon_up: f64,
@@ -67,9 +71,10 @@ impl Indicator for AroonOscillator {
         self.initialized
     }
 
-    fn handle_quote(&mut self, quote: &QuoteTick) {
-        let price = quote.extract_price(PriceType::Mid).into();
+    fn handle_quote(&mut self, quote: &QuoteTick) -> anyhow::Result<()> {
+        let price = quote.extract_price(PriceType::Mid)?.into();
         self.update_raw(price, price);
+        Ok(())
     }
 
     fn handle_trade(&mut self, trade: &TradeTick) {
@@ -158,7 +163,7 @@ impl AroonOscillator {
 
     fn calculate_aroon(&mut self) {
         let len = self.high_inputs.len();
-        debug_assert!(len == self.period + 1);
+        debug_assert_eq!(len, self.period + 1);
 
         let mut max_idx = 0_usize;
         let mut max_val = f64::MIN;
@@ -194,9 +199,6 @@ impl AroonOscillator {
     }
 }
 
-////////////////////////////////////////////////////////////////////////////////
-// Tests
-////////////////////////////////////////////////////////////////////////////////
 #[cfg(test)]
 mod tests {
     use rstest::rstest;
@@ -272,6 +274,7 @@ mod tests {
             (110.04, 109.96),
             (110.02, 109.90),
         ];
+
         for &(h, l) in &inputs {
             aroon.update_raw(h, l);
         }
@@ -344,6 +347,7 @@ mod tests {
             (14.0, 9.3),
             (15.0, 9.4),
         ];
+
         for &(h, l) in &inputs {
             aroon.update_raw(h, l);
         }

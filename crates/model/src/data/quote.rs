@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -42,7 +42,11 @@ use crate::{
 #[serde(tag = "type")]
 #[cfg_attr(
     feature = "python",
-    pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.model")
+    pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.model", from_py_object)
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.model")
 )]
 pub struct QuoteTick {
     /// The quotes instrument ID.
@@ -112,6 +116,7 @@ impl QuoteTick {
     /// This function panics if:
     /// - `bid_price.precision` does not equal `ask_price.precision`.
     /// - `bid_size.precision` does not equal `ask_size.precision`.
+    #[must_use]
     pub fn new(
         instrument_id: InstrumentId,
         bid_price: Price,
@@ -162,38 +167,50 @@ impl QuoteTick {
 
     /// Returns the [`Price`] for this quote depending on the given `price_type`.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if an unsupported `price_type` is provided.
-    #[must_use]
-    pub fn extract_price(&self, price_type: PriceType) -> Price {
-        match price_type {
+    /// Returns an error if `price_type` is not `Bid`, `Ask`, or `Mid` (a quote has no `Last` price).
+    pub fn extract_price(&self, price_type: PriceType) -> anyhow::Result<Price> {
+        let price = match price_type {
             PriceType::Bid => self.bid_price,
             PriceType::Ask => self.ask_price,
-            PriceType::Mid => Price::from_raw(
-                (self.bid_price.raw + self.ask_price.raw) / 2,
-                cmp::min(self.bid_price.precision + 1, FIXED_PRECISION),
-            ),
-            _ => panic!("Cannot extract with price type {price_type}"),
-        }
+            PriceType::Mid => {
+                // Calculate mid avoiding overflow
+                let a = self.bid_price.raw;
+                let b = self.ask_price.raw;
+                let mid_raw = a.midpoint(b);
+                Price::from_raw(
+                    mid_raw,
+                    cmp::min(self.bid_price.precision + 1, FIXED_PRECISION),
+                )
+            }
+            _ => anyhow::bail!("Cannot extract price from quote with price type {price_type}"),
+        };
+        Ok(price)
     }
 
     /// Returns the [`Quantity`] for this quote depending on the given `price_type`.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if an unsupported `price_type` is provided.
-    #[must_use]
-    pub fn extract_size(&self, price_type: PriceType) -> Quantity {
-        match price_type {
+    /// Returns an error if `price_type` is not `Bid`, `Ask`, or `Mid` (a quote has no `Last` size).
+    pub fn extract_size(&self, price_type: PriceType) -> anyhow::Result<Quantity> {
+        let size = match price_type {
             PriceType::Bid => self.bid_size,
             PriceType::Ask => self.ask_size,
-            PriceType::Mid => Quantity::from_raw(
-                (self.bid_size.raw + self.ask_size.raw) / 2,
-                cmp::min(self.bid_size.precision + 1, FIXED_PRECISION),
-            ),
-            _ => panic!("Cannot extract with price type {price_type}"),
-        }
+            PriceType::Mid => {
+                // Calculate mid avoiding overflow
+                let a = self.bid_size.raw;
+                let b = self.ask_size.raw;
+                let mid_raw = a.midpoint(b);
+                Quantity::from_raw(
+                    mid_raw,
+                    cmp::min(self.bid_size.precision + 1, FIXED_PRECISION),
+                )
+            }
+            _ => anyhow::bail!("Cannot extract size from quote with price type {price_type}"),
+        };
+        Ok(size)
     }
 }
 
@@ -220,9 +237,6 @@ impl HasTsInit for QuoteTick {
     }
 }
 
-////////////////////////////////////////////////////////////////////////////////
-// Tests
-////////////////////////////////////////////////////////////////////////////////
 #[cfg(test)]
 mod tests {
 
@@ -234,7 +248,7 @@ mod tests {
         data::{HasTsInit, QuoteTick, stubs::quote_ethusdt_binance},
         enums::PriceType,
         identifiers::InstrumentId,
-        types::{Price, Quantity},
+        types::{Price, Quantity, fixed::FIXED_PRECISION, price::PriceRaw, quantity::QuantityRaw},
     };
 
     fn create_test_quote() -> QuoteTick {
@@ -426,7 +440,7 @@ mod tests {
         quote_ethusdt_binance: QuoteTick,
     ) {
         let quote = quote_ethusdt_binance;
-        let result = quote.extract_price(input);
+        let result = quote.extract_price(input).unwrap();
         assert_eq!(result, expected);
     }
 
@@ -440,22 +454,28 @@ mod tests {
         quote_ethusdt_binance: QuoteTick,
     ) {
         let quote = quote_ethusdt_binance;
-        let result = quote.extract_size(input);
+        let result = quote.extract_size(input).unwrap();
         assert_eq!(result, expected);
     }
 
     #[rstest]
-    #[should_panic(expected = "Cannot extract with price type LAST")]
     fn test_extract_price_invalid_type() {
         let quote = create_test_quote();
-        let _ = quote.extract_price(PriceType::Last);
+        let error = quote.extract_price(PriceType::Last).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Cannot extract price from quote with price type LAST",
+        );
     }
 
     #[rstest]
-    #[should_panic(expected = "Cannot extract with price type LAST")]
     fn test_extract_size_invalid_type() {
         let quote = create_test_quote();
-        let _ = quote.extract_size(PriceType::Last);
+        let error = quote.extract_size(PriceType::Last).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Cannot extract size from quote with price type LAST",
+        );
     }
 
     #[rstest]
@@ -523,11 +543,64 @@ mod tests {
             UnixNanos::from(2_000_000_000),
         );
 
-        let mid_price = quote.extract_price(PriceType::Mid);
-        let mid_size = quote.extract_size(PriceType::Mid);
+        let mid_price = quote.extract_price(PriceType::Mid).unwrap();
+        let mid_size = quote.extract_size(PriceType::Mid).unwrap();
 
         assert_eq!(mid_price, Price::from("1.010"));
         assert_eq!(mid_size, Quantity::from("100.000"));
+    }
+
+    #[rstest]
+    fn test_extract_mid_price_uses_raw_midpoint_for_odd_negative_values() {
+        let quote = QuoteTick::new(
+            InstrumentId::from("TEST.SIM"),
+            Price::from_raw(-3, FIXED_PRECISION),
+            Price::from_raw(-2, FIXED_PRECISION),
+            Quantity::from("1"),
+            Quantity::from("1"),
+            UnixNanos::from(0),
+            UnixNanos::from(0),
+        );
+
+        let mid_price = quote.extract_price(PriceType::Mid).unwrap();
+
+        assert_eq!(mid_price.raw, PriceRaw::midpoint(-3, -2));
+        assert_eq!(mid_price.precision, FIXED_PRECISION);
+    }
+
+    #[rstest]
+    fn test_extract_mid_size_uses_raw_midpoint_for_odd_values() {
+        let quote = QuoteTick::new(
+            InstrumentId::from("TEST.SIM"),
+            Price::from("1"),
+            Price::from("1"),
+            Quantity::from_raw(1, FIXED_PRECISION),
+            Quantity::from_raw(2, FIXED_PRECISION),
+            UnixNanos::from(0),
+            UnixNanos::from(0),
+        );
+
+        let mid_size = quote.extract_size(PriceType::Mid).unwrap();
+
+        assert_eq!(mid_size.raw, QuantityRaw::midpoint(1, 2));
+        assert_eq!(mid_size.precision, FIXED_PRECISION);
+    }
+
+    #[rstest]
+    fn test_extract_mid_size_precision() {
+        let quote = QuoteTick::new(
+            InstrumentId::from("TEST.SIM"),
+            Price::from("1.00"),
+            Price::from("1.01"),
+            Quantity::from("100.00"),
+            Quantity::from("101.00"),
+            UnixNanos::from(1_000_000_000),
+            UnixNanos::from(2_000_000_000),
+        );
+
+        let mid_size = quote.extract_size(PriceType::Mid).unwrap();
+
+        assert_eq!(mid_size, Quantity::from("100.500"));
     }
 
     #[rstest]

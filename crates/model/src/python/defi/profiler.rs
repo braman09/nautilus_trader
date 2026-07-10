@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -19,7 +19,7 @@ use std::str::FromStr;
 
 use alloy_primitives::{U160, U256};
 use nautilus_core::python::to_pyvalue_err;
-use pyo3::prelude::*;
+use pyo3::{prelude::*, types::PyModule};
 
 use crate::{
     defi::{
@@ -30,6 +30,7 @@ use crate::{
 };
 
 #[pymethods]
+#[pyo3_stub_gen::derive::gen_stub_pymethods]
 impl PoolProfiler {
     #[getter]
     #[pyo3(name = "pool")]
@@ -57,8 +58,12 @@ impl PoolProfiler {
 
     #[getter]
     #[pyo3(name = "price_sqrt_ratio_x96")]
-    fn py_price_sqrt_ratio_x96(&self) -> String {
-        self.state.price_sqrt_ratio_x96.to_string()
+    #[gen_stub(override_return_type(type_repr = "int"))]
+    fn py_price_sqrt_ratio_x96(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        Ok(PyModule::import(py, "builtins")?
+            .getattr("int")?
+            .call1((self.state.price_sqrt_ratio_x96.to_string(),))?
+            .unbind())
     }
 
     #[getter]
@@ -103,36 +108,84 @@ impl PoolProfiler {
         self.state.fee_protocol
     }
 
+    #[getter]
+    #[pyo3(name = "fee_protocol0_basis_points")]
+    fn py_fee_protocol0_basis_points(&self) -> Option<u32> {
+        self.state.fee_protocol0_basis_points
+    }
+
+    #[getter]
+    #[pyo3(name = "fee_protocol1_basis_points")]
+    fn py_fee_protocol1_basis_points(&self) -> Option<u32> {
+        self.state.fee_protocol1_basis_points
+    }
+
+    /// Returns the pool's active liquidity tracked by the tick map.
+    ///
+    /// This represents the effective liquidity available for trading at the current price.
+    /// The tick map maintains this value efficiently by updating it during tick crossings
+    /// as the price moves through different ranges.
+    ///
+    /// # Returns
+    /// The active liquidity (u128) at the current tick from the tick map
     #[pyo3(name = "get_active_liquidity")]
     fn py_get_active_liquidity(&self) -> u128 {
         self.get_active_liquidity()
     }
 
+    /// Gets the number of active ticks.
     #[pyo3(name = "get_active_tick_count")]
     fn py_get_active_tick_count(&self) -> usize {
         self.get_active_tick_count()
     }
 
+    /// Gets the total number of ticks tracked by the tick map.
+    ///
+    /// Returns count of all ticks that have ever been initialized,
+    /// including those that may no longer have active liquidity.
+    ///
+    /// # Returns
+    /// Total tick count in the tick map
     #[pyo3(name = "get_total_tick_count")]
     fn py_get_total_tick_count(&self) -> usize {
         self.get_total_tick_count()
     }
 
+    /// Gets the count of positions that are currently active.
+    ///
+    /// Active positions are those with liquidity > 0 and whose tick range
+    /// includes the current pool tick (meaning they have tokens in the pool).
     #[pyo3(name = "get_total_active_positions")]
     fn py_get_total_active_positions(&self) -> usize {
         self.get_total_active_positions()
     }
 
+    /// Gets the count of positions that are currently inactive.
+    ///
+    /// Inactive positions are those that exist but don't span the current tick,
+    /// meaning their liquidity is entirely in one token or the other.
     #[pyo3(name = "get_total_inactive_positions")]
     fn py_get_total_inactive_positions(&self) -> usize {
         self.get_total_inactive_positions()
     }
 
+    /// Estimates the total amount of token0 in the pool.
+    ///
+    /// Calculates token0 balance by summing:
+    /// - Token0 amounts from all active liquidity positions
+    /// - Accumulated trading fees (approximated from fee growth)
+    /// - Protocol fees collected
     #[pyo3(name = "estimate_balance_of_token0")]
     fn py_estimate_balance_of_token0(&self) -> String {
         self.estimate_balance_of_token0().to_string()
     }
 
+    /// Estimates the total amount of token1 in the pool.
+    ///
+    /// Calculates token1 balance by summing:
+    /// - Token1 amounts from all active liquidity positions
+    /// - Accumulated trading fees (approximated from fee growth)
+    /// - Protocol fees collected
     #[pyo3(name = "estimate_balance_of_token1")]
     fn py_estimate_balance_of_token1(&self) -> String {
         self.estimate_balance_of_token1().to_string()
@@ -143,11 +196,19 @@ impl PoolProfiler {
         self.get_total_liquidity().to_string()
     }
 
+    /// Calculates the liquidity utilization rate for the pool.
+    ///
+    /// The utilization rate measures what percentage of total deployed liquidity
+    /// is currently active (in-range and earning fees) at the current price tick.
     #[pyo3(name = "liquidity_utilization_rate")]
     fn py_liquidity_utilization_rate(&self) -> f64 {
         self.liquidity_utilization_rate()
     }
 
+    /// Simulates an exact input swap (know input amount, calculate output amount).
+    ///
+    /// # Errors
+    /// Returns error if pool is not initialized, input is zero, or price limit is invalid
     #[pyo3(name = "swap_exact_in")]
     fn py_swap_exact_in(
         &self,
@@ -165,6 +226,11 @@ impl PoolProfiler {
             .map_err(to_pyvalue_err)
     }
 
+    /// Simulates an exact output swap (know output amount, calculate required input amount).
+    ///
+    /// # Errors
+    /// Returns error if pool is not initialized, output is zero, price limit is invalid,
+    /// or insufficient liquidity exists to fulfill the exact output amount
     #[pyo3(name = "swap_exact_out")]
     fn py_swap_exact_out(
         &self,
@@ -182,6 +248,20 @@ impl PoolProfiler {
             .map_err(to_pyvalue_err)
     }
 
+    /// Finds the maximum trade size that produces a target slippage (including fees).
+    ///
+    /// Uses binary search to find the largest trade size that results in slippage
+    /// at or below the target. The method iteratively simulates swaps at different
+    /// sizes until it converges to the optimal size within the specified tolerance.
+    ///
+    /// # Returns
+    /// The maximum trade size (U256) that produces the target slippage
+    ///
+    /// # Errors
+    /// Returns error if:
+    /// - Impact is zero or exceeds 100% (10000 bps)
+    /// - Pool is not initialized
+    /// - Swap simulations fail
     #[pyo3(name = "size_for_impact_bps")]
     fn py_size_for_impact_bps(&self, impact_bps: u32, zero_for_one: bool) -> PyResult<String> {
         self.size_for_impact_bps(impact_bps, zero_for_one)
@@ -189,6 +269,19 @@ impl PoolProfiler {
             .map_err(to_pyvalue_err)
     }
 
+    /// Finds the maximum trade size with search diagnostics.
+    /// This is the detailed version of `Self.size_for_impact_bps` that returns
+    /// extensive information about the search process.It is useful for debugging,
+    /// monitoring, and analyzing search behavior in production.
+    ///
+    /// # Returns
+    /// Detailed result with size and search diagnostics
+    ///
+    /// # Errors
+    /// Returns error if:
+    /// - Impact is zero or exceeds 100% (10000 bps)
+    /// - Pool is not initialized
+    /// - Swap simulations fail
     #[pyo3(name = "size_for_impact_bps_detailed")]
     fn py_size_for_impact_bps_detailed(
         &self,
@@ -197,5 +290,83 @@ impl PoolProfiler {
     ) -> PyResult<SizeForImpactResult> {
         self.size_for_impact_bps_detailed(impact_bps, zero_for_one)
             .map_err(to_pyvalue_err)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{str::FromStr, sync::Arc};
+
+    use alloy_primitives::{U160, address};
+    use nautilus_core::UnixNanos;
+    use pyo3::{
+        Python,
+        types::{PyAnyMethods, PyInt},
+    };
+    use rstest::rstest;
+
+    use crate::defi::{
+        AmmType, Blockchain, Chain, Dex, DexType, Pool, PoolIdentifier, Token,
+        pool_analysis::PoolProfiler,
+    };
+
+    #[rstest]
+    fn price_sqrt_ratio_x96_returns_python_int() {
+        let sqrt_price_x96 = U160::from_str("79228162514264337593543950336").unwrap();
+        let mut profiler = PoolProfiler::new(pool());
+        profiler.initialize(sqrt_price_x96).unwrap();
+        Python::initialize();
+
+        Python::attach(|py| {
+            let value = profiler.py_price_sqrt_ratio_x96(py).unwrap();
+            let value = value.bind(py);
+
+            assert!(value.is_instance_of::<PyInt>());
+            assert_eq!(value.str().unwrap().to_string(), sqrt_price_x96.to_string());
+        });
+    }
+
+    fn pool() -> Arc<Pool> {
+        let chain = Arc::new(Chain::new(Blockchain::Ethereum, 1));
+        let dex = Arc::new(Dex::new(
+            (*chain).clone(),
+            DexType::UniswapV3,
+            "0x0000000000000000000000000000000000000fac",
+            1,
+            AmmType::CLAMM,
+            "PoolCreated",
+            "Swap",
+            "Mint",
+            "Burn",
+            "Collect",
+        ));
+        let token0 = Token::new(
+            chain.clone(),
+            address!("0000000000000000000000000000000000000001"),
+            "USD Coin".to_string(),
+            "USDC".to_string(),
+            6,
+        );
+        let token1 = Token::new(
+            chain.clone(),
+            address!("0000000000000000000000000000000000000002"),
+            "Wrapped Ether".to_string(),
+            "WETH".to_string(),
+            18,
+        );
+        let pool_address = address!("0000000000000000000000000000000000000003");
+
+        Arc::new(Pool::new(
+            chain,
+            dex,
+            pool_address,
+            PoolIdentifier::from_address(pool_address),
+            1,
+            token0,
+            token1,
+            Some(500),
+            Some(10),
+            UnixNanos::default(),
+        ))
     }
 }

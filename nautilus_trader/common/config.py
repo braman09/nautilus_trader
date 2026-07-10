@@ -1,5 +1,5 @@
 # -------------------------------------------------------------------------------------------------
-#  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+#  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 #  https://nautechsystems.io
 #
 #  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -35,6 +35,8 @@ from nautilus_trader.model.data import BarType
 from nautilus_trader.model.enums import AccountType
 from nautilus_trader.model.enums import BookType
 from nautilus_trader.model.enums import OmsType
+from nautilus_trader.model.enums import OtoTriggerMode
+from nautilus_trader.model.enums import TimeInForce
 from nautilus_trader.model.enums import TriggerType
 from nautilus_trader.model.identifiers import ComponentId
 from nautilus_trader.model.identifiers import Identifier
@@ -98,11 +100,49 @@ def nautilus_schema_hook(type_: type[Any]) -> dict[str, Any]:
         return {"type": "string", "format": "date-time"}
     if type_ == pd.Timedelta:
         return {"type": "string"}
-    if type_ == Environment:
+    if _is_pyo3_enum_type(type_):
+        return {"type": "string"}
+    if type_ in (Environment, TimeInForce):
         return {"type": "string"}
     if type_ is type:  # Handle <class 'type'>
         return {"type": "string"}  # Represent type objects as strings
     raise TypeError(f"Unsupported type for schema generation: {type_}")
+
+
+def _is_pyo3_enum_type(type_: type[Any]) -> bool:
+    module = getattr(type_, "__module__", "")
+    if "nautilus_pyo3" not in module:
+        return False
+
+    return _pyo3_enum_member_name_from_type(type_, None) is not None
+
+
+def _is_pyo3_enum_instance(obj: Any) -> bool:
+    return _pyo3_enum_member_name(obj) is not None
+
+
+def _pyo3_enum_member_name(obj: Any) -> str | None:
+    return _pyo3_enum_member_name_from_type(type(obj), obj)
+
+
+def _pyo3_enum_member_name_from_type(type_: type[Any], value: Any) -> str | None:
+    for attr in dir(type_):
+        if not attr.isupper():
+            continue
+
+        member = getattr(type_, attr, None)
+        if value is None or member is value:
+            return attr
+
+        try:
+            equals = member == value
+        except (NotImplementedError, TypeError, ValueError):
+            continue
+
+        if isinstance(equals, bool) and equals:
+            return attr
+
+    return None
 
 
 def msgspec_encoding_hook(obj: Any) -> Any:  # noqa: C901 (too complex)
@@ -121,12 +161,14 @@ def msgspec_encoding_hook(obj: Any) -> Any:  # noqa: C901 (too complex)
         return str(obj)
     if isinstance(obj, (Price | Quantity | Money | Currency)):
         return str(obj)
-    if isinstance(obj, (OmsType | AccountType | BookType)):
+    if isinstance(obj, (OmsType | AccountType | BookType | OtoTriggerMode | TimeInForce)):
         return obj.name
     if isinstance(obj, (pd.Timestamp | pd.Timedelta)):
         return obj.isoformat()
     if isinstance(obj, Environment):
         return obj.value
+    if _is_pyo3_enum_instance(obj):
+        return _pyo3_enum_member_name(obj)
     if type(obj) in CUSTOM_ENCODINGS:
         func = CUSTOM_ENCODINGS[type(obj)]
         return func(obj)
@@ -161,10 +203,16 @@ def msgspec_decoding_hook(obj_type: type, obj: Any) -> Any:  # noqa: C901 (too c
         return AccountType[obj]
     if obj_type == BookType:
         return BookType[obj]
+    if obj_type == OtoTriggerMode:
+        return OtoTriggerMode[obj]
+    if obj_type == TimeInForce:
+        return TimeInForce[obj]
     if obj_type == TriggerType:
         return TriggerType[obj]
     if obj_type == Environment:
         return obj_type(obj)
+    if _is_pyo3_enum_type(obj_type):
+        return getattr(obj_type, obj.split(".")[-1].upper())
     if obj_type in CUSTOM_DECODINGS:
         func = CUSTOM_DECODINGS[obj_type]
         return func(obj)
@@ -186,7 +234,11 @@ def tokenize_config(obj: NautilusConfig) -> str:
     return hashlib.sha256(obj.json()).hexdigest()
 
 
-class NautilusConfig(msgspec.Struct, kw_only=True, frozen=True):
+def pyo3_config_json(config: NautilusConfig) -> bytes:
+    return msgspec.json.encode(config, enc_hook=msgspec_encoding_hook)
+
+
+class NautilusConfig(msgspec.Struct, kw_only=True, frozen=True, forbid_unknown_fields=True):
     """
     The base class for all Nautilus configuration objects.
     """
@@ -315,8 +367,18 @@ class DatabaseConfig(NautilusConfig, frozen=True):
         If a value is provided then it will be redacted in the string repr for this object.
     ssl : bool, default False
         If socket should use an SSL (TLS encryption) enabled connection.
-    timeout : int, default 20
+    connection_timeout : int, default 20
         The timeout (seconds) to wait for a new connection.
+    response_timeout : int, default 20
+        The timeout (seconds) to wait for a database response.
+    number_of_retries : int, default 100
+        The number of retry attempts for connection failures.
+    exponent_base : int, default 2
+        The base value for exponential backoff.
+    max_delay : int, default 1000
+        The maximum retry delay in seconds.
+    factor : int, default 2
+        The multiplier applied to each retry delay step.
 
     Notes
     -----
@@ -330,15 +392,16 @@ class DatabaseConfig(NautilusConfig, frozen=True):
     username: str | None = None
     password: str | None = None
     ssl: bool = False
-    timeout: int | None = 20
+    connection_timeout: int = 20
+    response_timeout: int = 20
+    number_of_retries: int = 100
+    exponent_base: int = 2
+    max_delay: int = 1000
+    factor: int = 2
 
     def __repr__(self) -> str:
-        redacted_password = "None"
-        if self.password:
-            if len(self.password) >= 4:
-                redacted_password = f"{self.password[:2]}...{self.password[-2:]}"
-            else:
-                redacted_password = self.password
+        redacted_password = "***" if self.password is not None else "None"
+
         return (
             f"{type(self).__name__}("
             f"type={self.type}, "
@@ -347,7 +410,12 @@ class DatabaseConfig(NautilusConfig, frozen=True):
             f"username={self.username}, "
             f"password={redacted_password}, "
             f"ssl={self.ssl}, "
-            f"timeout={self.timeout})"
+            f"connection_timeout={self.connection_timeout}, "
+            f"response_timeout={self.response_timeout}, "
+            f"number_of_retries={self.number_of_retries}, "
+            f"exponent_base={self.exponent_base}, "
+            f"max_delay={self.max_delay}, "
+            f"factor={self.factor})"
         )
 
 
@@ -359,7 +427,7 @@ class MessageBusConfig(NautilusConfig, frozen=True):
     ----------
     database : DatabaseConfig, optional
         The configuration for the message bus backing database.
-    encoding : str, {'msgpack', 'json'}, default 'msgpack'
+    encoding : str, {'json', 'msgpack'}, default 'json'
         The encoding for database operations, controls the type of serializer used.
     timestamps_as_iso8601, default False
         If timestamps should be persisted as ISO 8601 strings.
@@ -398,7 +466,7 @@ class MessageBusConfig(NautilusConfig, frozen=True):
     """
 
     database: DatabaseConfig | None = None
-    encoding: str = "msgpack"
+    encoding: str = "json"
     timestamps_as_iso8601: bool = False
     buffer_interval_ms: PositiveInt | None = None
     autotrim_mins: int | None = None
@@ -563,7 +631,7 @@ class LoggingConfig(NautilusConfig, frozen=True):
         The path to the log file directory.
         If ``None`` then will write to the current working directory.
     log_file_name : str, optional
-        The custom log file name (will use a '.log' suffix for plain text or '.json' for JSON).
+        The custom log file name (will use a '.log' suffix for plain text or '.jsonl' for JSON).
         This will override automatic naming, and no daily file rotation will occur.
     log_file_format : str { 'JSON' }, optional
         The log file format. If ``None`` (default) then will log in plain text.
@@ -584,13 +652,21 @@ class LoggingConfig(NautilusConfig, frozen=True):
         If all logging should be bypassed.
     print_config : bool, default False
         If the core logging configuration should be printed to stdout at initialization.
-    use_pyo3: bool, default False
+    use_tracing : bool, default False
+        If the tracing subscriber should be enabled for capturing logs from external Rust
+        crates that use the `tracing` crate. Use the ``RUST_LOG`` environment variable
+        to control which crates emit tracing events (e.g., ``RUST_LOG=hyper_util=debug``).
+    use_pyo3 : bool, default False
         If the logging subsystem should be initialized via pyo3,
         this isn't recommended for backtesting as the performance is much lower
         but can be useful for seeing logs originating from Rust.
     clear_log_file : bool, default False
         If the log file name should be cleared before being used (e.g. for testing).
         Only applies if `log_file_name` is not ``None``.
+    fileout_sync_on_flush : bool, default True
+        If file log flushes should also sync data to disk.
+    buffered_stdout : bool, default False
+        If stdout writes should be buffered until flush or buffer capacity.
 
     """
 
@@ -606,8 +682,11 @@ class LoggingConfig(NautilusConfig, frozen=True):
     log_components_only: bool = False
     bypass_logging: bool = False
     print_config: bool = False
+    use_tracing: bool = False
     use_pyo3: bool = False
     clear_log_file: bool = False
+    fileout_sync_on_flush: bool = True
+    buffered_stdout: bool = False
 
 
 class ImportableFactoryConfig(NautilusConfig, frozen=True):
@@ -640,4 +719,4 @@ class ImportableConfig(NautilusConfig, frozen=True):
         assert ":" in self.path, "`path` variable should be of the form `path.to.module:class`"
         cls = resolve_path(self.path)
         cfg = msgspec.json.encode(self.config, enc_hook=msgspec_encoding_hook)
-        return msgspec.json.decode(cfg, type=cls)
+        return msgspec.json.decode(cfg, type=cls, dec_hook=msgspec_decoding_hook)

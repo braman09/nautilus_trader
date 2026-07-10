@@ -8,7 +8,8 @@ on:
   push:
     branches: [nightly-merge-test]
   schedule:
-    - cron: '0 14 * * *' # At 14:00 UTC daily
+    - cron: "0 1 * * *" # Daily at 01:00 UTC
+  workflow_dispatch: # Allow manual trigger
 
 jobs:
   check-develop-status:
@@ -20,17 +21,20 @@ jobs:
       has_changes: ${{ steps.check-workflow.outputs.has_changes }}
     steps:
       # https://github.com/step-security/harden-runner
-      - uses: step-security/harden-runner@f4a75cfd619ee5ce8d5b864b0d183aff3c69b55a # v2.13.1
+      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
-          egress-policy: audit
+          egress-policy: ${{ vars.STEP_SECURITY_EGRESS_POLICY || 'block' }}
+          allowed-endpoints: >-
+            ${{ vars.COMMON_ALLOWED_ENDPOINTS }}
+            ${{ vars.CI_ALLOWED_ENDPOINTS }}
 
       - name: Checkout repository
         # https://github.com/actions/checkout
-        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
           token: ${{ secrets.NIGHTLY_TOKEN }}
-          fetch-depth: 0  # Fetch all history for all tags and branches
+          fetch-depth: 0 # Fetch all history for all tags and branches
 
       - name: Fetch develop branch workflows
         id: fetch-workflows
@@ -117,22 +121,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       # https://github.com/step-security/harden-runner
-      - uses: step-security/harden-runner@f4a75cfd619ee5ce8d5b864b0d183aff3c69b55a # v2.13.1
+      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
-          egress-policy: audit
+          egress-policy: ${{ vars.STEP_SECURITY_EGRESS_POLICY || 'block' }}
+          allowed-endpoints: >-
+            ${{ vars.COMMON_ALLOWED_ENDPOINTS }}
+            ${{ vars.CI_ALLOWED_ENDPOINTS }}
 
       - name: Checkout repository
         # https://github.com/actions/checkout
-        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
-          persist-credentials: false
+          persist-credentials: true
           token: ${{ secrets.NIGHTLY_TOKEN }}
-          fetch-depth: 0  # Fetch all history for all tags and branches
-
-      - name: Configure authenticated git remote
-        run: |
-          git remote set-url origin \
-            "https://x-access-token:${{ secrets.NIGHTLY_TOKEN }}@github.com/${{ github.repository }}"
+          fetch-depth: 0 # Fetch all history for all tags and branches
 
       - name: Configure Git user
         run: |
@@ -166,7 +168,7 @@ jobs:
           fi
 
       - name: Check merge result
-        run: |
+        run: |-
           develop_sha="${{ needs.check-develop-status.outputs.develop_sha }}"
           nightly_sha=$(git rev-parse HEAD)
           if [[ "$nightly_sha" == "$develop_sha" ]]; then

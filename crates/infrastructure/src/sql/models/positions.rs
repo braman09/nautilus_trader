@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -23,6 +23,8 @@ use nautilus_model::{
     types::{Currency, Money, Quantity},
 };
 use sqlx::{FromRow, Row, postgres::PgRow};
+
+use crate::sql::models::i64_to_u64;
 
 #[derive(Debug)]
 pub struct PositionSnapshotModel(pub PositionSnapshot);
@@ -81,7 +83,8 @@ impl<'r> FromRow<'r, PgRow> for PositionSnapshotModel {
             });
         let duration_ns: Option<u64> = row
             .try_get::<Option<i64>, _>("duration_ns")?
-            .map(|value| value as u64);
+            .map(|value| i64_to_u64(value, "duration_ns"))
+            .transpose()?;
         let ts_opened = row.try_get::<String, _>("ts_opened").map(UnixNanos::from)?;
         let ts_closed: Option<UnixNanos> = row
             .try_get::<Option<String>, _>("ts_closed")?

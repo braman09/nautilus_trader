@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -53,14 +53,15 @@ use crate::{
 impl TradeTick {
     /// Creates a new [`TradeTick`] from a Python object.
     ///
-    /// # Panics
-    ///
-    /// Panics if converting `aggressor_side_u8` to `AggressorSide` fails.
-    ///
     /// # Errors
     ///
     /// Returns a `PyErr` if attribute extraction or type conversion fails.
     pub fn from_pyobject(obj: &Bound<'_, PyAny>) -> PyResult<Self> {
+        // Fast path: avoid property getters that trigger enum type deadlocks
+        if let Ok(tick) = obj.cast::<Self>() {
+            return Ok(*tick.borrow());
+        }
+
         let instrument_id_obj: Bound<'_, PyAny> = obj.getattr("instrument_id")?.extract()?;
         let instrument_id_str: String = instrument_id_obj.getattr("value")?.extract()?;
         let instrument_id =
@@ -78,7 +79,9 @@ impl TradeTick {
 
         let aggressor_side_obj: Bound<'_, PyAny> = obj.getattr("aggressor_side")?.extract()?;
         let aggressor_side_u8 = aggressor_side_obj.getattr("value")?.extract()?;
-        let aggressor_side = AggressorSide::from_u8(aggressor_side_u8).unwrap();
+        let aggressor_side = AggressorSide::from_u8(aggressor_side_u8).ok_or_else(|| {
+            to_pyvalue_err(format!("Invalid aggressor_side value: {aggressor_side_u8}"))
+        })?;
 
         let trade_id_obj: Bound<'_, PyAny> = obj.getattr("trade_id")?.extract()?;
         let trade_id_str: String = trade_id_obj.getattr("value")?.extract()?;
@@ -100,7 +103,9 @@ impl TradeTick {
 }
 
 #[pymethods]
+#[pyo3_stub_gen::derive::gen_stub_pymethods]
 impl TradeTick {
+    /// Represents a trade tick in a market.
     #[new]
     fn py_new(
         instrument_id: InstrumentId,
@@ -147,7 +152,9 @@ impl TradeTick {
         self.instrument_id = InstrumentId::from_str(instrument_id_str).map_err(to_pyvalue_err)?;
         self.price = Price::from_raw(price_raw, price_prec);
         self.size = Quantity::from_raw(size_raw, size_prec);
-        self.aggressor_side = AggressorSide::from_u8(aggressor_side_u8).unwrap();
+        self.aggressor_side = AggressorSide::from_u8(aggressor_side_u8).ok_or_else(|| {
+            to_pyvalue_err(format!("Invalid aggressor_side value: {aggressor_side_u8}"))
+        })?;
         self.trade_id = TradeId::from(trade_id_str);
         self.ts_event = ts_event.into();
         self.ts_init = ts_init.into();
@@ -259,20 +266,18 @@ impl TradeTick {
         format!("{}:{}", PY_MODULE_MODEL, stringify!(TradeTick))
     }
 
+    /// Returns the metadata for the type, for use with serialization formats.
     #[staticmethod]
     #[pyo3(name = "get_metadata")]
     fn py_get_metadata(
         instrument_id: &InstrumentId,
         price_precision: u8,
         size_precision: u8,
-    ) -> PyResult<HashMap<String, String>> {
-        Ok(Self::get_metadata(
-            instrument_id,
-            price_precision,
-            size_precision,
-        ))
+    ) -> HashMap<String, String> {
+        Self::get_metadata(instrument_id, price_precision, size_precision)
     }
 
+    /// Returns the field map for the type, for use with Arrow schemas.
     #[staticmethod]
     #[pyo3(name = "get_fields")]
     fn py_get_fields(py: Python<'_>) -> PyResult<Bound<'_, PyDict>> {
@@ -284,23 +289,37 @@ impl TradeTick {
         Ok(py_dict)
     }
 
+    #[staticmethod]
+    #[pyo3(name = "from_raw")]
+    #[expect(clippy::too_many_arguments)]
+    fn py_from_raw(
+        instrument_id: InstrumentId,
+        price_raw: PriceRaw,
+        price_prec: u8,
+        size_raw: QuantityRaw,
+        size_prec: u8,
+        aggressor_side: AggressorSide,
+        trade_id: TradeId,
+        ts_event: u64,
+        ts_init: u64,
+    ) -> PyResult<Self> {
+        Self::new_checked(
+            instrument_id,
+            Price::from_raw(price_raw, price_prec),
+            Quantity::from_raw(size_raw, size_prec),
+            aggressor_side,
+            trade_id,
+            ts_event.into(),
+            ts_init.into(),
+        )
+        .map_err(to_pyvalue_err)
+    }
+
     /// Returns a new object from the given dictionary representation.
     #[staticmethod]
     #[pyo3(name = "from_dict")]
     fn py_from_dict(py: Python<'_>, values: Py<PyDict>) -> PyResult<Self> {
         from_dict_pyo3(py, values)
-    }
-
-    #[staticmethod]
-    #[pyo3(name = "from_json")]
-    fn py_from_json(data: Vec<u8>) -> PyResult<Self> {
-        Self::from_json_bytes(&data).map_err(to_pyvalue_err)
-    }
-
-    #[staticmethod]
-    #[pyo3(name = "from_msgpack")]
-    fn py_from_msgpack(data: Vec<u8>) -> PyResult<Self> {
-        Self::from_msgpack_bytes(&data).map_err(to_pyvalue_err)
     }
 
     /// Creates a `PyCapsule` containing a raw pointer to a `Data::Trade` object.
@@ -332,25 +351,38 @@ impl TradeTick {
     /// Return JSON encoded bytes representation of the object.
     #[pyo3(name = "to_json_bytes")]
     fn py_to_json_bytes(&self, py: Python<'_>) -> Py<PyAny> {
-        // SAFETY: Unwrap safe when serializing a valid object
         self.to_json_bytes().unwrap().into_py_any_unwrap(py)
     }
 
-    /// Return MsgPack encoded bytes representation of the object.
+    /// Return `MsgPack` encoded bytes representation of the object.
     #[pyo3(name = "to_msgpack_bytes")]
     fn py_to_msgpack_bytes(&self, py: Python<'_>) -> Py<PyAny> {
-        // SAFETY: Unwrap safe when serializing a valid object
         self.to_msgpack_bytes().unwrap().into_py_any_unwrap(py)
     }
 }
 
-////////////////////////////////////////////////////////////////////////////////
-// Tests
-////////////////////////////////////////////////////////////////////////////////
+#[pymethods]
+impl TradeTick {
+    #[staticmethod]
+    #[pyo3(name = "from_json")]
+    fn py_from_json(data: &[u8]) -> PyResult<Self> {
+        Self::from_json_bytes(data).map_err(to_pyvalue_err)
+    }
+
+    #[staticmethod]
+    #[pyo3(name = "from_msgpack")]
+    fn py_from_msgpack(data: &[u8]) -> PyResult<Self> {
+        Self::from_msgpack_bytes(data).map_err(to_pyvalue_err)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use nautilus_core::python::IntoPyObjectNautilusExt;
-    use pyo3::Python;
+    use pyo3::{
+        Python,
+        types::{PyAnyMethods, PyDict, PyDictMethods},
+    };
     use rstest::rstest;
 
     use crate::{
@@ -390,7 +422,7 @@ mod tests {
         Python::initialize();
         Python::attach(|py| {
             let dict_string = trade.py_to_dict(py).unwrap().to_string();
-            let expected_string = r"{'type': 'TradeTick', 'instrument_id': 'ETHUSDT-PERP.BINANCE', 'price': '10000.0000', 'size': '1.00000000', 'aggressor_side': 'BUYER', 'trade_id': '123456789', 'ts_event': 0, 'ts_init': 1}";
+            let expected_string = "{'type': 'TradeTick', 'instrument_id': 'ETHUSDT-PERP.BINANCE', 'price': '10000.0000', 'size': '1.00000000', 'aggressor_side': 'BUYER', 'trade_id': '123456789', 'ts_event': 0, 'ts_init': 1}";
             assert_eq!(dict_string, expected_string);
         });
     }
@@ -416,6 +448,59 @@ mod tests {
             let tick_pyobject = trade.into_py_any_unwrap(py);
             let parsed_tick = TradeTick::from_pyobject(tick_pyobject.bind(py)).unwrap();
             assert_eq!(parsed_tick, trade);
+        });
+    }
+
+    #[rstest]
+    fn test_from_pyobject_rejects_invalid_aggressor_side() {
+        Python::initialize();
+        Python::attach(|py| {
+            let namespace = py
+                .import("types")
+                .unwrap()
+                .getattr("SimpleNamespace")
+                .unwrap();
+
+            let instrument_id_kwargs = PyDict::new(py);
+            instrument_id_kwargs
+                .set_item("value", "ETHUSDT-PERP.BINANCE")
+                .unwrap();
+            let instrument_id = namespace.call((), Some(&instrument_id_kwargs)).unwrap();
+
+            let price_kwargs = PyDict::new(py);
+            price_kwargs.set_item("raw", 100_000_000_i64).unwrap();
+            price_kwargs.set_item("precision", 4_u8).unwrap();
+            let price = namespace.call((), Some(&price_kwargs)).unwrap();
+
+            let size_kwargs = PyDict::new(py);
+            size_kwargs.set_item("raw", 100_000_000_i64).unwrap();
+            size_kwargs.set_item("precision", 8_u8).unwrap();
+            let size = namespace.call((), Some(&size_kwargs)).unwrap();
+
+            let aggressor_side_kwargs = PyDict::new(py);
+            aggressor_side_kwargs.set_item("value", 99_u8).unwrap();
+            let aggressor_side = namespace.call((), Some(&aggressor_side_kwargs)).unwrap();
+
+            let trade_id_kwargs = PyDict::new(py);
+            trade_id_kwargs.set_item("value", "123456789").unwrap();
+            let trade_id = namespace.call((), Some(&trade_id_kwargs)).unwrap();
+
+            let tick_kwargs = PyDict::new(py);
+            tick_kwargs
+                .set_item("instrument_id", instrument_id)
+                .unwrap();
+            tick_kwargs.set_item("price", price).unwrap();
+            tick_kwargs.set_item("size", size).unwrap();
+            tick_kwargs
+                .set_item("aggressor_side", aggressor_side)
+                .unwrap();
+            tick_kwargs.set_item("trade_id", trade_id).unwrap();
+            tick_kwargs.set_item("ts_event", 0_u64).unwrap();
+            tick_kwargs.set_item("ts_init", 1_u64).unwrap();
+            let tick = namespace.call((), Some(&tick_kwargs)).unwrap();
+
+            let err = TradeTick::from_pyobject(&tick).unwrap_err();
+            assert!(err.to_string().contains("Invalid aggressor_side value: 99"));
         });
     }
 }

@@ -1,5 +1,5 @@
 # -------------------------------------------------------------------------------------------------
-#  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+#  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 #  https://nautechsystems.io
 #
 #  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -18,13 +18,10 @@ from decimal import Decimal
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import Mock
-from unittest.mock import patch
 
 import pytest
-from ibapi import decoder
 
 from nautilus_trader.adapters.interactive_brokers.client.common import IBPosition
-from nautilus_trader.test_kit.functions import eventually
 from tests.integration_tests.adapters.interactive_brokers.test_kit import IBTestContractStubs
 
 
@@ -45,30 +42,14 @@ def test_accounts(ib_client):
 async def test_process_account_id(ib_client):
     # Arrange
     ib_client._account_ids = set()
-    ib_client._eclient.conn = MagicMock()
-    ib_client._eclient.conn.isConnected.return_value = True
-    ib_client._eclient.serverVersion = Mock(return_value=179)
-    ib_client._eclient.decoder = decoder.Decoder(
-        wrapper=ib_client._eclient.wrapper,
-        serverVersion=ib_client._eclient.serverVersion(),
-    )
 
-    test_messages = [
-        b"15\x001\x00DU1234567\x00",
-        b"9\x001\x00574\x00",
-        b"15\x001\x00DU1234567\x00",
-        b"9\x001\x001\x00",
-        b"4\x002\x00-1\x002104\x00Market data farm connection is OK:usfarm\x00\x00",
-        b"4\x002\x00-1\x002106\x00HMDS data farm connection is OK:ushmds\x00\x00",
-        b"4\x002\x00-1\x002104\x00Market data farm connection is OK:usfarm\x00\x00",
-    ]
-    with patch("ibapi.comm.read_msg", side_effect=[(None, msg, b"") for msg in test_messages]):
-        # Act
-        ib_client._start_tws_incoming_msg_reader()
-        ib_client._start_internal_msg_queue_processor()
+    # Act - Directly call the process_managed_accounts method
+    await ib_client.process_managed_accounts(accounts_list="DU1234567,DU7654321")
 
-        # Assert
-        await eventually(lambda: "DU1234567" in ib_client.accounts())
+    # Assert
+    assert "DU1234567" in ib_client.accounts()
+    assert "DU7654321" in ib_client.accounts()
+    assert len(ib_client.accounts()) == 2
 
 
 def test_subscribe_account_summary(ib_client):
@@ -165,3 +146,24 @@ async def test_get_positions_simulates_two_positions(ib_client):
     assert Counter(results_1) == Counter([position_1])
     assert Counter(results_2) == Counter([position_2, position_3])
     ib_client._eclient.reqPositions.assert_called()
+
+
+@pytest.mark.asyncio
+async def test_get_positions_returns_none_on_connection_error(ib_client):
+    """
+    Test that get_positions() returns None when the underlying request fails.
+
+    Verifies fix for issue #4228: a socket disconnect during reqPositions previously
+    returned [] via the request default, which callers treated as "IB confirmed flat".
+    None now propagates as "venue state unknown" so reconciliation is skipped.
+
+    """
+    # Arrange
+    ib_client._eclient.reqPositions = MagicMock()
+    ib_client._await_request = AsyncMock(return_value=None)
+
+    # Act
+    result = await ib_client.get_positions("DU1234567")
+
+    # Assert
+    assert result is None

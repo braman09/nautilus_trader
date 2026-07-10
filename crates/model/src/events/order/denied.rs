@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -15,7 +15,6 @@
 
 use std::fmt::{Debug, Display};
 
-use derive_builder::Builder;
 use nautilus_core::{UUID4, UnixNanos};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -39,12 +38,15 @@ use crate::{
 /// This could be due an unsupported feature, a risk limit exceedance, or for
 /// any other reason that an otherwise valid order is not able to be submitted.
 #[repr(C)]
-#[derive(Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, Builder)]
-#[builder(default)]
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 #[cfg_attr(
     feature = "python",
-    pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.model")
+    pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.model", from_py_object)
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.model")
 )]
 pub struct OrderDenied {
     /// The trader ID associated with the event.
@@ -63,11 +65,15 @@ pub struct OrderDenied {
     pub ts_event: UnixNanos,
     /// UNIX timestamp (nanoseconds) when the event was initialized.
     pub ts_init: UnixNanos,
+    /// The causation ID associated with the event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub causation_id: Option<UUID4>,
 }
 
 impl OrderDenied {
     /// Creates a new [`OrderDenied`] instance.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
+    #[must_use]
     pub fn new(
         trader_id: TraderId,
         strategy_id: StrategyId,
@@ -87,6 +93,7 @@ impl OrderDenied {
             event_id,
             ts_event,
             ts_init,
+            causation_id: None,
         }
     }
 }
@@ -126,7 +133,7 @@ impl OrderEvent for OrderDenied {
         self.event_id
     }
 
-    fn kind(&self) -> &str {
+    fn type_name(&self) -> &'static str {
         stringify!(OrderDenied)
     }
 
@@ -203,6 +210,10 @@ impl OrderEvent for OrderDenied {
     }
 
     fn last_qty(&self) -> Option<Quantity> {
+        None
+    }
+
+    fn activation_price(&self) -> Option<Price> {
         None
     }
 
@@ -291,9 +302,6 @@ impl OrderEvent for OrderDenied {
     }
 }
 
-////////////////////////////////////////////////////////////////////////////////
-// Tests
-////////////////////////////////////////////////////////////////////////////////
 #[cfg(test)]
 mod tests {
     use rstest::rstest;
@@ -306,7 +314,31 @@ mod tests {
         let display = format!("{order_denied_max_submitted_rate}");
         assert_eq!(
             display,
-            "OrderDenied(instrument_id=BTCUSDT.COINBASE, client_order_id=O-19700101-000000-001-001-1, reason='Exceeded MAX_ORDER_SUBMIT_RATE')"
+            "OrderDenied(instrument_id=BTCUSDT.COINBASE, client_order_id=O-19700101-000000-001-001-1, reason='RATE_LIMIT_EXCEEDED')"
         );
+    }
+
+    #[rstest]
+    fn test_order_denied_serialization() {
+        let original = OrderDenied::default();
+        let json = serde_json::to_string(&original).unwrap();
+        let deserialized: OrderDenied = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, deserialized);
+    }
+
+    #[rstest]
+    fn test_order_denied_serialization_with_causation_id() {
+        let causation_id = UUID4::new();
+        let original = OrderDenied {
+            causation_id: Some(causation_id),
+            ..OrderDenied::default()
+        };
+
+        let json = serde_json::to_string(&original).unwrap();
+        let deserialized: OrderDenied = serde_json::from_str(&json).unwrap();
+
+        assert!(json.contains("\"causation_id\""));
+        assert_eq!(deserialized.causation_id, Some(causation_id));
+        assert_eq!(original, deserialized);
     }
 }

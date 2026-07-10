@@ -1,4 +1,5 @@
 [build]
+warnings = "deny"
 rustdocflags = ["--cfg", "docsrs", "-D", "warnings"]
 
 [target.'cfg(all())']
@@ -10,6 +11,8 @@ rustflags = [
 
 [target.'cfg(target_os = "linux")']
 rustflags = [
+  "-C",
+  "link-arg=-fuse-ld=lld",
   "-C",
   "link-arg=-Wl,--gc-sections",
   "-C",

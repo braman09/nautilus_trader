@@ -1,5 +1,5 @@
 # -------------------------------------------------------------------------------------------------
-#  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+#  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 #  https://nautechsystems.io
 #
 #  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -17,18 +17,25 @@ from decimal import Decimal
 
 import pytest
 
+from nautilus_trader.cache.cache import Cache
+from nautilus_trader.cache.config import CacheConfig
 from nautilus_trader.core import nautilus_pyo3
 from nautilus_trader.core.rust.model import AggregationSource
 from nautilus_trader.model.currencies import AUD
+from nautilus_trader.model.currencies import BTC
+from nautilus_trader.model.currencies import ETH
 from nautilus_trader.model.currencies import EUR
 from nautilus_trader.model.currencies import GBP
 from nautilus_trader.model.currencies import JPY
 from nautilus_trader.model.currencies import USD
+from nautilus_trader.model.currencies import USDT
 from nautilus_trader.model.data import Bar
 from nautilus_trader.model.data import BarType
 from nautilus_trader.model.data import FundingRateUpdate
+from nautilus_trader.model.data import InstrumentStatus
 from nautilus_trader.model.data import MarkPriceUpdate
 from nautilus_trader.model.data import QuoteTick
+from nautilus_trader.model.enums import MarketStatusAction
 from nautilus_trader.model.enums import PriceType
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.model.identifiers import Venue
@@ -412,6 +419,55 @@ class TestCache:
         # Assert
         assert result == [instrument1]
 
+    def test_add_instrument_registers_currencies_for_currency_pair(self):
+        # Arrange
+        instrument = TestInstrumentProvider.ethusdt_binance()
+
+        # Act
+        self.cache.add_instrument(instrument)
+
+        # Assert (instrument has expected currencies)
+        assert instrument.get_base_currency() == ETH
+        assert instrument.quote_currency == USDT
+        assert instrument.get_settlement_currency() == USDT
+
+    def test_add_instrument_registers_currencies_for_linear_perpetual(self):
+        # Arrange
+        instrument = TestInstrumentProvider.btcusdt_perp_binance()
+
+        # Act
+        self.cache.add_instrument(instrument)
+
+        # Assert (instrument has expected currencies)
+        assert instrument.get_base_currency() == BTC
+        assert instrument.quote_currency == USDT
+        assert instrument.get_settlement_currency() == USDT
+
+    def test_add_instrument_registers_currencies_for_inverse_perpetual(self):
+        # Arrange (inverse perpetual: base=BTC, quote=USD, settlement=BTC)
+        instrument = TestInstrumentProvider.xbtusd_bitmex()
+
+        # Act
+        self.cache.add_instrument(instrument)
+
+        # Assert (instrument has expected currencies)
+        assert instrument.get_base_currency() == BTC
+        assert instrument.quote_currency == USD
+        assert instrument.get_settlement_currency() == BTC
+
+    def test_add_instrument_registers_non_standard_currency(self):
+        # Arrange (uses 1000RATS which is a non-standard currency)
+        from nautilus_trader.model.objects import Currency
+
+        instrument = TestInstrumentProvider.onethousandrats_perp_binance()
+
+        # Act
+        self.cache.add_instrument(instrument)
+
+        # Assert (non-standard currency is registered and accessible)
+        assert instrument.get_base_currency().code == "1000RATS"
+        assert Currency.from_str("1000RATS") is not None
+
     def test_synthetic_ids_when_one_synthetic_instrument_returns_expected_list(self):
         # Arrange
         synthetic = TestInstrumentProvider.synthetic_instrument()
@@ -546,6 +602,79 @@ class TestCache:
 
         # Assert
         assert self.cache.funding_rate(instrument_id) is None
+
+    def test_instrument_status_when_empty(self):
+        # Arrange
+        instrument_id = InstrumentId.from_str("ETH-USD-SWAP.OKX")
+
+        # Act, Assert
+        assert self.cache.instrument_status(instrument_id) is None
+        assert self.cache.instrument_statuses(instrument_id) == []
+        assert self.cache.instrument_status_count(instrument_id) == 0
+        assert self.cache.has_instrument_statuses(instrument_id) is False
+
+    def test_add_instrument_status(self):
+        # Arrange
+        instrument_id = InstrumentId.from_str("ETH-USD-SWAP.OKX")
+        status = InstrumentStatus(
+            instrument_id=instrument_id,
+            action=MarketStatusAction.TRADING,
+            ts_event=5,
+            ts_init=10,
+        )
+
+        # Act
+        self.cache.add_instrument_status(status)
+
+        # Assert
+        assert self.cache.instrument_status(instrument_id) == status
+        assert self.cache.instrument_statuses(instrument_id) == [status]
+        assert self.cache.instrument_status_count(instrument_id) == 1
+        assert self.cache.has_instrument_statuses(instrument_id) is True
+
+    def test_add_instrument_status_keeps_time_series(self):
+        # Arrange
+        instrument_id = InstrumentId.from_str("ETH-USD-SWAP.OKX")
+        status1 = InstrumentStatus(
+            instrument_id=instrument_id,
+            action=MarketStatusAction.PRE_OPEN,
+            ts_event=5,
+            ts_init=10,
+        )
+        status2 = InstrumentStatus(
+            instrument_id=instrument_id,
+            action=MarketStatusAction.TRADING,
+            ts_event=15,
+            ts_init=20,
+        )
+
+        # Act
+        self.cache.add_instrument_status(status1)
+        self.cache.add_instrument_status(status2)
+
+        # Assert: latest first (appendleft semantics)
+        assert self.cache.instrument_status(instrument_id) == status2
+        assert self.cache.instrument_status(instrument_id, index=1) == status1
+        assert self.cache.instrument_statuses(instrument_id) == [status2, status1]
+        assert self.cache.instrument_status_count(instrument_id) == 2
+
+    def test_reset_clears_instrument_statuses(self):
+        # Arrange
+        instrument_id = InstrumentId.from_str("ETH-USD-SWAP.OKX")
+        status = InstrumentStatus(
+            instrument_id=instrument_id,
+            action=MarketStatusAction.TRADING,
+            ts_event=0,
+            ts_init=0,
+        )
+        self.cache.add_instrument_status(status)
+
+        # Act
+        self.cache.reset()
+
+        # Assert
+        assert self.cache.instrument_status(instrument_id) is None
+        assert self.cache.has_instrument_statuses(instrument_id) is False
 
     def test_quote_ticks_when_one_tick_returns_expected_list(self):
         # Arrange
@@ -1204,6 +1333,65 @@ class TestCache:
 
         # Assert
         assert result == 0.80005
+
+    @pytest.mark.parametrize(
+        ("drop_instruments_on_reset", "expected"),
+        [
+            [False, 0.80005],
+            [True, None],
+        ],
+    )
+    def test_get_xrate_after_reset_follows_instrument_lifecycle(
+        self,
+        drop_instruments_on_reset,
+        expected,
+    ):
+        # Arrange
+        cache = Cache(config=CacheConfig(drop_instruments_on_reset=drop_instruments_on_reset))
+        cache.add_instrument(AUDUSD_SIM)
+        cache.reset()
+
+        tick = QuoteTick(
+            instrument_id=AUDUSD_SIM.id,
+            bid_price=Price.from_str("0.80000"),
+            ask_price=Price.from_str("0.80010"),
+            bid_size=Quantity.from_int(1),
+            ask_size=Quantity.from_int(1),
+            ts_event=0,
+            ts_init=0,
+        )
+        cache.add_quote_tick(tick)
+
+        # Act
+        result = cache.get_xrate(SIM, AUD, USD)
+
+        # Assert
+        assert result == expected
+
+    @pytest.mark.parametrize(
+        ("drop_instruments_on_reset", "retained"),
+        [
+            [False, True],
+            [True, False],
+        ],
+    )
+    def test_reset_retains_instruments_and_synthetics_per_config(
+        self,
+        drop_instruments_on_reset,
+        retained,
+    ):
+        # Arrange
+        cache = Cache(config=CacheConfig(drop_instruments_on_reset=drop_instruments_on_reset))
+        synthetic = TestInstrumentProvider.synthetic_instrument()
+        cache.add_instrument(AUDUSD_SIM)
+        cache.add_synthetic(synthetic)
+
+        # Act
+        cache.reset()
+
+        # Assert
+        assert (cache.instrument(AUDUSD_SIM.id) is not None) == retained
+        assert (cache.synthetic(synthetic.id) is not None) == retained
 
     def test_get_mark_xrate_returns_none_when_not_set(self):
         """

@@ -1,5 +1,5 @@
 # -------------------------------------------------------------------------------------------------
-#  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+#  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 #  https://nautechsystems.io
 #
 #  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -18,10 +18,13 @@ import sys
 import tempfile
 import time
 from decimal import Decimal
+from pathlib import Path
+from types import SimpleNamespace
 
 import psutil
 import pytest
 
+import nautilus_trader.adapters.tardis.loaders as tardis_loaders
 from nautilus_trader.adapters.tardis.loaders import TardisCSVDataLoader
 from nautilus_trader.model.data import FundingRateUpdate
 from nautilus_trader.model.enums import AggressorSide
@@ -40,6 +43,108 @@ from tests.integration_tests.adapters.tardis.conftest import get_test_data_path
 
 
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="Failing on windows")
+
+
+def test_load_options_chain_threads_arguments(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_load_tardis_options_chain(**kwargs: object) -> list[object]:
+        captured.update(kwargs)
+        return ["quote", "greeks"]
+
+    monkeypatch.setattr(
+        tardis_loaders,
+        "nautilus_pyo3",
+        SimpleNamespace(
+            tardis=SimpleNamespace(load_tardis_options_chain=fake_load_tardis_options_chain),
+        ),
+    )
+
+    loader = TardisCSVDataLoader(price_precision=4, size_precision=1)
+    result = loader.load_options_chain(Path("chain.csv"), underlyings=["BTC-"], limit=5)
+
+    assert result == ["quote", "greeks"]
+    assert captured == {
+        "filepath": str(Path("chain.csv").resolve()),
+        "underlyings": ["BTC-"],
+        "price_precision": 4,
+        "size_precision": 1,
+        "limit": 5,
+    }
+
+
+def test_convert_options_chain_csv_threads_arguments(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_convert_tardis_options_chain_csv(**kwargs: object) -> None:
+        captured.update(kwargs)
+
+    monkeypatch.setattr(
+        tardis_loaders,
+        "nautilus_pyo3",
+        SimpleNamespace(
+            tardis=SimpleNamespace(
+                convert_tardis_options_chain_csv=fake_convert_tardis_options_chain_csv,
+            ),
+        ),
+    )
+
+    loader = TardisCSVDataLoader(price_precision=4, size_precision=1)
+    loader.convert_options_chain_csv(
+        filepaths=[Path("chain.csv")],
+        catalog_path=Path("catalog"),
+        underlyings=["BTC-"],
+        snapshot_interval_ms=60_000,
+        extract_bbo_as_quotes=False,
+        write_instruments=False,
+    )
+
+    assert captured == {
+        "filepaths": [str(Path("chain.csv").resolve())],
+        "catalog_path": str(Path("catalog").resolve()),
+        "underlyings": ["BTC-"],
+        "snapshot_interval_ms": 60_000,
+        "extract_bbo_as_quotes": False,
+        "write_instruments": False,
+        "price_precision": 4,
+        "size_precision": 1,
+    }
+
+
+def test_stream_options_chain_threads_arguments(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_stream_tardis_options_chain(**kwargs: object) -> list[list[object]]:
+        captured.update(kwargs)
+        return [["quote"], ["greeks"]]
+
+    monkeypatch.setattr(
+        tardis_loaders,
+        "nautilus_pyo3",
+        SimpleNamespace(
+            tardis=SimpleNamespace(stream_tardis_options_chain=fake_stream_tardis_options_chain),
+        ),
+    )
+
+    loader = TardisCSVDataLoader(price_precision=4, size_precision=1)
+    result = list(
+        loader.stream_options_chain(
+            Path("chain.csv"),
+            chunk_size=2,
+            underlyings=["ETH-"],
+            limit=3,
+        ),
+    )
+
+    assert result == [["quote"], ["greeks"]]
+    assert captured == {
+        "filepath": str(Path("chain.csv").resolve()),
+        "chunk_size": 2,
+        "underlyings": ["ETH-"],
+        "price_precision": 4,
+        "size_precision": 1,
+        "limit": 3,
+    }
 
 
 def test_csv_loader_with_malformed_data():
@@ -169,7 +274,9 @@ def test_tardis_load_depth10_from_snapshot5(
     for i in range(1, 5):
         assert (
             deltas[0].bids[i].price < deltas[0].bids[i - 1].price  # type: ignore
-        ), f"Bid price at level {i} ({deltas[0].bids[i].price}) should be less than level {i-1} ({deltas[0].bids[i-1].price})"
+        ), (
+            f"Bid price at level {i} ({deltas[0].bids[i].price}) should be less than level {i - 1} ({deltas[0].bids[i - 1].price})"
+        )
 
     # Verify all 10 ask levels (first 5 from data, rest are null/empty)
     assert len(deltas[0].asks) == 10
@@ -197,12 +304,16 @@ def test_tardis_load_depth10_from_snapshot5(
     for i in range(1, 5):
         assert (
             deltas[0].asks[i].price > deltas[0].asks[i - 1].price  # type: ignore
-        ), f"Ask price at level {i} ({deltas[0].asks[i].price}) should be greater than level {i-1} ({deltas[0].asks[i-1].price})"
+        ), (
+            f"Ask price at level {i} ({deltas[0].asks[i].price}) should be greater than level {i - 1} ({deltas[0].asks[i - 1].price})"
+        )
 
     # Verify bid/ask spread is positive (best ask > best bid)
     assert (
         deltas[0].asks[0].price > deltas[0].bids[0].price  # type: ignore
-    ), f"Best ask ({deltas[0].asks[0].price}) should be greater than best bid ({deltas[0].bids[0].price})"
+    ), (
+        f"Best ask ({deltas[0].asks[0].price}) should be greater than best bid ({deltas[0].bids[0].price})"
+    )
 
     # Verify bid and ask counts
     assert deltas[0].bid_counts[0] == 1
@@ -282,7 +393,9 @@ def test_tardis_load_depth10_from_snapshot25(
     for i in range(1, 10):
         assert (
             deltas[0].bids[i].price < deltas[0].bids[i - 1].price  # type: ignore
-        ), f"Bid price at level {i} ({deltas[0].bids[i].price}) should be less than level {i-1} ({deltas[0].bids[i-1].price})"
+        ), (
+            f"Bid price at level {i} ({deltas[0].bids[i].price}) should be less than level {i - 1} ({deltas[0].bids[i - 1].price})"
+        )
 
     # Verify all 10 ask levels from snapshot25 (only first 10 of 25 are used)
     assert len(deltas[0].asks) == 10
@@ -309,12 +422,16 @@ def test_tardis_load_depth10_from_snapshot25(
     for i in range(1, 10):
         assert (
             deltas[0].asks[i].price > deltas[0].asks[i - 1].price  # type: ignore
-        ), f"Ask price at level {i} ({deltas[0].asks[i].price}) should be greater than level {i-1} ({deltas[0].asks[i-1].price})"
+        ), (
+            f"Ask price at level {i} ({deltas[0].asks[i].price}) should be greater than level {i - 1} ({deltas[0].asks[i - 1].price})"
+        )
 
     # Verify bid/ask spread is positive (best ask > best bid)
     assert (
         deltas[0].asks[0].price > deltas[0].bids[0].price  # type: ignore
-    ), f"Best ask ({deltas[0].asks[0].price}) should be greater than best bid ({deltas[0].bids[0].price})"
+    ), (
+        f"Best ask ({deltas[0].asks[0].price}) should be greater than best bid ({deltas[0].bids[0].price})"
+    )
 
     # Verify bid and ask counts (all should be 1 for snapshot data)
     for i in range(10):
@@ -442,12 +559,12 @@ binance-futures,BTCUSDT,1640995204000000,1640995204100000,false,ask,50000.1234,0
 
         # Skip CLEAR delta (index 0) when checking precision
         for i, delta in enumerate(deltas[1:], start=1):
-            assert (
-                delta.order.price.precision == expected_price_precision
-            ), f"Delta {i} price precision should be {expected_price_precision}"
-            assert (
-                delta.order.size.precision == expected_size_precision
-            ), f"Delta {i} size precision should be {expected_size_precision}"
+            assert delta.order.price.precision == expected_price_precision, (
+                f"Delta {i} price precision should be {expected_price_precision}"
+            )
+            assert delta.order.size.precision == expected_size_precision, (
+                f"Delta {i} size precision should be {expected_size_precision}"
+            )
 
         # Performance check - should be very fast for small dataset
         assert elapsed_time < 1.0, f"Loading took too long: {elapsed_time:.3f}s"
@@ -988,9 +1105,9 @@ def _test_memory_efficiency_for_type(data_type, csv_generator):
             memory_increase = current_memory - initial_memory
 
             # Should not use excessive memory even with 500 records
-            assert (
-                memory_increase < 150
-            ), f"Memory usage too high for {data_type}: {memory_increase:.2f} MB"
+            assert memory_increase < 150, (
+                f"Memory usage too high for {data_type}: {memory_increase:.2f} MB"
+            )
 
         # For deltas, first record has is_snapshot=true so a CLEAR delta is prepended (501 total)
         expected_count = 501 if data_type == "deltas" else 500

@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -13,13 +13,17 @@
 //  limitations under the License.
 // -------------------------------------------------------------------------------------------------
 
-#![allow(clippy::doc_markdown, reason = "Python docstrings")]
+#![expect(clippy::doc_markdown, reason = "Python docstrings")]
 
 //! Python bindings and interoperability built using [`PyO3`](https://pyo3.rs).
 
 #![allow(
     deprecated,
     reason = "pyo3-stub-gen currently relies on PyO3 initialization helpers marked as deprecated"
+)]
+#![expect(
+    clippy::missing_errors_doc,
+    reason = "errors documented on underlying Rust methods"
 )]
 //!
 //! This sub-module groups together the Rust code that is *only* required when compiling the
@@ -30,6 +34,7 @@
 pub mod casing;
 pub mod datetime;
 pub mod enums;
+pub mod params;
 pub mod parsing;
 pub mod serialization;
 /// String manipulation utilities for Python.
@@ -42,7 +47,9 @@ use std::fmt::Display;
 use pyo3::{
     Py,
     conversion::IntoPyObjectExt,
-    exceptions::{PyRuntimeError, PyTypeError, PyValueError},
+    exceptions::{
+        PyException, PyKeyError, PyNotImplementedError, PyRuntimeError, PyTypeError, PyValueError,
+    },
     prelude::*,
     types::PyString,
     wrap_pyfunction,
@@ -52,6 +59,7 @@ use pyo3_stub_gen::derive::gen_stub_pyfunction;
 use crate::{
     UUID4,
     consts::{NAUTILUS_USER_AGENT, NAUTILUS_VERSION},
+    correctness::CorrectnessError,
     datetime::{
         MILLISECONDS_IN_SECOND, NANOSECONDS_IN_MICROSECOND, NANOSECONDS_IN_MILLISECOND,
         NANOSECONDS_IN_SECOND,
@@ -72,14 +80,32 @@ use crate::{
 /// - Avoid circular references between Rust and Python memory management.
 /// - Ensure proper Python reference counting under the GIL.
 /// - Allow both Rust and Python garbage collectors to work correctly.
-///
-/// # Safety
-///
-/// This function properly acquires the Python GIL before performing the clone operation,
-/// ensuring thread-safe access to the Python object and correct reference counting.
 #[must_use]
 pub fn clone_py_object(obj: &Py<PyAny>) -> Py<PyAny> {
     Python::attach(|py| obj.clone_ref(py))
+}
+
+/// Calls a Python callback with a single argument, logging any errors.
+pub fn call_python(py: Python, callback: &Py<PyAny>, py_obj: Py<PyAny>) {
+    if let Err(e) = callback.call1(py, (py_obj,)) {
+        log::error!("Error calling Python: {e}");
+    }
+}
+
+/// Schedules a Python callback on the event loop thread via `call_soon_threadsafe`.
+///
+/// This must be used instead of [`call_python`] when invoking Python callbacks
+/// from Tokio worker threads, since Python callbacks that enter the kernel
+/// (e.g. via `MessageBus.send`) must run on the asyncio event loop thread.
+pub fn call_python_threadsafe(
+    py: Python,
+    call_soon: &Py<PyAny>,
+    callback: &Py<PyAny>,
+    py_obj: Py<PyAny>,
+) {
+    if let Err(e) = call_soon.call1(py, (callback, py_obj)) {
+        log::error!("Error scheduling Python callback on event loop: {e}");
+    }
 }
 
 /// Extend `IntoPyObjectExt` helper trait to unwrap `Py<PyAny>` after conversion.
@@ -109,30 +135,43 @@ pub fn get_pytype_name<'py>(obj: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PySt
 }
 
 /// Converts any type that implements `Display` to a Python `ValueError`.
-///
-/// # Errors
-///
-/// Returns a Python error with the error string.
 pub fn to_pyvalue_err(e: impl Display) -> PyErr {
     PyValueError::new_err(e.to_string())
 }
 
+/// Converts a correctness check failure to a Python `ValueError`.
+#[must_use]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "Result::map_err passes owned errors to conversion functions"
+)]
+pub fn correctness_error_to_pyvalue_err(e: CorrectnessError) -> PyErr {
+    PyValueError::new_err(e.to_string())
+}
+
 /// Converts any type that implements `Display` to a Python `TypeError`.
-///
-/// # Errors
-///
-/// Returns a Python error with the error string.
 pub fn to_pytype_err(e: impl Display) -> PyErr {
     PyTypeError::new_err(e.to_string())
 }
 
 /// Converts any type that implements `Display` to a Python `RuntimeError`.
-///
-/// # Errors
-///
-/// Returns a Python error with the error string.
 pub fn to_pyruntime_err(e: impl Display) -> PyErr {
     PyRuntimeError::new_err(e.to_string())
+}
+
+/// Converts any type that implements `Display` to a Python `KeyError`.
+pub fn to_pykey_err(e: impl Display) -> PyErr {
+    PyKeyError::new_err(e.to_string())
+}
+
+/// Converts any type that implements `Display` to a Python `Exception`.
+pub fn to_pyexception(e: impl Display) -> PyErr {
+    PyException::new_err(e.to_string())
+}
+
+/// Converts any type that implements `Display` to a Python `NotImplementedError`.
+pub fn to_pynotimplemented_err(e: impl Display) -> PyErr {
+    PyNotImplementedError::new_err(e.to_string())
 }
 
 /// Return a value indicating whether the `obj` is a `PyCapsule`.
@@ -142,12 +181,12 @@ pub fn to_pyruntime_err(e: impl Display) -> PyErr {
 /// obj : Any
 ///     The object to check.
 ///
-/// Returns
-/// -------
+/// # Returns
+///
 /// bool
-#[gen_stub_pyfunction(module = "nautilus_trader.core")]
 #[pyfunction(name = "is_pycapsule")]
-#[allow(
+#[gen_stub_pyfunction(module = "nautilus_trader.core")]
+#[expect(
     clippy::needless_pass_by_value,
     reason = "Python FFI requires owned types"
 )]
@@ -189,4 +228,40 @@ pub fn core(_: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(datetime::py_last_weekday_nanos, m)?)?;
     m.add_function(wrap_pyfunction!(datetime::py_is_within_last_24_hours, m)?)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Once;
+
+    use pyo3::{Python, exceptions::PyValueError};
+    use rstest::rstest;
+
+    use super::*;
+
+    fn ensure_python_initialized() {
+        static INIT: Once = Once::new();
+        INIT.call_once(|| {
+            Python::initialize();
+        });
+    }
+
+    #[rstest]
+    fn test_correctness_error_to_pyvalue_err_preserves_display_text() {
+        ensure_python_initialized();
+
+        let error = CorrectnessError::EmptyString {
+            param: "value".to_string(),
+        };
+
+        Python::attach(|py| {
+            let py_err = correctness_error_to_pyvalue_err(error);
+
+            assert!(py_err.is_instance_of::<PyValueError>(py));
+            assert_eq!(
+                py_err.value(py).to_string(),
+                "invalid string for 'value', was empty"
+            );
+        });
+    }
 }

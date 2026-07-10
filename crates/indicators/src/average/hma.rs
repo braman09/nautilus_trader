@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -13,7 +13,7 @@
 //  limitations under the License.
 // -------------------------------------------------------------------------------------------------
 
-use std::fmt::{Display, Formatter};
+use std::fmt::Display;
 
 use nautilus_model::{
     data::{Bar, QuoteTick, TradeTick},
@@ -34,6 +34,10 @@ use crate::{
     feature = "python",
     pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.indicators")
 )]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.indicators")
+)]
 pub struct HullMovingAverage {
     pub period: usize,
     pub price_type: PriceType,
@@ -47,7 +51,7 @@ pub struct HullMovingAverage {
 }
 
 impl Display for HullMovingAverage {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}({})", self.name(), self.period)
     }
 }
@@ -65,8 +69,9 @@ impl Indicator for HullMovingAverage {
         self.initialized
     }
 
-    fn handle_quote(&mut self, quote: &QuoteTick) {
-        self.update_raw(quote.extract_price(self.price_type).into());
+    fn handle_quote(&mut self, quote: &QuoteTick) -> anyhow::Result<()> {
+        self.update_raw(quote.extract_price(self.price_type)?.into());
+        Ok(())
     }
 
     fn handle_trade(&mut self, trade: &TradeTick) {
@@ -162,9 +167,6 @@ impl MovingAverage for HullMovingAverage {
     }
 }
 
-////////////////////////////////////////////////////////////////////////////////
-// Tests
-////////////////////////////////////////////////////////////////////////////////
 #[cfg(test)]
 mod tests {
     use nautilus_model::{
@@ -230,7 +232,7 @@ mod tests {
 
     #[rstest]
     fn test_handle_quote_tick(mut indicator_hma_10: HullMovingAverage, stub_quote: QuoteTick) {
-        indicator_hma_10.handle_quote(&stub_quote);
+        indicator_hma_10.handle_quote(&stub_quote).unwrap();
         assert_eq!(indicator_hma_10.value, 1501.0);
     }
 

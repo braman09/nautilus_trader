@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -21,10 +21,9 @@ use nautilus_core::{UnixNanos, datetime::NANOSECONDS_IN_SECOND};
 use nautilus_model::{
     enums::{OrderSide, TimeInForce},
     identifiers::{InstrumentId, Symbol},
-    types::{Currency, Price, Quantity},
+    types::{Price, Quantity, fixed::FIXED_PRECISION},
 };
 use rust_decimal::Decimal;
-use ustr::Ustr;
 
 use super::consts::DYDX_VENUE;
 use crate::proto::dydxprotocol::clob::order::{
@@ -90,31 +89,6 @@ pub fn time_in_force_to_proto_with_post_only(
     }
 }
 
-/// Returns a currency from the internal map or creates a new crypto currency.
-///
-/// If the code is empty, logs a warning with context and returns USDC as fallback.
-/// Uses [`Currency::get_or_create_crypto`] to handle unknown currency codes,
-/// which automatically registers newly listed dYdX assets.
-fn get_currency_with_context(code: &str, context: Option<&str>) -> Currency {
-    let trimmed = code.trim();
-    let ctx = context.unwrap_or("unknown");
-
-    if trimmed.is_empty() {
-        tracing::warn!("Empty currency code for context {ctx}, defaulting to USDC as fallback");
-        return Currency::USDC();
-    }
-
-    Currency::get_or_create_crypto(trimmed)
-}
-
-/// Returns a currency from the given code.
-///
-/// Uses [`Currency::get_or_create_crypto`] to handle unknown currency codes.
-#[must_use]
-pub fn get_currency(code: &str) -> Currency {
-    get_currency_with_context(code, None)
-}
-
 /// Parses a dYdX instrument ID from a ticker string.
 ///
 /// dYdX v4 only lists perpetual markets, with tickers in the format
@@ -131,28 +105,45 @@ pub fn parse_instrument_id<S: AsRef<str>>(ticker: S) -> InstrumentId {
     if !base.ends_with("-PERP") {
         base.push_str("-PERP");
     }
-    let symbol = Ustr::from(base.as_str());
-    InstrumentId::new(Symbol::from_ustr_unchecked(symbol), *DYDX_VENUE)
+    InstrumentId::new(Symbol::from_str_unchecked(&base), *DYDX_VENUE)
 }
 
 /// Parses a decimal string into a [`Price`].
+///
+/// Normalizes the decimal to strip trailing zeros and clamps precision to
+/// [`FIXED_PRECISION`] to prevent panics from venue values with excessive
+/// decimal places.
 ///
 /// # Errors
 ///
 /// Returns an error if the string cannot be parsed into a valid price.
 pub fn parse_price(value: &str, field_name: &str) -> anyhow::Result<Price> {
-    Price::from_str(value).map_err(|e| {
+    let decimal = Decimal::from_str(value).map_err(|e| {
+        anyhow::anyhow!("Failed to parse '{field_name}' value '{value}' into Decimal: {e}")
+    })?;
+    let normalized = decimal.normalize();
+    let precision = (normalized.scale() as u8).min(FIXED_PRECISION);
+    Price::from_decimal_dp(normalized, precision).map_err(|e| {
         anyhow::anyhow!("Failed to parse '{field_name}' value '{value}' into Price: {e}")
     })
 }
 
 /// Parses a decimal string into a [`Quantity`].
 ///
+/// Normalizes the decimal to strip trailing zeros and clamps precision to
+/// [`FIXED_PRECISION`] to prevent panics from venue values with excessive
+/// decimal places.
+///
 /// # Errors
 ///
 /// Returns an error if the string cannot be parsed into a valid quantity.
 pub fn parse_quantity(value: &str, field_name: &str) -> anyhow::Result<Quantity> {
-    Quantity::from_str(value).map_err(|e| {
+    let decimal = Decimal::from_str(value).map_err(|e| {
+        anyhow::anyhow!("Failed to parse '{field_name}' value '{value}' into Decimal: {e}")
+    })?;
+    let normalized = decimal.normalize();
+    let precision = (normalized.scale() as u8).min(FIXED_PRECISION);
+    Quantity::from_decimal_dp(normalized, precision).map_err(|e| {
         anyhow::anyhow!("Failed to parse '{field_name}' value '{value}' into Quantity: {e}")
     })
 }
@@ -177,12 +168,9 @@ pub fn nanos_to_secs_i64(nanos: UnixNanos) -> i64 {
     (nanos.as_u64() / NANOSECONDS_IN_SECOND) as i64
 }
 
-////////////////////////////////////////////////////////////////////////////////
-// Tests
-////////////////////////////////////////////////////////////////////////////////
-
 #[cfg(test)]
 mod tests {
+    use nautilus_model::types::Currency;
     use rstest::rstest;
 
     use super::*;
@@ -235,10 +223,10 @@ mod tests {
 
     #[rstest]
     fn test_get_currency() {
-        let btc = get_currency("BTC");
+        let btc = Currency::get_or_create_crypto("BTC");
         assert_eq!(btc.code.as_str(), "BTC");
 
-        let usdc = get_currency("USDC");
+        let usdc = Currency::get_or_create_crypto("USDC");
         assert_eq!(usdc.code.as_str(), "USDC");
     }
 
@@ -259,9 +247,37 @@ mod tests {
     }
 
     #[rstest]
+    fn test_parse_price_normalizes_trailing_zeros() {
+        let price = parse_price("0.0100", "test_price").unwrap();
+        assert_eq!(price.precision, 2);
+        assert_eq!(price.to_string(), "0.01");
+    }
+
+    #[rstest]
+    fn test_parse_price_clamps_precision_to_fixed_max() {
+        // 18 decimal places exceeds FIXED_PRECISION (16 with high-precision)
+        let price = parse_price("0.000000000000000001", "test_price").unwrap();
+        assert!(price.precision <= FIXED_PRECISION);
+    }
+
+    #[rstest]
+    fn test_parse_price_high_precision_no_panic() {
+        // 20 decimal places should not panic, just clamp
+        let result = parse_price("0.00000000000000000001", "test_price");
+        assert!(result.is_ok());
+        assert!(result.unwrap().precision <= FIXED_PRECISION);
+    }
+
+    #[rstest]
     fn test_parse_quantity() {
         let qty = parse_quantity("1.5", "test_qty").unwrap();
         assert_eq!(qty.to_string(), "1.5");
+    }
+
+    #[rstest]
+    fn test_parse_quantity_clamps_precision_to_fixed_max() {
+        let qty = parse_quantity("0.000000000000000001", "test_qty").unwrap();
+        assert!(qty.precision <= FIXED_PRECISION);
     }
 
     #[rstest]

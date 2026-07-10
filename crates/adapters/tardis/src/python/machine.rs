@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -13,11 +13,13 @@
 //  limitations under the License.
 // -------------------------------------------------------------------------------------------------
 
-use std::{collections::HashMap, path::Path, sync::Arc};
+use std::{path::Path, sync::Arc};
 
 use ahash::AHashMap;
 use futures_util::{Stream, StreamExt, pin_mut};
-use nautilus_core::python::{IntoPyObjectNautilusExt, to_pyruntime_err};
+use nautilus_core::python::{
+    IntoPyObjectNautilusExt, call_python, to_pyruntime_err, to_pyvalue_err,
+};
 use nautilus_model::{
     data::{Bar, Data, funding::FundingRateUpdate},
     identifiers::InstrumentId,
@@ -31,7 +33,10 @@ use crate::{
         Error,
         client::{TardisMachineClient, determine_instrument_info},
         message::WsMessage,
-        parse::{parse_tardis_ws_message, parse_tardis_ws_message_funding_rate},
+        parse::{
+            parse_tardis_ws_message, parse_tardis_ws_message_data,
+            parse_tardis_ws_message_funding_rate,
+        },
         replay_normalized, stream_normalized,
         types::{
             ReplayNormalizedRequestOptions, StreamNormalizedRequestOptions, TardisInstrumentKey,
@@ -42,43 +47,57 @@ use crate::{
 };
 
 #[pymethods]
+#[pyo3_stub_gen::derive::gen_stub_pymethods]
 impl ReplayNormalizedRequestOptions {
     #[staticmethod]
     #[pyo3(name = "from_json")]
-    fn py_from_json(data: Vec<u8>) -> Self {
-        serde_json::from_slice(&data).expect("Failed to parse JSON")
+    fn py_from_json(#[gen_stub(override_type(type_repr = "bytes"))] data: &[u8]) -> PyResult<Self> {
+        serde_json::from_slice(data).map_err(to_pyvalue_err)
     }
 
     #[pyo3(name = "from_json_array")]
     #[staticmethod]
-    fn py_from_json_array(data: Vec<u8>) -> Vec<Self> {
-        serde_json::from_slice(&data).expect("Failed to parse JSON array")
+    fn py_from_json_array(
+        #[gen_stub(override_type(type_repr = "bytes"))] data: &[u8],
+    ) -> PyResult<Vec<Self>> {
+        serde_json::from_slice(data).map_err(to_pyvalue_err)
     }
 }
 
 #[pymethods]
+#[pyo3_stub_gen::derive::gen_stub_pymethods]
 impl StreamNormalizedRequestOptions {
     #[staticmethod]
     #[pyo3(name = "from_json")]
-    fn py_from_json(data: Vec<u8>) -> Self {
-        serde_json::from_slice(&data).expect("Failed to parse JSON")
+    fn py_from_json(#[gen_stub(override_type(type_repr = "bytes"))] data: &[u8]) -> PyResult<Self> {
+        serde_json::from_slice(data).map_err(to_pyvalue_err)
     }
 
     #[pyo3(name = "from_json_array")]
     #[staticmethod]
-    fn py_from_json_array(data: Vec<u8>) -> Vec<Self> {
-        serde_json::from_slice(&data).expect("Failed to parse JSON array")
+    fn py_from_json_array(
+        #[gen_stub(override_type(type_repr = "bytes"))] data: &[u8],
+    ) -> PyResult<Vec<Self>> {
+        serde_json::from_slice(data).map_err(to_pyvalue_err)
     }
 }
 
 #[pymethods]
+#[pyo3_stub_gen::derive::gen_stub_pymethods]
 impl TardisMachineClient {
+    /// Provides a client for connecting to a [Tardis Machine Server](https://docs.tardis.dev/api/tardis-machine).
     #[new]
-    #[pyo3(signature = (base_url=None, normalize_symbols=true, book_snapshot_output="deltas"))]
+    #[pyo3(signature = (
+        base_url = None,
+        normalize_symbols = true,
+        book_snapshot_output = "deltas",
+        extract_bbo_as_quotes = false,
+    ))]
     fn py_new(
         base_url: Option<&str>,
         normalize_symbols: bool,
         book_snapshot_output: &str,
+        extract_bbo_as_quotes: bool,
     ) -> PyResult<Self> {
         let output = match book_snapshot_output {
             "depth10" => BookSnapshotOutput::Depth10,
@@ -89,9 +108,16 @@ impl TardisMachineClient {
                 )));
             }
         };
-        Self::new(base_url, normalize_symbols, output).map_err(to_pyruntime_err)
+        let mut client =
+            Self::new(base_url, normalize_symbols, output).map_err(to_pyruntime_err)?;
+        client.extract_bbo_as_quotes = extract_bbo_as_quotes;
+        Ok(client)
     }
 
+    /// Returns `true` if `close()` has been called.
+    ///
+    /// This checks that both replay and stream signals have been set,
+    /// which only occurs when `close()` is explicitly called.
     #[pyo3(name = "is_closed")]
     #[must_use]
     pub fn py_is_closed(&self) -> bool {
@@ -103,6 +129,11 @@ impl TardisMachineClient {
         self.close();
     }
 
+    /// Connects to the Tardis Machine replay WebSocket and yields parsed `Data` items.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the WebSocket connection cannot be established.
     #[pyo3(name = "replay")]
     fn py_replay<'py>(
         &self,
@@ -114,8 +145,9 @@ impl TardisMachineClient {
         let map = if instruments.is_empty() {
             self.instruments.clone()
         } else {
-            let mut instrument_map: HashMap<TardisInstrumentKey, Arc<TardisInstrumentMiniInfo>> =
-                HashMap::new();
+            let mut instrument_map: AHashMap<TardisInstrumentKey, Arc<TardisInstrumentMiniInfo>> =
+                AHashMap::new();
+
             for inst in instruments {
                 let key = inst.as_tardis_instrument_key();
                 instrument_map.insert(key, Arc::new(inst.clone()));
@@ -126,6 +158,7 @@ impl TardisMachineClient {
         let base_url = self.base_url.clone();
         let replay_signal = self.replay_signal.clone();
         let book_snapshot_output = self.book_snapshot_output.clone();
+        let extract_bbo_as_quotes = self.extract_bbo_as_quotes;
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let stream = replay_normalized(&base_url, options, replay_signal)
@@ -140,6 +173,7 @@ impl TardisMachineClient {
                 None,
                 Some(map),
                 book_snapshot_output,
+                extract_bbo_as_quotes,
             )
             .await;
             Ok(())
@@ -182,14 +216,14 @@ impl TardisMachineClient {
                     Ok(msg) => {
                         if let Some(Data::Bar(bar)) = determine_instrument_info(&msg, &map)
                             .and_then(|info| {
-                                parse_tardis_ws_message(msg, info, &book_snapshot_output)
+                                parse_tardis_ws_message(msg, &info, &book_snapshot_output)
                             })
                         {
                             bars.push(bar);
                         }
                     }
                     Err(e) => {
-                        tracing::error!("Error in WebSocket stream: {e:?}");
+                        log::error!("Error in WebSocket stream: {e:?}");
                         break;
                     }
                 }
@@ -204,6 +238,11 @@ impl TardisMachineClient {
         })
     }
 
+    /// Connects to the Tardis Machine stream WebSocket for a single instrument and yields parsed `Data` items.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the WebSocket connection cannot be established.
     #[pyo3(name = "stream")]
     fn py_stream<'py>(
         &self,
@@ -212,8 +251,9 @@ impl TardisMachineClient {
         callback: Py<PyAny>,
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let mut instrument_map: HashMap<TardisInstrumentKey, Arc<TardisInstrumentMiniInfo>> =
-            HashMap::new();
+        let mut instrument_map: AHashMap<TardisInstrumentKey, Arc<TardisInstrumentMiniInfo>> =
+            AHashMap::new();
+
         for inst in instruments {
             let key = inst.as_tardis_instrument_key();
             instrument_map.insert(key, Arc::new(inst.clone()));
@@ -222,6 +262,7 @@ impl TardisMachineClient {
         let base_url = self.base_url.clone();
         let replay_signal = self.replay_signal.clone();
         let book_snapshot_output = self.book_snapshot_output.clone();
+        let extract_bbo_as_quotes = self.extract_bbo_as_quotes;
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let stream = stream_normalized(&base_url, options, replay_signal)
@@ -236,6 +277,7 @@ impl TardisMachineClient {
                 None,
                 Some(instrument_map),
                 book_snapshot_output,
+                extract_bbo_as_quotes,
             )
             .await;
             Ok(())
@@ -249,15 +291,14 @@ impl TardisMachineClient {
 ///
 /// Returns a `PyErr` if reading the config file or replay execution fails.
 #[pyfunction]
+#[pyo3_stub_gen::derive::gen_stub_pyfunction(module = "nautilus_trader.adapters.tardis")]
 #[pyo3(name = "run_tardis_machine_replay")]
 #[pyo3(signature = (config_filepath))]
 pub fn py_run_tardis_machine_replay(
     py: Python<'_>,
     config_filepath: String,
 ) -> PyResult<Bound<'_, PyAny>> {
-    tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::DEBUG)
-        .init();
+    nautilus_common::logging::ensure_logging_initialized();
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let config_filepath = Path::new(&config_filepath);
@@ -272,8 +313,9 @@ async fn handle_python_stream<S>(
     stream: S,
     callback: Py<PyAny>,
     instrument: Option<Arc<TardisInstrumentMiniInfo>>,
-    instrument_map: Option<HashMap<TardisInstrumentKey, Arc<TardisInstrumentMiniInfo>>>,
+    instrument_map: Option<AHashMap<TardisInstrumentKey, Arc<TardisInstrumentMiniInfo>>>,
     book_snapshot_output: BookSnapshotOutput,
+    extract_bbo_as_quotes: bool,
 ) where
     S: Stream<Item = Result<WsMessage, Error>> + Unpin,
 {
@@ -292,15 +334,22 @@ async fn handle_python_stream<S>(
                 });
 
                 if let Some(info) = info.clone() {
-                    if let Some(data) =
-                        parse_tardis_ws_message(msg.clone(), info.clone(), &book_snapshot_output)
-                    {
+                    let data = parse_tardis_ws_message_data(
+                        msg.clone(),
+                        &info,
+                        &book_snapshot_output,
+                        extract_bbo_as_quotes,
+                    );
+
+                    if !data.is_empty() {
                         Python::attach(|py| {
-                            let py_obj = data_to_pycapsule(py, data);
-                            call_python(py, &callback, py_obj);
+                            for data in data {
+                                let py_obj = data_to_pycapsule(py, data);
+                                call_python(py, &callback, py_obj);
+                            }
                         });
                     } else if let Some(funding_rate) =
-                        parse_tardis_ws_message_funding_rate(msg, info)
+                        parse_tardis_ws_message_funding_rate(msg, &info)
                     {
                         // Check if we should emit this funding rate
                         let should_emit = if let Some(cached_rate) =
@@ -329,15 +378,9 @@ async fn handle_python_stream<S>(
                 }
             }
             Err(e) => {
-                tracing::error!("Error in WebSocket stream: {e:?}");
+                log::error!("Error in WebSocket stream: {e:?}");
                 break;
             }
         }
-    }
-}
-
-fn call_python(py: Python, callback: &Py<PyAny>, py_obj: Py<PyAny>) {
-    if let Err(e) = callback.call1(py, (py_obj,)) {
-        tracing::error!("Error calling Python: {e}");
     }
 }

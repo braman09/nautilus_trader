@@ -1,5 +1,5 @@
 # -------------------------------------------------------------------------------------------------
-#  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+#  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 #  https://nautechsystems.io
 #
 #  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -67,11 +67,12 @@ class MockExecutionClient(ExecutionClient):
         cache,
         clock,
         config=None,
+        oms_type=OmsType.HEDGING,
     ) -> None:
         super().__init__(
             client_id=client_id,
             venue=venue,
-            oms_type=OmsType.HEDGING,
+            oms_type=oms_type,
             account_type=account_type,
             base_currency=base_currency,
             msgbus=msgbus,

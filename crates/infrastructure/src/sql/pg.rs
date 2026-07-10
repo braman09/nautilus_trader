@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -15,17 +15,43 @@
 
 use derive_builder::Builder;
 use regex::Regex;
-use sqlx::{ConnectOptions, PgPool, postgres::PgConnectOptions};
+use serde::{Deserialize, Serialize};
+use sqlx::{AssertSqlSafe, ConnectOptions, PgPool, postgres::PgConnectOptions};
 
-#[derive(Debug, Clone, Builder)]
+fn validate_sql_identifier(value: &str, label: &str) -> anyhow::Result<()> {
+    if value.is_empty() {
+        anyhow::bail!("{label} must not be empty");
+    }
+
+    if !value.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        anyhow::bail!(
+            "{label} contains invalid characters (only alphanumeric and underscore allowed): {value}"
+        );
+    }
+    Ok(())
+}
+
+fn escape_sql_string(value: &str) -> String {
+    value.replace('\'', "''")
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Builder)]
+#[serde(deny_unknown_fields)]
 #[builder(default)]
 #[cfg_attr(
     feature = "python",
-    pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.infrastructure")
+    pyo3::pyclass(
+        module = "nautilus_trader.core.nautilus_pyo3.infrastructure",
+        from_py_object
+    )
 )]
 #[cfg_attr(
     feature = "python",
     pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.infrastructure")
+)]
+#[allow(
+    clippy::unsafe_derive_deserialize,
+    reason = "config type deserializes plain field values; unsafe PyO3 methods are unrelated"
 )]
 pub struct PostgresConnectOptions {
     pub host: String,
@@ -60,6 +86,18 @@ impl PostgresConnectOptions {
             "postgres://{username}:{password}@{host}:{port}/{database}",
             username = self.username,
             password = self.password,
+            host = self.host,
+            port = self.port,
+            database = self.database
+        )
+    }
+
+    /// Returns the connection string with the password masked for safe logging.
+    #[must_use]
+    pub fn connection_string_masked(&self) -> String {
+        format!(
+            "postgres://{username}:***@{host}:{port}/{database}",
+            username = self.username,
             host = self.host,
             port = self.port,
             database = self.database
@@ -182,6 +220,10 @@ fn get_schema_dir() -> anyhow::Result<String> {
 /// # Panics
 ///
 /// Panics if `schema_dir` is missing and cannot be determined or if other unwraps fail.
+#[expect(
+    clippy::too_many_lines,
+    reason = "Postgres initialization follows the ordered schema and role setup steps"
+)]
 pub async fn init_postgres(
     pg: &PgPool,
     database: String,
@@ -189,6 +231,8 @@ pub async fn init_postgres(
     schema_dir: Option<String>,
 ) -> anyhow::Result<()> {
     log::info!("Initializing Postgres database with target permissions and schema");
+
+    validate_sql_identifier(&database, "database")?;
 
     // Create public schema
     match sqlx::query("CREATE SCHEMA IF NOT EXISTS public;")
@@ -200,9 +244,12 @@ pub async fn init_postgres(
     }
 
     // Create role if not exists
-    match sqlx::query(format!("CREATE ROLE {database} PASSWORD '{password}' LOGIN;").as_str())
-        .execute(pg)
-        .await
+    let escaped_password = escape_sql_string(&password);
+    match sqlx::query(AssertSqlSafe(format!(
+        "CREATE ROLE {database} PASSWORD '{escaped_password}' LOGIN;"
+    )))
+    .execute(pg)
+    .await
     {
         Ok(_) => log::info!("Role {database} created successfully"),
         Err(e) => {
@@ -219,6 +266,7 @@ pub async fn init_postgres(
     let sql_files = vec!["types.sql", "functions.sql", "partitions.sql", "tables.sql"];
     let plpgsql_regex =
         Regex::new(r"\$\$ LANGUAGE plpgsql(?:[ \t\r\n]+SECURITY[ \t\r\n]+DEFINER)?;")?;
+
     for file_name in &sql_files {
         log::info!("Executing schema file: {file_name:?}");
         let file_path = format!("{schema_dir}/{file_name}");
@@ -237,15 +285,11 @@ pub async fn init_postgres(
                 }
                 statements
             }
-            _ => sql_content
-                .split(';')
-                .filter(|s| !s.trim().is_empty())
-                .map(|s| format!("{s};"))
-                .collect(),
+            _ => split_sql_statements(&sql_content),
         };
 
         for sql_statement in sql_statements {
-            sqlx::query(&sql_statement)
+            sqlx::query(AssertSqlSafe(sql_statement.as_str()))
                 .execute(pg)
                 .await
                 .map_err(|e| {
@@ -260,27 +304,31 @@ pub async fn init_postgres(
     }
 
     // Grant connect
-    match sqlx::query(format!("GRANT CONNECT ON DATABASE {database} TO {database};").as_str())
-        .execute(pg)
-        .await
+    match sqlx::query(AssertSqlSafe(format!(
+        "GRANT CONNECT ON DATABASE {database} TO {database};"
+    )))
+    .execute(pg)
+    .await
     {
         Ok(_) => log::info!("Connect privileges granted to role {database}"),
         Err(e) => log::error!("Error granting connect privileges to role {database}: {e:?}"),
     }
 
     // Grant all schema privileges to the role
-    match sqlx::query(format!("GRANT ALL PRIVILEGES ON SCHEMA public TO {database};").as_str())
-        .execute(pg)
-        .await
+    match sqlx::query(AssertSqlSafe(format!(
+        "GRANT ALL PRIVILEGES ON SCHEMA public TO {database};"
+    )))
+    .execute(pg)
+    .await
     {
         Ok(_) => log::info!("All schema privileges granted to role {database}"),
         Err(e) => log::error!("Error granting all privileges to role {database}: {e:?}"),
     }
 
     // Grant all table privileges to the role
-    match sqlx::query(
-        format!("GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO {database};").as_str(),
-    )
+    match sqlx::query(AssertSqlSafe(format!(
+        "GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO {database};"
+    )))
     .execute(pg)
     .await
     {
@@ -289,9 +337,9 @@ pub async fn init_postgres(
     }
 
     // Grant all sequence privileges to the role
-    match sqlx::query(
-        format!("GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO {database};").as_str(),
-    )
+    match sqlx::query(AssertSqlSafe(format!(
+        "GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO {database};"
+    )))
     .execute(pg)
     .await
     {
@@ -300,9 +348,9 @@ pub async fn init_postgres(
     }
 
     // Grant all function privileges to the role
-    match sqlx::query(
-        format!("GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO {database};").as_str(),
-    )
+    match sqlx::query(AssertSqlSafe(format!(
+        "GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO {database};"
+    )))
     .execute(pg)
     .await
     {
@@ -313,14 +361,61 @@ pub async fn init_postgres(
     Ok(())
 }
 
+// Splits semicolon-delimited SQL into individual statements.
+//
+// Skips `--` line comments and respects single-quoted string literals, so a semicolon inside a
+// comment or string literal does not split a statement. Used for the plain DDL schema files; the
+// PL/pgSQL files are split separately on their function terminators.
+fn split_sql_statements(sql: &str) -> Vec<String> {
+    let mut statements = Vec::new();
+    let mut current = String::new();
+    let mut chars = sql.chars().peekable();
+    let mut in_string = false;
+
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' => {
+                // A `''` escape toggles twice, leaving the state unchanged, which is correct
+                in_string = !in_string;
+                current.push(c);
+            }
+            '-' if !in_string && chars.peek() == Some(&'-') => {
+                for next in chars.by_ref() {
+                    if next == '\n' {
+                        current.push('\n');
+                        break;
+                    }
+                }
+            }
+            ';' if !in_string => {
+                let trimmed = current.trim();
+                if !trimmed.is_empty() {
+                    statements.push(format!("{trimmed};"));
+                }
+                current.clear();
+            }
+            _ => current.push(c),
+        }
+    }
+
+    let trimmed = current.trim();
+    if !trimmed.is_empty() {
+        statements.push(format!("{trimmed};"));
+    }
+
+    statements
+}
+
 /// Drops the Postgres database with the given name using the provided connection pool.
 ///
 /// # Errors
 ///
 /// Returns an error if the DROP DATABASE command fails.
 pub async fn drop_postgres(pg: &PgPool, database: String) -> anyhow::Result<()> {
+    validate_sql_identifier(&database, "database")?;
+
     // Execute drop owned
-    match sqlx::query(format!("DROP OWNED BY {database}").as_str())
+    match sqlx::query(AssertSqlSafe(format!("DROP OWNED BY {database}")))
         .execute(pg)
         .await
     {
@@ -336,18 +431,20 @@ pub async fn drop_postgres(pg: &PgPool, database: String) -> anyhow::Result<()> 
     }
 
     // Revoke connect
-    match sqlx::query(format!("REVOKE CONNECT ON DATABASE {database} FROM {database};").as_str())
-        .execute(pg)
-        .await
+    match sqlx::query(AssertSqlSafe(format!(
+        "REVOKE CONNECT ON DATABASE {database} FROM {database};"
+    )))
+    .execute(pg)
+    .await
     {
         Ok(_) => log::info!("Revoked connect privileges from role {database}"),
         Err(e) => log::error!("Error revoking connect privileges from role {database}: {e:?}"),
     }
 
     // Revoke privileges
-    match sqlx::query(
-        format!("REVOKE ALL PRIVILEGES ON DATABASE {database} FROM {database};").as_str(),
-    )
+    match sqlx::query(AssertSqlSafe(format!(
+        "REVOKE ALL PRIVILEGES ON DATABASE {database} FROM {database};"
+    )))
     .execute(pg)
     .await
     {
@@ -365,7 +462,7 @@ pub async fn drop_postgres(pg: &PgPool, database: String) -> anyhow::Result<()> 
     }
 
     // Drop role
-    match sqlx::query(format!("DROP ROLE IF EXISTS {database};").as_str())
+    match sqlx::query(AssertSqlSafe(format!("DROP ROLE IF EXISTS {database};")))
         .execute(pg)
         .await
     {
@@ -380,4 +477,79 @@ pub async fn drop_postgres(pg: &PgPool, database: String) -> anyhow::Result<()> 
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use rstest::rstest;
+
+    use super::*;
+
+    #[rstest]
+    fn test_postgres_connect_options_toml_round_trip() {
+        let config: PostgresConnectOptions = toml::from_str(
+            r#"
+host = "localhost"
+port = 5432
+username = "nautilus"
+password = "secret"
+database = "nautilus"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.host, "localhost");
+        assert_eq!(config.port, 5432);
+        assert_eq!(config.username, "nautilus");
+        assert_eq!(config.database, "nautilus");
+    }
+
+    #[rstest]
+    fn test_split_sql_statements_basic() {
+        let sql = "CREATE TABLE a (id INT); CREATE TABLE b (id INT);";
+        assert_eq!(
+            split_sql_statements(sql),
+            vec!["CREATE TABLE a (id INT);", "CREATE TABLE b (id INT);"]
+        );
+    }
+
+    #[rstest]
+    fn test_split_sql_statements_ignores_semicolon_in_line_comment() {
+        // Regression: a `;` inside a `--` comment must not split the following statement
+        let sql = "\
+-- start points; a later run re-validates them.
+ALTER TABLE pool_snapshot ADD COLUMN IF NOT EXISTS validation_state TEXT;";
+        assert_eq!(
+            split_sql_statements(sql),
+            vec!["ALTER TABLE pool_snapshot ADD COLUMN IF NOT EXISTS validation_state TEXT;"]
+        );
+    }
+
+    #[rstest]
+    fn test_split_sql_statements_keeps_code_before_trailing_comment() {
+        let sql = "CREATE TABLE a (\n  id INT,  -- REFERENCES x;\n  name TEXT\n);";
+        assert_eq!(
+            split_sql_statements(sql),
+            vec!["CREATE TABLE a (\n  id INT,  \n  name TEXT\n);"]
+        );
+    }
+
+    #[rstest]
+    fn test_split_sql_statements_ignores_semicolon_in_string_literal() {
+        let sql = "INSERT INTO t VALUES ('a;b'); SELECT 1;";
+        assert_eq!(
+            split_sql_statements(sql),
+            vec!["INSERT INTO t VALUES ('a;b');", "SELECT 1;"]
+        );
+    }
+
+    #[rstest]
+    fn test_split_sql_statements_drops_comment_only_lines() {
+        let sql =
+            "------------------- ENUMS -------------------\nCREATE TYPE x AS ENUM ('A', 'B');";
+        assert_eq!(
+            split_sql_statements(sql),
+            vec!["CREATE TYPE x AS ENUM ('A', 'B');"]
+        );
+    }
 }

@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -15,7 +15,7 @@
 
 use std::fmt::{Debug, Display};
 
-use nautilus_model::data::Bar;
+use nautilus_model::data::{Bar, QuoteTick, TradeTick};
 
 use crate::{
     average::{MovingAverageFactory, MovingAverageType},
@@ -30,6 +30,10 @@ const MAX_PERIOD: usize = 1024;
     feature = "python",
     pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.indicators", unsendable)
 )]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.indicators")
+)]
 pub struct Bias {
     pub period: usize,
     pub ma_type: MovingAverageType,
@@ -42,7 +46,7 @@ pub struct Bias {
 
 impl Display for Bias {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}({},{})", self.name(), self.period, self.ma_type,)
+        write!(f, "{}({},{})", self.name(), self.period, self.ma_type)
     }
 }
 
@@ -58,6 +62,12 @@ impl Indicator for Bias {
     fn initialized(&self) -> bool {
         self.initialized
     }
+
+    fn handle_quote(&mut self, _quote: &QuoteTick) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn handle_trade(&mut self, _trade: &TradeTick) {}
 
     fn handle_bar(&mut self, bar: &Bar) {
         self.update_raw((&bar.close).into());
@@ -104,12 +114,13 @@ impl Bias {
         self.count += 1;
         self.ma.update_raw(close);
         self.value = (close / self.ma.value()) - 1.0;
-        self._check_initialized();
+        self.check_initialized();
     }
 
-    pub fn _check_initialized(&mut self) {
+    pub fn check_initialized(&mut self) {
         if !self.initialized {
             self.has_inputs = true;
+
             if self.ma.initialized() {
                 self.initialized = true;
             }
@@ -117,9 +128,6 @@ impl Bias {
     }
 }
 
-////////////////////////////////////////////////////////////////////////////////
-// Tests
-////////////////////////////////////////////////////////////////////////////////
 #[cfg(test)]
 mod tests {
     use rstest::{fixture, rstest};
@@ -167,15 +175,17 @@ mod tests {
 
     #[rstest]
     fn test_value_with_all_higher_inputs_returns_expected_value(mut bias: Bias) {
+        const EPS: f64 = 1e-12;
+        const EXPECTED: f64 = 0.000_654_735_923_177_662_8;
+
+        fn abs_diff_lt(lhs: f64, rhs: f64) -> bool {
+            (lhs - rhs).abs() < EPS
+        }
+
         let inputs = [
             109.93, 110.0, 109.77, 109.96, 110.29, 110.53, 110.27, 110.21, 110.06, 110.19, 109.83,
             109.9, 110.0, 110.03, 110.13, 109.95, 109.75, 110.15, 109.9, 110.04,
         ];
-        const EPS: f64 = 1e-12;
-        const EXPECTED: f64 = 0.000_654_735_923_177_662_8;
-        fn abs_diff_lt(lhs: f64, rhs: f64) -> bool {
-            (lhs - rhs).abs() < EPS
-        }
 
         for &price in &inputs {
             bias.update_raw(price);

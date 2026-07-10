@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -15,9 +15,10 @@
 
 //! HTTP client implementation with rate limiting and timeout support.
 
-use std::{collections::HashMap, str::FromStr, sync::Arc, time::Duration};
+use std::{borrow::Cow, collections::HashMap, str::FromStr, sync::Arc, time::Duration};
 
 use nautilus_core::collections::into_ustr_vec;
+use nautilus_cryptography::providers::install_cryptographic_provider;
 use reqwest::{
     Method, Response, Url,
     header::{HeaderMap, HeaderName, HeaderValue},
@@ -26,6 +27,22 @@ use ustr::Ustr;
 
 use super::{HttpClientError, HttpResponse, HttpStatus};
 use crate::ratelimiter::{RateLimiter, clock::MonotonicClock, quota::Quota};
+
+/// Default maximum idle connections per host.
+const DEFAULT_POOL_MAX_IDLE_PER_HOST: usize = 32;
+
+/// Default idle connection timeout in seconds.
+const DEFAULT_POOL_IDLE_TIMEOUT_SECS: u64 = 60;
+
+/// Default HTTP/2 keep-alive interval in seconds.
+const DEFAULT_HTTP2_KEEP_ALIVE_SECS: u64 = 30;
+
+/// Default maximum HTTP response body size in bytes (100 MiB).
+///
+/// Bounds peak memory per response so a hostile or malfunctioning endpoint
+/// cannot exhaust memory by streaming an arbitrarily large body. Mirrors the
+/// caps already enforced on the WebSocket and raw-socket paths.
+const DEFAULT_MAX_RESPONSE_BYTES: usize = 100 * 1024 * 1024;
 
 /// An HTTP client that supports rate limiting and timeouts.
 ///
@@ -39,7 +56,11 @@ use crate::ratelimiter::{RateLimiter, clock::MonotonicClock, quota::Quota};
 #[derive(Clone, Debug)]
 #[cfg_attr(
     feature = "python",
-    pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.network")
+    pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.network", from_py_object)
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.network")
 )]
 pub struct HttpClient {
     /// The underlying HTTP client used to make requests.
@@ -63,8 +84,40 @@ impl HttpClient {
         timeout_secs: Option<u64>,
         proxy_url: Option<String>,
     ) -> Result<Self, HttpClientError> {
+        let keyed_quotas = keyed_quotas
+            .into_iter()
+            .map(|(key, quota)| (Ustr::from(&key), quota))
+            .collect();
+
+        let rate_limiter = Arc::new(RateLimiter::new_with_quota(default_quota, keyed_quotas));
+
+        Self::new_with_rate_limiter(headers, header_keys, timeout_secs, proxy_url, rate_limiter)
+    }
+
+    /// Creates a new [`HttpClient`] instance sharing an externally-owned rate limiter.
+    ///
+    /// Use this constructor to share a single [`RateLimiter`] across multiple
+    /// [`HttpClient`] instances (for example, the HTTP clients owned by an
+    /// exchange adapter's data and execution clients). All quota state lives
+    /// inside the limiter, so passing the same `Arc` produces a single shared
+    /// bucket.
+    ///
+    /// # Errors
+    ///
+    /// - Returns `InvalidProxy` if the proxy URL is malformed.
+    /// - Returns `ClientBuildError` if building the underlying `reqwest::Client` fails.
+    pub fn new_with_rate_limiter(
+        headers: HashMap<String, String>,
+        header_keys: Vec<String>,
+        timeout_secs: Option<u64>,
+        proxy_url: Option<String>,
+        rate_limiter: Arc<RateLimiter<Ustr, MonotonicClock>>,
+    ) -> Result<Self, HttpClientError> {
+        install_cryptographic_provider();
+
         // Build default headers
         let mut header_map = HeaderMap::new();
+
         for (key, value) in headers {
             let header_name = HeaderName::from_str(&key)
                 .map_err(|e| HttpClientError::Error(format!("Invalid header name '{key}': {e}")))?;
@@ -74,8 +127,14 @@ impl HttpClient {
             header_map.insert(header_name, header_value);
         }
 
-        let mut client_builder = reqwest::Client::builder().default_headers(header_map);
-        client_builder = client_builder.tcp_nodelay(true);
+        let mut client_builder = reqwest::Client::builder()
+            .default_headers(header_map)
+            .tcp_nodelay(true)
+            .pool_max_idle_per_host(DEFAULT_POOL_MAX_IDLE_PER_HOST)
+            .pool_idle_timeout(Duration::from_secs(DEFAULT_POOL_IDLE_TIMEOUT_SECS))
+            .http2_keep_alive_interval(Duration::from_secs(DEFAULT_HTTP2_KEEP_ALIVE_SECS))
+            .http2_keep_alive_while_idle(true)
+            .http2_adaptive_window(true);
 
         if let Some(timeout_secs) = timeout_secs {
             client_builder = client_builder.timeout(Duration::from_secs(timeout_secs));
@@ -92,17 +151,25 @@ impl HttpClient {
             .build()
             .map_err(|e| HttpClientError::ClientBuildError(e.to_string()))?;
 
+        // Pre-intern header keys as HeaderName, keeping both vectors aligned,
+        // an invalid key is an error: a silent drop would make response extraction read nothing.
+        let (valid_keys, header_names): (Vec<String>, Vec<HeaderName>) = header_keys
+            .into_iter()
+            .map(|k| {
+                HeaderName::from_str(&k)
+                    .map(|name| (k.clone(), name))
+                    .map_err(|e| HttpClientError::Error(format!("Invalid header key '{k}': {e}")))
+            })
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .unzip();
+
         let client = InnerHttpClient {
             client,
-            header_keys: Arc::new(header_keys),
+            header_keys: Arc::from(valid_keys),
+            header_names: Arc::from(header_names),
+            max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
         };
-
-        let keyed_quotas = keyed_quotas
-            .into_iter()
-            .map(|(key, quota)| (Ustr::from(&key), quota))
-            .collect();
-
-        let rate_limiter = Arc::new(RateLimiter::new_with_quota(default_quota, keyed_quotas));
 
         Ok(Self {
             client,
@@ -119,7 +186,7 @@ impl HttpClient {
     /// # Examples
     ///
     /// If requesting `/foo/bar`, pass rate-limit keys `["foo/bar", "foo"]`.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub async fn request(
         &self,
         method: Method,
@@ -140,12 +207,12 @@ impl HttpClient {
     ///
     /// This method accepts any type implementing `Serialize` for query parameters,
     /// which will be automatically encoded into the URL query string using reqwest's
-    /// `.query()` method, avoiding unnecessary HashMap allocations.
+    /// `.query()` method, avoiding unnecessary `HashMap` allocations.
     ///
     /// # Errors
     ///
     /// Returns an error if unable to send request or times out.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub async fn request_with_params<P: serde::Serialize>(
         &self,
         method: Method,
@@ -158,7 +225,7 @@ impl HttpClient {
     ) -> Result<HttpResponse, HttpClientError> {
         let keys = keys.map(into_ustr_vec);
         let rate_limiter = self.rate_limiter.clone();
-        rate_limiter.await_keys_ready(keys).await;
+        rate_limiter.await_keys_ready(keys.as_deref()).await;
 
         self.client
             .send_request_with_query(method, url, params, headers, body, timeout_secs)
@@ -170,7 +237,7 @@ impl HttpClient {
     /// # Errors
     ///
     /// Returns an error if unable to send the request or the request times out.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub async fn request_with_ustr_keys(
         &self,
         method: Method,
@@ -182,7 +249,7 @@ impl HttpClient {
         keys: Option<Vec<Ustr>>,
     ) -> Result<HttpResponse, HttpClientError> {
         let rate_limiter = self.rate_limiter.clone();
-        rate_limiter.await_keys_ready(keys).await;
+        rate_limiter.await_keys_ready(keys.as_deref()).await;
 
         self.client
             .send_request(method, url, params, headers, body, timeout_secs)
@@ -287,7 +354,10 @@ impl HttpClient {
 #[derive(Clone, Debug)]
 pub struct InnerHttpClient {
     pub(crate) client: reqwest::Client,
-    pub(crate) header_keys: Arc<Vec<String>>,
+    pub(crate) header_keys: Arc<[String]>,
+    pub(crate) header_names: Arc<[HeaderName]>,
+    /// Maximum response body size in bytes; bodies exceeding this are rejected.
+    pub(crate) max_response_bytes: usize,
 }
 
 impl InnerHttpClient {
@@ -306,14 +376,21 @@ impl InnerHttpClient {
         timeout_secs: Option<u64>,
     ) -> Result<HttpResponse, HttpClientError> {
         let full_url = encode_url_params(&url, params)?;
-        self.send_request_internal(method, full_url, None::<&()>, headers, body, timeout_secs)
-            .await
+        self.send_request_internal(
+            method,
+            full_url.as_ref(),
+            None::<&()>,
+            headers,
+            body,
+            timeout_secs,
+        )
+        .await
     }
 
     /// Sends an HTTP request with query parameters using reqwest's `.query()` method.
     ///
     /// This method accepts any type implementing `Serialize` for query parameters,
-    /// avoiding HashMap conversion overhead.
+    /// avoiding `HashMap` conversion overhead.
     ///
     /// # Errors
     ///
@@ -327,7 +404,7 @@ impl InnerHttpClient {
         body: Option<Vec<u8>>,
         timeout_secs: Option<u64>,
     ) -> Result<HttpResponse, HttpClientError> {
-        self.send_request_internal(method, url, query, headers, body, timeout_secs)
+        self.send_request_internal(method, &url, query, headers, body, timeout_secs)
             .await
     }
 
@@ -339,31 +416,34 @@ impl InnerHttpClient {
     async fn send_request_internal<Q: serde::Serialize>(
         &self,
         method: Method,
-        url: String,
+        url: &str,
         query: Option<&Q>,
         headers: Option<HashMap<String, String>>,
         body: Option<Vec<u8>>,
         timeout_secs: Option<u64>,
     ) -> Result<HttpResponse, HttpClientError> {
-        let headers = headers.unwrap_or_default();
-        let reqwest_url = Url::parse(url.as_str())
-            .map_err(|e| HttpClientError::from(format!("URL parse error: {e}")))?;
+        let reqwest_url =
+            Url::parse(url).map_err(|e| HttpClientError::from(format!("URL parse error: {e}")))?;
 
-        let mut header_map = HeaderMap::new();
-        for (header_key, header_value) in &headers {
-            let key = HeaderName::from_bytes(header_key.as_bytes())
-                .map_err(|e| HttpClientError::from(format!("Invalid header name: {e}")))?;
-            if let Some(old_value) = header_map.insert(
-                key.clone(),
-                header_value
-                    .parse()
-                    .map_err(|e| HttpClientError::from(format!("Invalid header value: {e}")))?,
-            ) {
-                tracing::trace!("Replaced header '{key}': old={old_value:?}, new={header_value}");
+        let mut request_builder = self.client.request(method, reqwest_url);
+
+        if let Some(headers) = headers {
+            let mut header_map = HeaderMap::with_capacity(headers.len());
+            for (header_key, header_value) in &headers {
+                let key = HeaderName::from_bytes(header_key.as_bytes())
+                    .map_err(|e| HttpClientError::from(format!("Invalid header name: {e}")))?;
+
+                if let Some(old_value) = header_map.insert(
+                    key.clone(),
+                    header_value
+                        .parse()
+                        .map_err(|e| HttpClientError::from(format!("Invalid header value: {e}")))?,
+                ) {
+                    log::trace!("Replaced header '{key}': old={old_value:?}, new={header_value}");
+                }
             }
+            request_builder = request_builder.headers(header_map);
         }
-
-        let mut request_builder = self.client.request(method, reqwest_url).headers(header_map);
 
         if let Some(q) = query {
             request_builder = request_builder.query(q);
@@ -381,7 +461,7 @@ impl InnerHttpClient {
             None => request_builder.build().map_err(HttpClientError::from)?,
         };
 
-        tracing::trace!("{request:?}");
+        log::trace!("{} {}", request.method(), request.url());
 
         let response = self
             .client
@@ -394,27 +474,73 @@ impl InnerHttpClient {
 
     /// Converts a `reqwest::Response` into an `HttpResponse`.
     ///
+    /// Uses pre-interned `HeaderName` values to avoid string-to-header parsing per response.
+    ///
     /// # Errors
     ///
     /// Returns an error if unable to send request or times out.
     pub async fn to_response(&self, response: Response) -> Result<HttpResponse, HttpClientError> {
-        tracing::trace!("{response:?}");
+        log::trace!("{response:?}");
 
-        let headers: HashMap<String, String> = self
-            .header_keys
-            .iter()
-            .filter_map(|key| response.headers().get(key).map(|val| (key, val)))
-            .filter_map(|(key, val)| val.to_str().map(|v| (key, v)).ok())
-            .map(|(k, v)| (k.clone(), v.to_owned()))
-            .collect();
+        let resp_headers = response.headers();
+        let mut headers =
+            HashMap::with_capacity(std::cmp::min(self.header_names.len(), resp_headers.len()));
+
+        for (name, key_str) in self.header_names.iter().zip(self.header_keys.iter()) {
+            if let Some(val) = resp_headers.get(name)
+                && let Ok(v) = val.to_str()
+            {
+                headers.insert(key_str.clone(), v.to_owned());
+            }
+        }
+
         let status = HttpStatus::new(response.status());
-        let body = response.bytes().await.map_err(HttpClientError::from)?;
+        let body = self.read_body_capped(response).await?;
 
         Ok(HttpResponse {
             status,
             headers,
             body,
         })
+    }
+
+    /// Reads the response body, rejecting any body that exceeds `max_response_bytes`.
+    ///
+    /// A `Content-Length` larger than the cap is rejected up front; otherwise the
+    /// body is streamed chunk-by-chunk and aborted as soon as the accumulated size
+    /// would exceed the cap, so an oversized or unbounded (chunked) body is never
+    /// fully buffered into memory.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the body exceeds the configured maximum size, or if
+    /// reading a chunk fails.
+    async fn read_body_capped(
+        &self,
+        mut response: Response,
+    ) -> Result<bytes::Bytes, HttpClientError> {
+        let max = self.max_response_bytes;
+
+        // Fast path: reject up front when the advertised length already exceeds the cap.
+        if let Some(len) = response.content_length()
+            && len > max as u64
+        {
+            return Err(HttpClientError::Error(format!(
+                "HTTP response body of {len} bytes exceeds maximum of {max} bytes",
+            )));
+        }
+
+        let mut buf = bytes::BytesMut::new();
+        while let Some(chunk) = response.chunk().await.map_err(HttpClientError::from)? {
+            if buf.len() + chunk.len() > max {
+                return Err(HttpClientError::Error(format!(
+                    "HTTP response body exceeds maximum of {max} bytes",
+                )));
+            }
+            buf.extend_from_slice(&chunk);
+        }
+
+        Ok(buf.freeze())
     }
 }
 
@@ -423,52 +549,54 @@ impl Default for InnerHttpClient {
     ///
     /// The default client is initialized with an empty list of header keys and a new `reqwest::Client`.
     fn default() -> Self {
+        install_cryptographic_provider();
         let client = reqwest::Client::new();
         Self {
             client,
-            header_keys: Default::default(),
+            header_keys: Arc::default(),
+            header_names: Arc::default(),
+            max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
         }
     }
 }
 
-/// Helper function to encode URL parameters.
+/// Encodes URL parameters into the query string.
 ///
-/// Takes a base URL and optional query parameters, returning the full URL with encoded query string.
+/// Returns `Cow::Borrowed` when no parameters need appending (zero-alloc fast path).
 /// Parameters can have multiple values per key (for doseq=True behavior).
 /// Preserves existing query strings in the URL by appending with '&' instead of '?'.
-fn encode_url_params(
-    url: &str,
+fn encode_url_params<'a>(
+    url: &'a str,
     params: Option<&HashMap<String, Vec<String>>>,
-) -> Result<String, HttpClientError> {
+) -> Result<Cow<'a, str>, HttpClientError> {
     let Some(params) = params else {
-        return Ok(url.to_string());
+        return Ok(Cow::Borrowed(url));
     };
 
-    // Flatten HashMap<String, Vec<String>> into Vec<(String, String)> for serde_urlencoded
-    let pairs: Vec<(String, String)> = params
+    let pairs: Vec<(&str, &str)> = params
         .iter()
-        .flat_map(|(key, values)| values.iter().map(move |value| (key.clone(), value.clone())))
+        .flat_map(|(key, values)| {
+            values
+                .iter()
+                .map(move |value| (key.as_str(), value.as_str()))
+        })
         .collect();
 
     if pairs.is_empty() {
-        return Ok(url.to_string());
+        return Ok(Cow::Borrowed(url));
     }
 
     let query_string = serde_urlencoded::to_string(pairs)
         .map_err(|e| HttpClientError::Error(format!("Failed to encode params: {e}")))?;
 
-    // Check if URL already has a query string
     let separator = if url.contains('?') { '&' } else { '?' };
-    Ok(format!("{url}{separator}{query_string}"))
+    Ok(Cow::Owned(format!("{url}{separator}{query_string}")))
 }
 
-////////////////////////////////////////////////////////////////////////////////
-// Tests
-////////////////////////////////////////////////////////////////////////////////
 #[cfg(test)]
 #[cfg(target_os = "linux")] // Only run network tests on Linux (CI stability)
 mod tests {
-    use std::net::{SocketAddr, TcpListener};
+    use std::net::SocketAddr;
 
     use axum::{
         Router,
@@ -479,18 +607,6 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
-
-    fn get_unique_port() -> u16 {
-        // Create a temporary TcpListener to get an available port
-        let listener =
-            TcpListener::bind("127.0.0.1:0").expect("Failed to bind temporary TcpListener");
-        let port = listener.local_addr().unwrap().port();
-
-        // Close the listener to free up the port
-        drop(listener);
-
-        port
-    }
 
     fn create_router() -> Router {
         Router::new()
@@ -506,13 +622,15 @@ mod tests {
                     "Eventually responded"
                 }),
             )
+            .route(
+                "/large",
+                // Returns a 1 MiB body to exercise the response size cap.
+                get(|| async { "x".repeat(1024 * 1024) }),
+            )
     }
 
     async fn start_test_server() -> Result<SocketAddr, Box<dyn std::error::Error + Send + Sync>> {
-        let port = get_unique_port();
-        let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}"))
-            .await
-            .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
         tokio::spawn(async move {
@@ -542,6 +660,62 @@ mod tests {
 
         assert!(response.status.is_success());
         assert_eq!(String::from_utf8_lossy(&response.body), "hello-world!");
+    }
+
+    #[tokio::test]
+    async fn test_response_body_within_cap_is_returned() {
+        let addr = start_test_server().await.unwrap();
+        let url = format!("http://{addr}");
+
+        // Cap above the 1 MiB payload: body should be returned intact.
+        let client = InnerHttpClient {
+            max_response_bytes: 4 * 1024 * 1024,
+            ..Default::default()
+        };
+
+        let response = client
+            .send_request(
+                reqwest::Method::GET,
+                format!("{url}/large"),
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert!(response.status.is_success());
+        assert_eq!(response.body.len(), 1024 * 1024);
+    }
+
+    #[tokio::test]
+    async fn test_response_body_exceeding_cap_is_rejected() {
+        let addr = start_test_server().await.unwrap();
+        let url = format!("http://{addr}");
+
+        // Cap below the 1 MiB payload: the request must fail rather than buffer it.
+        let client = InnerHttpClient {
+            max_response_bytes: 16 * 1024,
+            ..Default::default()
+        };
+
+        let result = client
+            .send_request(
+                reqwest::Method::GET,
+                format!("{url}/large"),
+                None,
+                None,
+                None,
+                None,
+            )
+            .await;
+
+        let err = result.expect_err("oversized response body should be rejected");
+        assert!(
+            err.to_string().contains("exceeds maximum"),
+            "unexpected error: {err}",
+        );
     }
 
     #[tokio::test]

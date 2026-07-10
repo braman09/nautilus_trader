@@ -1,5 +1,5 @@
 # -------------------------------------------------------------------------------------------------
-#  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+#  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 #  https://nautechsystems.io
 #
 #  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -543,6 +543,11 @@ class TestBarType:
             [
                 "AUD/USD.SIM-a-0-0-0",
                 "Error parsing `BarType` from 'AUD/USD.SIM-a-0-0-0', invalid token: 'a' at position 1",
+            ],
+            [
+                "AUD/USD.SIM-60-MINUTE-LAST-INTERNAL",
+                "Error parsing `BarType` from 'AUD/USD.SIM-60-MINUTE-LAST-INTERNAL', "
+                "invalid token: '60' at position 1",
             ],
             [
                 "AUD/USD.SIM-1000-a-0-0",

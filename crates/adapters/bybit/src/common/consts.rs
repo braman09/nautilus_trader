@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -17,11 +17,17 @@
 
 use std::sync::LazyLock;
 
-use nautilus_model::identifiers::Venue;
+use nautilus_model::identifiers::{ClientId, Venue};
 use ustr::Ustr;
 
+/// Venue identifier string.
 pub const BYBIT: &str = "BYBIT";
+
+/// Static venue instance.
 pub static BYBIT_VENUE: LazyLock<Venue> = LazyLock::new(|| Venue::new(Ustr::from(BYBIT)));
+
+/// Static client ID instance.
+pub static BYBIT_CLIENT_ID: LazyLock<ClientId> = LazyLock::new(|| ClientId::new(Ustr::from(BYBIT)));
 
 pub const BYBIT_PONG: &str = "pong";
 
@@ -41,3 +47,5 @@ pub const BYBIT_WS_TESTNET_PUBLIC_URL: &str = "wss://stream-testnet.bybit.com/v5
 pub const BYBIT_WS_TESTNET_PRIVATE_URL: &str = "wss://stream-testnet.bybit.com/v5/private";
 
 pub const BYBIT_WS_TOPIC_DELIMITER: char = '.';
+
+pub const BYBIT_DEFAULT_ORDERBOOK_DEPTH: u32 = 50;

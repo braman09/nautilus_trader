@@ -1,5 +1,5 @@
 # -------------------------------------------------------------------------------------------------
-#  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+#  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 #  https://nautechsystems.io
 #
 #  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -44,7 +44,7 @@ def test_account_identifier() -> None:
     # Assert
     assert account_id1 == account_id1
     assert account_id1 != account_id2
-    assert "SIM-02851908", account_id1.value
+    assert account_id1.value == "SIM-02851908"
     assert account_id1 == AccountId("SIM-02851908")
 
 
@@ -254,15 +254,15 @@ def test_instrument_id_from_str_with_utf8_symbol() -> None:
     [
         [
             "BTCUSDT",
-            "Error parsing `InstrumentId` from 'BTCUSDT': missing '.' separator between symbol and venue components",
+            "invalid `InstrumentId` value 'BTCUSDT': missing '.' separator between symbol and venue components",
         ],
         [
             ".USDT",
-            "invalid string for 'value', was empty",  # TODO: Improve error message
+            "invalid `InstrumentId` value '.USDT': invalid symbol: invalid string for 'value', was empty",
         ],
         [
             "BTC.",
-            "invalid string for 'value', was empty",  # TODO: Improve error message
+            "invalid `InstrumentId` value 'BTC.': invalid venue: invalid string for 'value', was empty",
         ],
     ],
 )

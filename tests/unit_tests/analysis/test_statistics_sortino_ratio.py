@@ -1,5 +1,5 @@
 # -------------------------------------------------------------------------------------------------
-#  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+#  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 #  https://nautechsystems.io
 #
 #  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -81,4 +81,7 @@ class TestSortinoRatioPortfolioStatistic:
         result = stat.calculate_from_returns(convert_series_to_dict(data))
 
         # Assert
-        assert result == 9.16515138991168
+        # Intraday returns are geometrically compounded into daily bins before
+        # the Sortino calculation; value reflects the corrected downsampling
+        # rather than the previous arithmetic-sum behavior.
+        assert result == 20.4939015319192

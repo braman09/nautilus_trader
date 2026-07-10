@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -18,11 +18,14 @@
 //! Provides real-time market data streams including:
 //! - Ticker (quotes)
 //! - Trades
-//! - Order book
+//! - Order book (L2 and L3)
 //! - OHLC bars
 
 pub mod client;
 pub mod enums;
 pub mod handler;
+pub mod level_3;
 pub mod messages;
 pub mod parse;
+
+pub(crate) mod level_2;

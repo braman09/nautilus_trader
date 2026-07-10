@@ -1,5 +1,5 @@
 # -------------------------------------------------------------------------------------------------
-#  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+#  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 #  https://nautechsystems.io
 #
 #  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -15,6 +15,8 @@
 
 import os
 import sys
+from decimal import Decimal
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -34,8 +36,11 @@ from nautilus_trader.data.messages import DataCommand
 from nautilus_trader.data.messages import DataResponse
 from nautilus_trader.data.messages import RequestBars
 from nautilus_trader.data.messages import RequestData
+from nautilus_trader.data.messages import RequestFundingRates
 from nautilus_trader.data.messages import RequestInstrument
 from nautilus_trader.data.messages import RequestInstruments
+from nautilus_trader.data.messages import RequestJoin
+from nautilus_trader.data.messages import RequestOrderBookDeltas
 from nautilus_trader.data.messages import RequestOrderBookDepth
 from nautilus_trader.data.messages import RequestOrderBookSnapshot
 from nautilus_trader.data.messages import RequestQuoteTicks
@@ -45,7 +50,9 @@ from nautilus_trader.data.messages import SubscribeData
 from nautilus_trader.data.messages import SubscribeFundingRates
 from nautilus_trader.data.messages import SubscribeIndexPrices
 from nautilus_trader.data.messages import SubscribeInstrument
+from nautilus_trader.data.messages import SubscribeInstrumentClose
 from nautilus_trader.data.messages import SubscribeInstruments
+from nautilus_trader.data.messages import SubscribeInstrumentStatus
 from nautilus_trader.data.messages import SubscribeMarkPrices
 from nautilus_trader.data.messages import SubscribeOrderBook
 from nautilus_trader.data.messages import SubscribeQuoteTicks
@@ -55,7 +62,9 @@ from nautilus_trader.data.messages import UnsubscribeData
 from nautilus_trader.data.messages import UnsubscribeFundingRates
 from nautilus_trader.data.messages import UnsubscribeIndexPrices
 from nautilus_trader.data.messages import UnsubscribeInstrument
+from nautilus_trader.data.messages import UnsubscribeInstrumentClose
 from nautilus_trader.data.messages import UnsubscribeInstruments
+from nautilus_trader.data.messages import UnsubscribeInstrumentStatus
 from nautilus_trader.data.messages import UnsubscribeMarkPrices
 from nautilus_trader.data.messages import UnsubscribeOrderBook
 from nautilus_trader.data.messages import UnsubscribeQuoteTicks
@@ -67,16 +76,21 @@ from nautilus_trader.model.data import BarSpecification
 from nautilus_trader.model.data import BarType
 from nautilus_trader.model.data import BookOrder
 from nautilus_trader.model.data import DataType
+from nautilus_trader.model.data import FundingRateUpdate
+from nautilus_trader.model.data import InstrumentStatus
 from nautilus_trader.model.data import OrderBookDelta
 from nautilus_trader.model.data import OrderBookDeltas
 from nautilus_trader.model.data import OrderBookDepth10
 from nautilus_trader.model.data import QuoteTick
 from nautilus_trader.model.data import TradeTick
+from nautilus_trader.model.enums import AggregationSource
 from nautilus_trader.model.enums import AggressorSide
 from nautilus_trader.model.enums import AssetClass
 from nautilus_trader.model.enums import BarAggregation
 from nautilus_trader.model.enums import BookAction
 from nautilus_trader.model.enums import BookType
+from nautilus_trader.model.enums import ContinuousFutureAdjustmentType
+from nautilus_trader.model.enums import MarketStatusAction
 from nautilus_trader.model.enums import OptionKind
 from nautilus_trader.model.enums import OrderSide
 from nautilus_trader.model.enums import PriceType
@@ -86,9 +100,12 @@ from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.model.identifiers import Symbol
 from nautilus_trader.model.identifiers import TradeId
 from nautilus_trader.model.identifiers import Venue
+from nautilus_trader.model.identifiers import new_generic_spread_id
 from nautilus_trader.model.instruments.base import Instrument
 from nautilus_trader.model.instruments.currency_pair import CurrencyPair
+from nautilus_trader.model.instruments.futures_contract import FuturesContract
 from nautilus_trader.model.instruments.option_contract import OptionContract
+from nautilus_trader.model.instruments.option_spread import OptionSpread
 from nautilus_trader.model.objects import Currency
 from nautilus_trader.model.objects import Price
 from nautilus_trader.model.objects import Quantity
@@ -112,6 +129,17 @@ XBTUSD_BITMEX = TestInstrumentProvider.xbtusd_bitmex()
 BTCUSDT_BINANCE = TestInstrumentProvider.btcusdt_binance()
 BTCUSDT_PERP_BINANCE = TestInstrumentProvider.btcusdt_perp_binance()
 ETHUSDT_BINANCE = TestInstrumentProvider.ethusdt_binance()
+
+
+class _GuardedSubscriptionListClient(BacktestMarketDataClient):
+    def subscribed_order_book_deltas(self) -> list[InstrumentId]:
+        raise AssertionError("DataEngine hot paths must use direct order book membership")
+
+    def subscribed_quote_ticks(self) -> list[InstrumentId]:
+        raise AssertionError("DataEngine hot paths must use direct quote membership")
+
+    def subscribed_trade_ticks(self) -> list[InstrumentId]:
+        raise AssertionError("DataEngine hot paths must use direct trade membership")
 
 
 @pytest.mark.xdist_group(name="databento_catalog")
@@ -794,30 +822,6 @@ class TestDataEngine:
         assert handler1 == [ETHUSDT_BINANCE]
         assert handler2 == [ETHUSDT_BINANCE]
 
-    def test_execute_subscribe_order_book_snapshots_then_adds_handler(self):
-        # Arrange
-        self.data_engine.register_client(self.binance_client)
-        self.binance_client.start()
-
-        subscribe = SubscribeOrderBook(
-            book_data_type=OrderBookDelta,
-            client_id=None,  # Will route to the Binance venue
-            venue=BINANCE,
-            instrument_id=ETHUSDT_BINANCE.id,
-            book_type=2,
-            depth=10,
-            interval_ms=1000,
-            managed=True,
-            command_id=UUID4(),
-            ts_init=self.clock.timestamp_ns(),
-        )
-
-        # Act
-        self.data_engine.execute(subscribe)
-
-        # Assert
-        assert self.data_engine.subscribed_order_book_deltas() == [ETHUSDT_BINANCE.id]
-
     def test_execute_subscribe_order_book_deltas_then_adds_handler(self):
         # Arrange
         self.data_engine.register_client(self.binance_client)
@@ -900,7 +904,7 @@ class TestDataEngine:
         self.data_engine.execute(unsubscribe)
 
         # Assert
-        assert self.data_engine.subscribed_order_book_snapshots() == []
+        assert self.data_engine.subscribed_order_book_depth() == []
         assert self.binance_client.subscribed_order_book_deltas() == []
 
     def test_execute_unsubscribe_order_book_at_interval_then_removes_handler(self):
@@ -923,7 +927,7 @@ class TestDataEngine:
 
         self.data_engine.execute(subscribe)
 
-        assert self.binance_client.subscribed_order_book_snapshots() == []
+        assert self.binance_client.subscribed_order_book_depth() == []
         assert self.binance_client.subscribed_order_book_deltas() == [ETHUSDT_BINANCE.id]
 
         unsubscribe = UnsubscribeOrderBook(
@@ -939,8 +943,8 @@ class TestDataEngine:
         self.data_engine.execute(unsubscribe)
 
         # Assert
-        assert self.data_engine.subscribed_order_book_snapshots() == []
-        assert self.binance_client.subscribed_order_book_snapshots() == []
+        assert self.data_engine.subscribed_order_book_depth() == []
+        assert self.binance_client.subscribed_order_book_depth() == []
         assert self.binance_client.subscribed_order_book_deltas() == []
 
     def test_order_book_snapshots_when_book_not_updated_does_not_send_(self):
@@ -1376,6 +1380,41 @@ class TestDataEngine:
         # Assert
         assert self.data_engine.subscribed_quote_ticks() == [ETHUSDT_BINANCE.id]
 
+    def test_execute_subscribe_crypto_spread_quote_ticks_with_aggregation_flag_uses_normal_subscription(
+        self,
+    ):
+        # Arrange
+        deribit_client = BacktestMarketDataClient(
+            client_id=ClientId("DERIBIT"),
+            msgbus=self.msgbus,
+            cache=self.cache,
+            clock=self.clock,
+        )
+        self.data_engine.register_client(deribit_client)
+        deribit_client.start()
+
+        instrument = TestInstrumentProvider.crypto_futures_spread_inverse()
+        self.data_engine.process(instrument)
+
+        subscribe = SubscribeQuoteTicks(
+            client_id=None,
+            venue=instrument.id.venue,
+            instrument_id=instrument.id,
+            command_id=UUID4(),
+            ts_init=self.clock.timestamp_ns(),
+            params={"aggregate_spread_quotes": True},
+        )
+
+        # Act
+        self.data_engine.execute(subscribe)
+
+        # Assert
+        assert instrument.is_spread() is True
+        assert len(instrument.legs()) == 1
+        assert self.data_engine.command_count == 1
+        assert self.data_engine.subscribed_quote_ticks() == [instrument.id]
+        assert deribit_client.subscribed_quote_ticks() == [instrument.id]
+
     def test_execute_unsubscribe_quote_ticks(self):
         # Arrange
         self.data_engine.register_client(self.binance_client)
@@ -1531,6 +1570,85 @@ class TestDataEngine:
         # Assert
         assert self.data_engine.subscribed_trade_ticks() == []
         assert self.binance_client.subscribed_trade_ticks() == []
+
+    def test_subscribe_unsubscribe_hot_paths_use_direct_membership(self):
+        # Arrange
+        client = _GuardedSubscriptionListClient(
+            client_id=ClientId(BINANCE.value),
+            msgbus=self.msgbus,
+            cache=self.cache,
+            clock=self.clock,
+        )
+        self.data_engine.register_client(client)
+        client.start()
+
+        subscribe_order_book = SubscribeOrderBook(
+            book_data_type=OrderBookDelta,
+            client_id=None,  # Will route to the Binance venue
+            venue=BINANCE,
+            instrument_id=ETHUSDT_BINANCE.id,
+            book_type=BookType.L2_MBP,
+            depth=10,
+            managed=True,
+            command_id=UUID4(),
+            ts_init=self.clock.timestamp_ns(),
+        )
+        subscribe_quotes = SubscribeQuoteTicks(
+            client_id=None,  # Will route to the Binance venue
+            venue=BINANCE,
+            instrument_id=ETHUSDT_BINANCE.id,
+            command_id=UUID4(),
+            ts_init=self.clock.timestamp_ns(),
+        )
+        subscribe_trades = SubscribeTradeTicks(
+            client_id=None,  # Will route to the Binance venue
+            venue=BINANCE,
+            instrument_id=ETHUSDT_BINANCE.id,
+            command_id=UUID4(),
+            ts_init=self.clock.timestamp_ns(),
+        )
+        unsubscribe_order_book = UnsubscribeOrderBook(
+            book_data_type=OrderBookDelta,
+            client_id=None,  # Will route to the Binance venue
+            venue=BINANCE,
+            instrument_id=ETHUSDT_BINANCE.id,
+            command_id=UUID4(),
+            ts_init=self.clock.timestamp_ns(),
+        )
+        unsubscribe_quotes = UnsubscribeQuoteTicks(
+            client_id=None,  # Will route to the Binance venue
+            venue=BINANCE,
+            instrument_id=ETHUSDT_BINANCE.id,
+            command_id=UUID4(),
+            ts_init=self.clock.timestamp_ns(),
+        )
+        unsubscribe_trades = UnsubscribeTradeTicks(
+            client_id=None,  # Will route to the Binance venue
+            venue=BINANCE,
+            instrument_id=ETHUSDT_BINANCE.id,
+            command_id=UUID4(),
+            ts_init=self.clock.timestamp_ns(),
+        )
+
+        # Act
+        self.data_engine.execute(subscribe_order_book)
+        self.data_engine.execute(subscribe_quotes)
+        self.data_engine.execute(subscribe_trades)
+
+        # Assert
+        assert client.is_subscribed_order_book_deltas(ETHUSDT_BINANCE.id)
+        assert client.is_subscribed_quote_ticks(ETHUSDT_BINANCE.id)
+        assert client.is_subscribed_trade_ticks(ETHUSDT_BINANCE.id)
+
+        # Act
+        self.data_engine.execute(unsubscribe_order_book)
+        self.data_engine.execute(unsubscribe_quotes)
+        self.data_engine.execute(unsubscribe_trades)
+
+        # Assert
+        assert not client.is_subscribed_order_book_deltas(ETHUSDT_BINANCE.id)
+        assert not client.is_subscribed_quote_ticks(ETHUSDT_BINANCE.id)
+        assert not client.is_subscribed_trade_ticks(ETHUSDT_BINANCE.id)
 
     def test_subscribe_mark_prices_then_subscribes(self):
         # Arrange
@@ -1777,6 +1895,178 @@ class TestDataEngine:
         assert handler1 == [funding_rate]
         assert handler2 == [funding_rate]
 
+    def test_subscribe_instrument_status_then_subscribes(self):
+        # Arrange
+        self.data_engine.register_client(self.binance_client)
+        self.binance_client.start()
+
+        subscribe = SubscribeInstrumentStatus(
+            client_id=None,
+            venue=BINANCE,
+            instrument_id=ETHUSDT_BINANCE.id,
+            command_id=UUID4(),
+            ts_init=self.clock.timestamp_ns(),
+        )
+
+        # Act
+        self.data_engine.execute(subscribe)
+
+        # Assert
+        assert self.data_engine.subscribed_instrument_status() == [ETHUSDT_BINANCE.id]
+
+    def test_unsubscribe_instrument_status_then_unsubscribes(self):
+        # Arrange
+        self.data_engine.register_client(self.binance_client)
+        self.binance_client.start()
+
+        subscribe = SubscribeInstrumentStatus(
+            client_id=None,
+            venue=BINANCE,
+            instrument_id=ETHUSDT_BINANCE.id,
+            command_id=UUID4(),
+            ts_init=self.clock.timestamp_ns(),
+        )
+
+        self.data_engine.execute(subscribe)
+
+        assert self.binance_client.subscribed_instrument_status() == [ETHUSDT_BINANCE.id]
+
+        unsubscribe = UnsubscribeInstrumentStatus(
+            client_id=None,
+            venue=BINANCE,
+            instrument_id=ETHUSDT_BINANCE.id,
+            command_id=UUID4(),
+            ts_init=self.clock.timestamp_ns(),
+        )
+
+        # Act
+        self.data_engine.execute(unsubscribe)
+
+        # Assert
+        assert self.data_engine.subscribed_instrument_status() == []
+        assert self.binance_client.subscribed_instrument_status() == []
+
+    def test_process_instrument_status_when_subscriber_then_caches_and_publishes(self):
+        # Arrange
+        self.data_engine.register_client(self.binance_client)
+        self.binance_client.start()
+
+        handler = []
+        self.msgbus.subscribe(
+            topic=f"data.status.BINANCE.{ETHUSDT_BINANCE.id.symbol}",
+            handler=handler.append,
+        )
+
+        subscribe = SubscribeInstrumentStatus(
+            client_id=None,
+            venue=BINANCE,
+            instrument_id=ETHUSDT_BINANCE.id,
+            command_id=UUID4(),
+            ts_init=self.clock.timestamp_ns(),
+        )
+        self.data_engine.execute(subscribe)
+
+        status = InstrumentStatus(
+            instrument_id=ETHUSDT_BINANCE.id,
+            action=MarketStatusAction.TRADING,
+            ts_event=1,
+            ts_init=2,
+        )
+
+        # Act
+        self.data_engine.process(status)
+
+        # Assert
+        assert handler == [status]
+        assert self.cache.instrument_status(ETHUSDT_BINANCE.id) == status
+        assert self.cache.instrument_statuses(ETHUSDT_BINANCE.id) == [status]
+
+    def test_process_instrument_status_updates_existing_in_cache(self):
+        # Arrange
+        self.data_engine.register_client(self.binance_client)
+        self.binance_client.start()
+
+        subscribe = SubscribeInstrumentStatus(
+            client_id=None,
+            venue=BINANCE,
+            instrument_id=ETHUSDT_BINANCE.id,
+            command_id=UUID4(),
+            ts_init=self.clock.timestamp_ns(),
+        )
+        self.data_engine.execute(subscribe)
+
+        status1 = InstrumentStatus(
+            instrument_id=ETHUSDT_BINANCE.id,
+            action=MarketStatusAction.PRE_OPEN,
+            ts_event=1,
+            ts_init=2,
+        )
+        status2 = InstrumentStatus(
+            instrument_id=ETHUSDT_BINANCE.id,
+            action=MarketStatusAction.TRADING,
+            ts_event=3,
+            ts_init=4,
+        )
+
+        # Act
+        self.data_engine.process(status1)
+        self.data_engine.process(status2)
+
+        # Assert: latest status is returned by the default-index getter
+        assert self.cache.instrument_status(ETHUSDT_BINANCE.id) == status2
+        assert self.cache.instrument_statuses(ETHUSDT_BINANCE.id) == [status2, status1]
+
+    def test_subscribe_instrument_close_then_subscribes(self):
+        # Arrange
+        self.data_engine.register_client(self.binance_client)
+        self.binance_client.start()
+
+        subscribe = SubscribeInstrumentClose(
+            client_id=None,
+            venue=BINANCE,
+            instrument_id=ETHUSDT_BINANCE.id,
+            command_id=UUID4(),
+            ts_init=self.clock.timestamp_ns(),
+        )
+
+        # Act
+        self.data_engine.execute(subscribe)
+
+        # Assert
+        assert self.data_engine.subscribed_instrument_close() == [ETHUSDT_BINANCE.id]
+
+    def test_unsubscribe_instrument_close_then_unsubscribes(self):
+        # Arrange
+        self.data_engine.register_client(self.binance_client)
+        self.binance_client.start()
+
+        subscribe = SubscribeInstrumentClose(
+            client_id=None,
+            venue=BINANCE,
+            instrument_id=ETHUSDT_BINANCE.id,
+            command_id=UUID4(),
+            ts_init=self.clock.timestamp_ns(),
+        )
+
+        self.data_engine.execute(subscribe)
+
+        assert self.binance_client.subscribed_instrument_close() == [ETHUSDT_BINANCE.id]
+
+        unsubscribe = UnsubscribeInstrumentClose(
+            client_id=None,
+            venue=BINANCE,
+            instrument_id=ETHUSDT_BINANCE.id,
+            command_id=UUID4(),
+            ts_init=self.clock.timestamp_ns(),
+        )
+
+        # Act
+        self.data_engine.execute(unsubscribe)
+
+        # Assert
+        assert self.data_engine.subscribed_instrument_close() == []
+        assert self.binance_client.subscribed_instrument_close() == []
+
     def test_subscribe_synthetic_quote_ticks_then_subscribes(self):
         # Arrange
         self.data_engine.register_client(self.binance_client)
@@ -1820,6 +2110,36 @@ class TestDataEngine:
 
         # Assert
         assert self.data_engine.subscribed_synthetic_trades() == [synthetic.id]
+
+    def test_subscribe_synthetic_bars_with_multiple_venue_clients_does_not_raise(self):
+        # Arrange: two real venue clients, no BACKTEST client
+        self.data_engine.register_client(self.binance_client)
+        self.data_engine.register_client(self.bitmex_client)
+        self.binance_client.start()
+        self.bitmex_client.start()
+
+        synthetic = TestInstrumentProvider.synthetic_instrument()
+        self.cache.add_synthetic(synthetic)
+
+        bar_spec = BarSpecification(1, BarAggregation.MINUTE, PriceType.MID)
+        bar_type = BarType(synthetic.id, bar_spec)
+
+        handler = []
+        self.msgbus.subscribe(topic=f"data.bars.{bar_type}", handler=handler.append)
+
+        subscribe = SubscribeBars(
+            client_id=None,
+            venue=Venue("SYNTH"),
+            bar_type=bar_type,
+            command_id=UUID4(),
+            ts_init=self.clock.timestamp_ns(),
+        )
+
+        # Act
+        self.data_engine.execute(subscribe)
+
+        # Assert
+        assert self.data_engine.command_count == 1
 
     def test_process_trade_tick_when_subscriber_then_sends_to_registered_handler(self):
         # Arrange
@@ -2433,6 +2753,63 @@ class TestDataEngine:
         assert len(handler) == 1
         assert handler[0].data == []  # Data is published to message bus, not in response
         assert instruments_received == [BTCUSDT_BINANCE, ETHUSDT_BINANCE]
+
+    def test_request_option_instrument_with_tick_scheme_sets_tick_scheme_on_instrument(self):
+        # Arrange
+        option_instrument = TestInstrumentProvider.aapl_option()
+        assert option_instrument.tick_scheme_name is None
+
+        # Create mock market data client with the instrument
+        client = MockMarketDataClient(
+            client_id=ClientId("MOCK"),
+            msgbus=self.msgbus,
+            cache=self.cache,
+            clock=self.clock,
+        )
+        client.instrument = option_instrument
+        self.data_engine.register_client(client)
+
+        handler = []
+        instruments_received = []
+
+        # Subscribe to instrument topic to receive the instrument
+        self.msgbus.subscribe(
+            topic=f"data.instrument.{option_instrument.id.venue}.{option_instrument.id.symbol}",
+            handler=instruments_received.append,
+        )
+
+        # Create request with tick_scheme_name in params
+        tick_scheme_name = "FIXED_PRECISION_2"
+        request = RequestInstrument(
+            instrument_id=option_instrument.id,
+            start=None,
+            end=None,
+            client_id=client.id,
+            venue=None,
+            callback=handler.append,
+            request_id=UUID4(),
+            ts_init=self.clock.timestamp_ns(),
+            params={"instrument_properties": {"tick_scheme_name": tick_scheme_name}},
+        )
+
+        # Act
+        self.msgbus.request(endpoint="DataEngine.request", request=request)
+
+        # Assert
+        assert self.data_engine.request_count == 1
+        assert len(instruments_received) == 1
+        instrument_from_cache = self.cache.instrument(option_instrument.id)
+        assert instrument_from_cache is not None
+        assert instrument_from_cache.tick_scheme_name == tick_scheme_name
+        # Verify tick scheme is functional - FIXED_PRECISION_2 rounds to 2 decimal places (0.01 increments)
+        # For value 100.123, next_bid_price should round down to 100.12 (nearest tick below)
+        result = instrument_from_cache.next_bid_price(100.123)
+        assert result is not None
+        assert result == Price.from_str("100.12")
+        # Verify it also works for ask prices
+        ask_result = instrument_from_cache.next_ask_price(100.127)
+        assert ask_result is not None
+        assert ask_result == Price.from_str("100.13")  # Rounds up to nearest tick
 
     @pytest.mark.skipif(sys.platform == "win32", reason="Failing on windows")
     def test_request_instrument_when_catalog_registered(self):
@@ -3522,6 +3899,80 @@ class TestDataEngine:
             pd.Timestamp("2024-3-25"),
         )
 
+    def test_long_request_quote_ticks_preserves_request_params(self):
+        # Arrange
+        self.data_engine.register_client(self.mock_market_data_client)
+
+        start = pd.Timestamp("2024-01-15T00:00:00", tz="UTC")
+        end = pd.Timestamp("2024-01-15T00:10:00", tz="UTC")
+        self.clock.advance_time((end + pd.Timedelta(seconds=1)).value)
+
+        handler = []
+        params = {
+            "durations_seconds": [600],
+            "time_range_generator": "",
+            "update_catalog": False,
+        }
+        request = RequestQuoteTicks(
+            instrument_id=ETHUSDT_BINANCE.id,
+            start=start,
+            end=end,
+            limit=0,
+            client_id=None,
+            venue=ETHUSDT_BINANCE.venue,
+            callback=handler.append,
+            request_id=UUID4(),
+            ts_init=self.clock.timestamp_ns(),
+            params=params,
+            correlation_id=None,
+        )
+
+        # Act
+        self.msgbus.request(endpoint="DataEngine.request", request=request)
+
+        # Assert
+        assert len(handler) == 1
+        assert request.start == start
+        assert request.end == end
+        assert request.params == params
+        assert handler[0].start == start
+        assert handler[0].end == end
+        assert handler[0].params == params
+
+    def test_long_request_data_count_accumulates_without_mutating_request(self):
+        # Arrange
+        self.data_engine.register_client(self.mock_market_data_client)
+
+        start = pd.Timestamp("2024-01-15T00:00:00", tz="UTC")
+        end = pd.Timestamp("2024-01-15T00:10:00", tz="UTC")
+        self.clock.advance_time((end + pd.Timedelta(seconds=1)).value)
+
+        handler = []
+        params = {
+            "durations_seconds": [300],
+            "time_range_generator": "",
+            "update_catalog": False,
+        }
+        request = RequestQuoteTicks(
+            instrument_id=ETHUSDT_BINANCE.id,
+            start=start,
+            end=end,
+            limit=0,
+            client_id=None,
+            venue=ETHUSDT_BINANCE.venue,
+            callback=handler.append,
+            request_id=UUID4(),
+            ts_init=self.clock.timestamp_ns(),
+            params=params,
+        )
+
+        # Act
+        self.msgbus.request(endpoint="DataEngine.request", request=request)
+
+        # Assert
+        assert "data_count" not in request.params
+        assert request.params == params
+
     def test_request_trade_ticks_reaches_client(self):
         # Arrange
         self.data_engine.register_client(self.mock_market_data_client)
@@ -3663,6 +4114,46 @@ class TestDataEngine:
             pd.Timestamp("2024-3-25"),
         )
 
+    def test_request_funding_rates_reaches_client(self):
+        # Arrange
+        self.data_engine.register_client(self.mock_market_data_client)
+        funding_rate = FundingRateUpdate(
+            instrument_id=ETHUSDT_BINANCE.id,
+            rate=Decimal("0.0001"),
+            ts_event=0,
+            ts_init=0,
+        )
+        self.mock_market_data_client.funding_rates = [funding_rate]
+
+        # Subscribe to funding rates on message bus
+        rates_received = []
+        topic = f"historical.data.funding_rates.{ETHUSDT_BINANCE.venue}.{ETHUSDT_BINANCE.id.symbol}"
+        self.msgbus.subscribe(topic=topic, handler=rates_received.append)
+
+        handler = []
+        request = RequestFundingRates(
+            instrument_id=ETHUSDT_BINANCE.id,
+            start=None,
+            end=None,
+            limit=0,
+            client_id=None,
+            venue=ETHUSDT_BINANCE.venue,
+            callback=handler.append,
+            request_id=UUID4(),
+            ts_init=self.clock.timestamp_ns(),
+            params={"update_catalog": True},
+        )
+
+        # Act
+        self.msgbus.request(endpoint="DataEngine.request", request=request)
+
+        # Assert
+        assert self.data_engine.request_count == 1
+        assert len(handler) == 1
+        assert handler[0].data == []  # Response data should be empty
+        assert len(rates_received) == 1  # Rate should flow through message bus
+        assert rates_received[0] == funding_rate
+
     def test_request_order_book_depth_reaches_client(self):
         # Arrange
         self.data_engine.register_client(self.mock_market_data_client)
@@ -3701,16 +4192,654 @@ class TestDataEngine:
         assert len(depths_received) == 1  # Depth should flow through message bus
         assert depths_received[0] == depth
 
+    def test_request_order_book_deltas_reaches_client(self):
+        # Arrange
+        self.data_engine.register_client(self.mock_market_data_client)
+        from nautilus_trader.test_kit.stubs.data import TestDataStubs
+
+        deltas = OrderBookDeltas(
+            instrument_id=ETHUSDT_BINANCE.id,
+            deltas=[TestDataStubs.order_book_delta(instrument_id=ETHUSDT_BINANCE.id)],
+        )
+        self.mock_market_data_client.order_book_deltas = [deltas]
+
+        # Subscribe to order book deltas on message bus
+        deltas_received = []
+        topic = f"historical.data.book.deltas.{ETHUSDT_BINANCE.venue}.{ETHUSDT_BINANCE.id.symbol.topic()}"
+        self.msgbus.subscribe(topic=topic, handler=deltas_received.append)
+
+        handler = []
+        request = RequestOrderBookDeltas(
+            instrument_id=ETHUSDT_BINANCE.id,
+            start=None,
+            end=None,
+            limit=0,
+            client_id=None,  # Will route to the Binance venue
+            venue=ETHUSDT_BINANCE.venue,
+            callback=handler.append,
+            request_id=UUID4(),
+            ts_init=self.clock.timestamp_ns(),
+            params={"update_catalog": False},
+        )
+
+        # Act
+        self.msgbus.request(endpoint="DataEngine.request", request=request)
+
+        # Assert
+        assert self.data_engine.request_count == 1
+        assert len(handler) == 1
+        assert handler[0].data == []  # Response data should be empty
+        assert len(deltas_received) == 1  # Deltas should flow through message bus
+        assert deltas_received[0] == deltas
+
+    def test_request_order_book_deltas_with_start_date_floors_to_day_start(self):
+        # Arrange
+        self.data_engine.register_client(self.mock_market_data_client)
+
+        start_date = pd.Timestamp("2024-01-15T14:30:00", tz="UTC")
+        handler = []
+        request = RequestOrderBookDeltas(
+            instrument_id=ETHUSDT_BINANCE.id,
+            start=start_date,
+            end=None,
+            limit=0,
+            client_id=None,
+            venue=ETHUSDT_BINANCE.venue,
+            callback=handler.append,
+            request_id=UUID4(),
+            ts_init=self.clock.timestamp_ns(),
+            params={"update_catalog": False},
+        )
+
+        # Act
+        self.msgbus.request(endpoint="DataEngine.request", request=request)
+
+        # Assert
+        assert self.data_engine.request_count == 1
+        assert len(handler) == 1
+        assert request.params == {"update_catalog": False}
+        assert request.start == start_date
+        assert handler[0].start == pd.Timestamp("2024-01-15T00:00:00", tz="UTC")
+        assert handler[0].params == {"update_catalog": False}
+
+    def test_request_order_book_deltas_with_from_day_start_false_preserves_start_date(self):
+        # Arrange
+        self.data_engine.register_client(self.mock_market_data_client)
+
+        start_date = pd.Timestamp("2024-01-15T14:30:00", tz="UTC")
+        handler = []
+        request = RequestOrderBookDeltas(
+            instrument_id=ETHUSDT_BINANCE.id,
+            start=start_date,
+            end=None,
+            limit=0,
+            client_id=None,
+            venue=ETHUSDT_BINANCE.venue,
+            callback=handler.append,
+            request_id=UUID4(),
+            ts_init=self.clock.timestamp_ns(),
+            params={"update_catalog": False, "from_day_start": False},
+        )
+
+        # Act
+        self.msgbus.request(endpoint="DataEngine.request", request=request)
+
+        # Assert
+        assert self.data_engine.request_count == 1
+        assert len(handler) == 1
+        assert request.params == {"update_catalog": False, "from_day_start": False}
+        assert request.start == start_date
+        assert handler[0].start == start_date
+        assert handler[0].params == {"update_catalog": False, "from_day_start": False}
+
+    def test_process_order_book_deltas_with_historical_flag(self):
+        # Arrange
+        self.data_engine.register_client(self.binance_client)
+        self.binance_client.start()
+
+        self.data_engine.process(ETHUSDT_BINANCE)
+
+        historical_handler = []
+        live_handler = []
+
+        self.msgbus.subscribe(
+            topic="historical.data.book.deltas.BINANCE.ETHUSDT",
+            handler=historical_handler.append,
+        )
+        self.msgbus.subscribe(
+            topic="data.book.deltas.BINANCE.ETHUSDT",
+            handler=live_handler.append,
+        )
+
+        subscribe = SubscribeOrderBook(
+            book_data_type=OrderBookDelta,
+            client_id=None,
+            venue=BINANCE,
+            instrument_id=ETHUSDT_BINANCE.id,
+            book_type=BookType.L2_MBP,
+            depth=10,
+            managed=True,
+            command_id=UUID4(),
+            ts_init=self.clock.timestamp_ns(),
+        )
+
+        self.data_engine.execute(subscribe)
+
+        deltas = TestDataStubs.order_book_deltas(ETHUSDT_BINANCE.id)
+
+        # Act - Process as historical data via process_historical
+        # Historical data flows through process_historical, which calls _handle_data with historical=True
+        self.data_engine.process_historical(deltas)
+
+        # Assert
+        # Historical data should be published to historical topic
+        assert len(historical_handler) == 1
+        assert historical_handler[0].instrument_id == ETHUSDT_BINANCE.id
+        assert isinstance(historical_handler[0], OrderBookDeltas)
+        # Live handler should not receive historical data
+        assert len(live_handler) == 0
+
+    def test_process_order_book_deltas_with_f_last_flag_in_middle_of_batch(self):
+        # Arrange
+        self.data_engine.register_client(self.binance_client)
+        self.binance_client.start()
+
+        self.data_engine.process(ETHUSDT_BINANCE)
+
+        handler = []
+        self.msgbus.subscribe(
+            topic="data.book.deltas.BINANCE.ETHUSDT",
+            handler=handler.append,
+        )
+
+        subscribe = SubscribeOrderBook(
+            book_data_type=OrderBookDelta,
+            client_id=ClientId(BINANCE.value),
+            venue=BINANCE,
+            instrument_id=ETHUSDT_BINANCE.id,
+            book_type=BookType.L3_MBO,
+            depth=5,
+            managed=True,
+            command_id=UUID4(),
+            ts_init=self.clock.timestamp_ns(),
+        )
+
+        self.data_engine.execute(subscribe)
+
+        # Create deltas with F_LAST flag in the middle
+        delta1 = TestDataStubs.order_book_delta(
+            instrument_id=ETHUSDT_BINANCE.id,
+            flags=0,
+            ts_init=1,
+        )
+        delta2 = TestDataStubs.order_book_delta(
+            instrument_id=ETHUSDT_BINANCE.id,
+            flags=RecordFlag.F_LAST,
+            ts_init=2,
+        )
+        delta3 = TestDataStubs.order_book_delta(
+            instrument_id=ETHUSDT_BINANCE.id,
+            flags=0,
+            ts_init=3,
+        )
+
+        deltas_with_f_last = OrderBookDeltas(
+            instrument_id=ETHUSDT_BINANCE.id,
+            deltas=[delta1, delta2, delta3],
+        )
+
+        # Act
+        self.data_engine.process(deltas_with_f_last)
+
+        # Assert
+        # When buffering is disabled, all deltas are published immediately
+        # When buffering is enabled, only deltas up to and including F_LAST are published
+        # Since default config has buffer_deltas=False, all deltas should be published
+        assert len(handler) == 1
+        assert handler[0].instrument_id == ETHUSDT_BINANCE.id
+        assert isinstance(handler[0], OrderBookDeltas)
+        # All deltas should be published when buffering is disabled
+        assert len(handler[0].deltas) == 3
+        assert handler[0].deltas[0] == delta1
+        assert handler[0].deltas[1] == delta2
+        assert handler[0].deltas[2] == delta3
+
+    def test_handle_order_book_deltas_snapshot_replay_with_snapshot_at_day_start(self):
+        # Arrange
+        self.data_engine.register_client(self.binance_client)
+        self.binance_client.start()
+
+        self.data_engine.process(ETHUSDT_BINANCE)
+
+        # Create a snapshot delta at start of UTC day
+        day_start = pd.Timestamp("2024-01-15T00:00:00", tz="UTC")
+        day_start_ns = day_start.value
+
+        snapshot_delta = TestDataStubs.order_book_delta(
+            instrument_id=ETHUSDT_BINANCE.id,
+            flags=RecordFlag.F_SNAPSHOT,
+            ts_init=int(day_start_ns),
+        )
+
+        # Create deltas after the original start date
+        original_start = pd.Timestamp("2024-01-15T10:00:00", tz="UTC")
+        original_start_ns = original_start.value
+
+        delta1 = TestDataStubs.order_book_delta(
+            instrument_id=ETHUSDT_BINANCE.id,
+            flags=0,
+            ts_init=int(day_start_ns + 1_000_000_000),  # 1 second after day start
+        )
+        delta2 = TestDataStubs.order_book_delta(
+            instrument_id=ETHUSDT_BINANCE.id,
+            flags=0,
+            ts_init=int(original_start_ns + 1_000_000_000),  # After original start
+        )
+
+        deltas_obj1 = OrderBookDeltas(
+            instrument_id=ETHUSDT_BINANCE.id,
+            deltas=[snapshot_delta, delta1],
+        )
+
+        deltas_obj2 = OrderBookDeltas(
+            instrument_id=ETHUSDT_BINANCE.id,
+            deltas=[delta2],
+        )
+
+        response = DataResponse(
+            client_id=None,
+            venue=BINANCE,
+            data_type=DataType(OrderBookDeltas),
+            data=[deltas_obj1, deltas_obj2],
+            correlation_id=UUID4(),
+            response_id=UUID4(),
+            start=day_start,
+            end=pd.Timestamp("2024-01-15T23:59:59", tz="UTC"),
+            ts_init=self.clock.timestamp_ns(),
+            params={"book_type": BookType.L2_MBP},
+        )
+        self.data_engine._request_workflows[response.correlation_id] = SimpleNamespace(
+            original_start_date=original_start,
+        )
+
+        # Act
+        result = self.data_engine._handle_order_book_deltas_snapshot_replay(
+            response.correlation_id,
+            response.data,
+            response.params,
+        )
+
+        # Assert
+        # Result data should be filtered to contain evolved snapshot
+        assert len(result) == 1
+        assert response.params == {"book_type": BookType.L2_MBP}
+        # First item should be the evolved snapshot (not the original snapshot)
+        first_item = result[0]
+        assert isinstance(first_item, OrderBookDeltas)
+        # Should contain a Clear delta followed by Add deltas (snapshot format)
+        assert len(first_item.deltas) > 0
+        # First delta should be a Clear (snapshot format)
+        assert first_item.deltas[0].action == BookAction.CLEAR
+
+    def test_handle_order_book_deltas_snapshot_replay_without_snapshot_skips_replay(self):
+        # Arrange
+        self.data_engine.register_client(self.binance_client)
+        self.binance_client.start()
+
+        self.data_engine.process(ETHUSDT_BINANCE)
+
+        # Create deltas without snapshot flag
+        delta1 = TestDataStubs.order_book_delta(
+            instrument_id=ETHUSDT_BINANCE.id,
+            flags=0,
+        )
+
+        deltas_obj = OrderBookDeltas(
+            instrument_id=ETHUSDT_BINANCE.id,
+            deltas=[delta1],
+        )
+
+        response = DataResponse(
+            client_id=None,
+            venue=BINANCE,
+            data_type=DataType(OrderBookDeltas),
+            data=[deltas_obj],
+            correlation_id=UUID4(),
+            response_id=UUID4(),
+            start=pd.Timestamp("2024-01-15T00:00:00", tz="UTC"),
+            end=pd.Timestamp("2024-01-15T23:59:59", tz="UTC"),
+            ts_init=self.clock.timestamp_ns(),
+            params={"book_type": BookType.L2_MBP},
+        )
+        self.data_engine._request_workflows[response.correlation_id] = SimpleNamespace(
+            original_start_date=pd.Timestamp("2024-01-15T10:00:00", tz="UTC"),
+        )
+
+        original_data = response.data.copy()
+
+        # Act
+        result = self.data_engine._handle_order_book_deltas_snapshot_replay(
+            response.correlation_id,
+            response.data,
+            response.params,
+        )
+
+        # Assert
+        # Data should remain unchanged (no snapshot replay)
+        assert result == original_data
+        assert response.params == {"book_type": BookType.L2_MBP}
+
+    def test_handle_order_book_deltas_snapshot_replay_without_original_start_date_skips_replay(
+        self,
+    ):
+        # Arrange
+        self.data_engine.register_client(self.binance_client)
+        self.binance_client.start()
+
+        self.data_engine.process(ETHUSDT_BINANCE)
+
+        snapshot_delta = TestDataStubs.order_book_delta(
+            instrument_id=ETHUSDT_BINANCE.id,
+            flags=RecordFlag.F_SNAPSHOT,
+        )
+
+        deltas_obj = OrderBookDeltas(
+            instrument_id=ETHUSDT_BINANCE.id,
+            deltas=[snapshot_delta],
+        )
+
+        response = DataResponse(
+            client_id=None,
+            venue=BINANCE,
+            data_type=DataType(OrderBookDeltas),
+            data=[deltas_obj],
+            correlation_id=UUID4(),
+            response_id=UUID4(),
+            start=pd.Timestamp("2024-01-15T00:00:00", tz="UTC"),
+            end=pd.Timestamp("2024-01-15T23:59:59", tz="UTC"),
+            ts_init=self.clock.timestamp_ns(),
+            params={
+                "book_type": BookType.L2_MBP,
+            },
+        )
+
+        original_data = response.data.copy()
+
+        # Act
+        result = self.data_engine._handle_order_book_deltas_snapshot_replay(
+            response.correlation_id,
+            response.data,
+            response.params,
+        )
+
+        # Assert
+        # Data should remain unchanged (no original_start_date in params)
+        assert result == original_data
+        assert response.params == {"book_type": BookType.L2_MBP}
+
+    def test_aggregated_bars_rejection_cleans_up_workflow_state(self):
+        # Arrange
+        self.data_engine.register_client(self.mock_market_data_client)
+
+        bar_type = BarType.from_str("ETHUSDT-BINANCE.BINANCE-1-MINUTE-LAST-EXTERNAL")
+
+        # Pre-populate a running aggregator so the request is rejected
+        self.data_engine._bar_aggregators[(bar_type, None)] = SimpleNamespace(is_running=True)
+
+        handler = []
+        request = RequestBars(
+            bar_type=bar_type,
+            start=pd.Timestamp("2024-01-15T00:00:00", tz="UTC"),
+            end=pd.Timestamp("2024-01-15T01:00:00", tz="UTC"),
+            limit=0,
+            client_id=None,
+            venue=ETHUSDT_BINANCE.venue,
+            callback=handler.append,
+            request_id=UUID4(),
+            ts_init=self.clock.timestamp_ns(),
+            params={
+                "bar_types": (bar_type,),
+                "update_subscriptions": True,
+                "update_catalog": False,
+            },
+        )
+
+        # Act
+        self.msgbus.request(endpoint="DataEngine.request", request=request)
+
+        # Assert
+        assert request.id not in self.data_engine._request_workflows
+        assert request.id not in self.data_engine._requests
+        assert not self.msgbus.is_pending_request(request.id)
+        assert len(handler) == 0
+
+    def test_request_order_book_snapshot_without_client_cleans_up_workflow_state(self):
+        # Arrange
+        handler = []
+        request = RequestOrderBookSnapshot(
+            instrument_id=ETHUSDT_BINANCE.id,
+            limit=1,
+            client_id=None,
+            venue=BINANCE,
+            callback=handler.append,
+            request_id=UUID4(),
+            ts_init=self.clock.timestamp_ns(),
+            params=None,
+        )
+
+        # Act
+        self.msgbus.request(endpoint="DataEngine.request", request=request)
+
+        # Assert
+        assert request.id not in self.data_engine._request_workflows
+        assert request.id not in self.data_engine._requests
+        assert not self.msgbus.is_pending_request(request.id)
+        assert len(handler) == 0
+
+    def test_request_quote_ticks_with_incompatible_dates_cleans_up_workflow_state(self):
+        # Arrange
+        self.clock.advance_time(pd.Timestamp("2024-01-03T00:00:00", tz="UTC").value)
+
+        handler = []
+        request = RequestQuoteTicks(
+            instrument_id=ETHUSDT_BINANCE.id,
+            start=pd.Timestamp("2024-01-02T00:00:00", tz="UTC"),
+            end=pd.Timestamp("2024-01-01T00:00:00", tz="UTC"),
+            limit=0,
+            client_id=None,
+            venue=BINANCE,
+            callback=handler.append,
+            request_id=UUID4(),
+            ts_init=self.clock.timestamp_ns(),
+            params=None,
+        )
+
+        # Act
+        self.msgbus.request(endpoint="DataEngine.request", request=request)
+
+        # Assert
+        assert request.id not in self.data_engine._request_workflows
+        assert request.id not in self.data_engine._requests
+        assert not self.msgbus.is_pending_request(request.id)
+        assert len(handler) == 0
+
+    def test_aggregated_bars_with_incompatible_dates_cleans_up_aggregator_state(self):
+        # Arrange
+        self.data_engine.register_client(self.mock_market_data_client)
+        self.clock.advance_time(pd.Timestamp("2024-01-03T00:00:00", tz="UTC").value)
+
+        bar_spec = BarSpecification(1, BarAggregation.MINUTE, PriceType.LAST)
+        bar_type = BarType(ETHUSDT_BINANCE.id, bar_spec, AggregationSource.INTERNAL)
+
+        handler = []
+        request = RequestTradeTicks(
+            instrument_id=ETHUSDT_BINANCE.id,
+            start=pd.Timestamp("2024-01-02T00:00:00", tz="UTC"),
+            end=pd.Timestamp("2024-01-01T00:00:00", tz="UTC"),
+            limit=0,
+            client_id=None,
+            venue=BINANCE,
+            callback=handler.append,
+            request_id=UUID4(),
+            ts_init=self.clock.timestamp_ns(),
+            params={
+                "bar_types": (bar_type,),
+                "update_subscriptions": False,
+                "update_catalog": False,
+            },
+        )
+
+        # Act
+        self.msgbus.request(endpoint="DataEngine.request", request=request)
+
+        # Assert
+        assert request.id not in self.data_engine._request_workflows
+        assert request.id not in self.data_engine._requests
+        assert request.id not in self.data_engine._bar_types_params
+        assert self.data_engine._bar_aggregators == {}
+        assert not self.msgbus.is_pending_request(request.id)
+        assert len(handler) == 0
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="Failing on windows")
+    def test_request_instrument_catalog_miss_cleans_up_workflow_state(self):
+        # Arrange
+        catalog = setup_catalog(protocol="file", path=self.tmp_path / "catalog")
+        catalog.write_data([ETHUSDT_BINANCE])
+        self.data_engine.register_catalog(catalog)
+
+        start = unix_nanos_to_dt(ETHUSDT_BINANCE.ts_init + 1)
+        end = unix_nanos_to_dt(ETHUSDT_BINANCE.ts_init + 2)
+        self.clock.advance_time(ETHUSDT_BINANCE.ts_init + 3)
+
+        handler = []
+        request = RequestInstrument(
+            instrument_id=ETHUSDT_BINANCE.id,
+            start=start,
+            end=end,
+            client_id=None,
+            venue=BINANCE,
+            callback=handler.append,
+            request_id=UUID4(),
+            ts_init=self.clock.timestamp_ns(),
+            params=None,
+        )
+
+        # Act
+        self.msgbus.request(endpoint="DataEngine.request", request=request)
+
+        # Assert
+        assert request.id not in self.data_engine._request_workflows
+        assert request.id not in self.data_engine._requests
+        assert not self.msgbus.is_pending_request(request.id)
+        assert len(handler) == 0
+
+    def test_request_join_missing_child_cleans_up_group_state(self):
+        # Arrange
+        first_request = RequestQuoteTicks(
+            instrument_id=ETHUSDT_BINANCE.id,
+            start=None,
+            end=None,
+            limit=0,
+            client_id=None,
+            venue=BINANCE,
+            callback=None,
+            request_id=UUID4(),
+            ts_init=self.clock.timestamp_ns(),
+            params={"join_request": True},
+        )
+        missing_request_id = UUID4()
+        join_handler = []
+        join_request = RequestJoin(
+            request_ids=(first_request.id, missing_request_id),
+            start=None,
+            end=None,
+            callback=join_handler.append,
+            request_id=UUID4(),
+            ts_init=self.clock.timestamp_ns(),
+            params=None,
+        )
+
+        # Act
+        self.msgbus.request(endpoint="DataEngine.request", request=first_request)
+        self.msgbus.request(endpoint="DataEngine.request", request=join_request)
+
+        # Assert
+        assert self.data_engine._request_workflows == {}
+        assert self.data_engine._requests == {}
+        assert self.data_engine._request_group_n_components == {}
+        assert self.data_engine._request_group_parent_request == {}
+        assert self.data_engine._request_group_parent_request_id == {}
+        assert self.data_engine._request_group_responses == {}
+        assert self.data_engine._parent_join_request_id == {}
+        assert not self.msgbus.is_pending_request(join_request.id)
+        assert len(join_handler) == 0
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="Failing on windows")
+    def test_request_join_with_instruments_uses_grouped_workflow_state(self):
+        # Arrange
+        catalog = setup_catalog(protocol="file", path=self.tmp_path / "catalog")
+        catalog.write_data([BTCUSDT_BINANCE, ETHUSDT_BINANCE])
+        self.data_engine.register_catalog(catalog)
+        self.clock.advance_time(max(BTCUSDT_BINANCE.ts_init, ETHUSDT_BINANCE.ts_init) + 1)
+
+        join_handler = []
+
+        first_request = RequestInstrument(
+            instrument_id=BTCUSDT_BINANCE.id,
+            start=None,
+            end=None,
+            client_id=None,
+            venue=BINANCE,
+            callback=None,
+            request_id=UUID4(),
+            ts_init=self.clock.timestamp_ns(),
+            params={"join_request": True},
+        )
+        second_request = RequestInstrument(
+            instrument_id=ETHUSDT_BINANCE.id,
+            start=None,
+            end=None,
+            client_id=None,
+            venue=BINANCE,
+            callback=None,
+            request_id=UUID4(),
+            ts_init=self.clock.timestamp_ns(),
+            params={"join_request": True},
+        )
+        join_request = RequestJoin(
+            request_ids=(first_request.id, second_request.id),
+            start=None,
+            end=None,
+            callback=join_handler.append,
+            request_id=UUID4(),
+            ts_init=self.clock.timestamp_ns(),
+            params=None,
+        )
+
+        # Act
+        self.msgbus.request(endpoint="DataEngine.request", request=first_request)
+        self.msgbus.request(endpoint="DataEngine.request", request=second_request)
+        self.msgbus.request(endpoint="DataEngine.request", request=join_request)
+
+        # Assert
+        assert len(join_handler) == 1
+        assert join_handler[0].data == []
+        assert self.data_engine._request_workflows == {}
+        assert self.data_engine._requests == {}
+
     def test_request_aggregated_bars_with_bars(self):
         # Arrange
         loader = DatabentoDataLoader()
+        # Data files carry both ESU4 and NQU4 records; seed both for the read.
+        loader.set_price_precision("ESU4", 2)
+        loader.set_price_precision("NQU4", 2)
 
         path = (
             TEST_DATA_DIR
             / "databento"
             / "historical_bars_catalog"
             / "databento"
-            / "futures_ohlcv-1m_2024-07-01T23h40_2024-07-02T00h10.dbn.zst"
+            / "futures_ohlcv-1m_2024-07-01T23-40_2024-07-02T00-10.dbn.zst"
         )
         data = loader.from_dbn_file(path, as_legacy_cython=True)
 
@@ -3857,13 +4986,16 @@ class TestDataEngine:
     def test_request_aggregated_bars_with_quotes(self):
         # Arrange
         loader = DatabentoDataLoader()
+        # Data files carry both ESU4 and NQU4 records; seed both for the read.
+        loader.set_price_precision("ESU4", 2)
+        loader.set_price_precision("NQU4", 2)
 
         path = (
             TEST_DATA_DIR
             / "databento"
             / "historical_bars_catalog"
             / "databento"
-            / "futures_mbp-1_2024-07-01T23h58_2024-07-02T00h02.dbn.zst"
+            / "futures_mbp-1_2024-07-01T23-58_2024-07-02T00-02.dbn.zst"
         )
         data = loader.from_dbn_file(path, as_legacy_cython=True)
 
@@ -3947,7 +5079,7 @@ class TestDataEngine:
             Price.from_str("5528.75"),
             Price.from_str("5528.50"),
             Price.from_str("5528.75"),
-            Quantity.from_int(5777),
+            Quantity.from_int(5806),
             1719878400000000000,
             1719878400000000000,
         )
@@ -3978,13 +5110,16 @@ class TestDataEngine:
     def test_request_aggregated_bars_with_trades(self):
         # Arrange
         loader = DatabentoDataLoader()
+        # Data files carry both ESU4 and NQU4 records; seed both for the read.
+        loader.set_price_precision("ESU4", 2)
+        loader.set_price_precision("NQU4", 2)
 
         path = (
             TEST_DATA_DIR
             / "databento"
             / "historical_bars_catalog"
             / "databento"
-            / "futures_trades_2024-07-01T23h58_2024-07-02T00h02.dbn.zst"
+            / "futures_trades_2024-07-01T23-58_2024-07-02T00-02.dbn.zst"
         )
         data = loader.from_dbn_file(path, as_legacy_cython=True)
 
@@ -4065,10 +5200,10 @@ class TestDataEngine:
         expected_last_1_minute_bar = Bar(
             BarType.from_str("ESU4.GLBX-1-MINUTE-LAST-INTERNAL"),
             Price.from_str("5528.50"),
-            Price.from_str("5529.00"),
+            Price.from_str("5528.75"),
             Price.from_str("5528.50"),
-            Price.from_str("5529.00"),
-            Quantity.from_int(31),
+            Price.from_str("5528.75"),
+            Quantity.from_int(23),
             1719878400000000000,
             1719878400000000000,
         )
@@ -4076,10 +5211,10 @@ class TestDataEngine:
         expected_last_2_minute_bar = Bar(
             BarType.from_str("ESU4.GLBX-2-MINUTE-LAST-INTERNAL"),
             Price.from_str("5528.75"),
-            Price.from_str("5529.00"),
+            Price.from_str("5528.75"),
             Price.from_str("5528.50"),
-            Price.from_str("5529.00"),
-            Quantity.from_int(50),
+            Price.from_str("5528.75"),
+            Quantity.from_int(41),
             1719878400000000000,
             1719878400000000000,
         )
@@ -4095,6 +5230,399 @@ class TestDataEngine:
         # Verify last bars match expected values
         assert bars_1_received[-1] == expected_last_1_minute_bar
         assert bars_2_received[-1] == expected_last_2_minute_bar
+
+    def test_request_aggregated_bars_does_not_pollute_subscription_aggregator(self):
+        # Test that requesting aggregated bars (with update_subscriptions=False) for the same
+        # bar type as an active subscription does not pollute/interfere with the subscription aggregator.
+        # Previously, the request would have polluted the live aggregation.
+        # Arrange
+        loader = DatabentoDataLoader()
+        # Data files carry both ESU4 and NQU4 records; seed both for the read.
+        loader.set_price_precision("ESU4", 2)
+        loader.set_price_precision("NQU4", 2)
+
+        path = (
+            TEST_DATA_DIR
+            / "databento"
+            / "historical_bars_catalog"
+            / "databento"
+            / "futures_trades_2024-07-01T23-58_2024-07-02T00-02.dbn.zst"
+        )
+        data = loader.from_dbn_file(path, as_legacy_cython=True)
+
+        definition_path = (
+            TEST_DATA_DIR
+            / "databento"
+            / "historical_bars_catalog"
+            / "databento"
+            / "futures_definition.dbn.zst"
+        )
+        definition = loader.from_dbn_file(definition_path, as_legacy_cython=True)
+
+        catalog = setup_catalog(protocol="file", path=self.tmp_path / "catalog")
+        catalog.write_data(data)
+        catalog.write_data(definition)
+
+        self.data_engine.register_catalog(catalog)
+        self.data_engine.process(definition[0])
+
+        symbol_id = InstrumentId.from_str("ESU4.GLBX")
+        bar_type = BarType.from_str("ESU4.GLBX-1-MINUTE-LAST-INTERNAL")
+
+        # Get trade ticks from the data
+        trade_ticks = [d for d in data if isinstance(d, TradeTick)]
+        assert len(trade_ticks) > 0, "No trade ticks found in test data"
+
+        # Create a client for GLBX venue
+        glbx_client = BacktestMarketDataClient(
+            client_id=ClientId("GLBX"),
+            msgbus=self.msgbus,
+            cache=self.cache,
+            clock=self.clock,
+        )
+        self.data_engine.register_client(glbx_client)
+        glbx_client.start()
+
+        utc_now = pd.Timestamp("2024-07-02T00:00:01")
+        self.clock.advance_time(utc_now.value)
+
+        start = utc_now - pd.Timedelta(minutes=2, seconds=1)
+        end = utc_now - pd.Timedelta(minutes=0, seconds=0)
+
+        # Run 1: Subscribe to bars and process ticks WITHOUT a request
+        subscription_bars_without_request = []
+
+        self.msgbus.subscribe(
+            topic=f"data.bars.{bar_type.standard()}",
+            handler=subscription_bars_without_request.append,
+        )
+
+        subscribe = SubscribeBars(
+            client_id=ClientId("GLBX"),
+            venue=symbol_id.venue,
+            bar_type=bar_type,
+            command_id=UUID4(),
+            ts_init=self.clock.timestamp_ns(),
+        )
+        self.data_engine.execute(subscribe)
+
+        # Process trade ticks
+        for tick in trade_ticks[:10]:  # Process first 10 ticks
+            self.data_engine.process(tick)
+
+        # Advance clock to trigger any pending timers
+        events = self.clock.advance_time(utc_now.value + 1)
+        for event in events:
+            event.handle()
+
+        # Unsubscribe to clean up for next run
+        unsubscribe = UnsubscribeBars(
+            client_id=ClientId("GLBX"),
+            venue=symbol_id.venue,
+            bar_type=bar_type,
+            command_id=UUID4(),
+            ts_init=self.clock.timestamp_ns(),
+        )
+        self.data_engine.execute(unsubscribe)
+
+        # Run 2: Subscribe to bars, make a request, and process ticks WITH a request
+        # This tests that historical ticks from the request don't pollute subscription aggregator
+        subscription_bars_with_request = []
+        request_historical_bars = []
+
+        self.msgbus.subscribe(
+            topic=f"data.bars.{bar_type.standard()}",
+            handler=subscription_bars_with_request.append,
+        )
+
+        # Subscribe to historical bars from the request aggregator
+        self.msgbus.subscribe(
+            topic=f"historical.data.bars.{bar_type.standard()}",
+            handler=request_historical_bars.append,
+        )
+
+        subscribe = SubscribeBars(
+            client_id=ClientId("GLBX"),
+            venue=symbol_id.venue,
+            bar_type=bar_type,
+            command_id=UUID4(),
+            ts_init=self.clock.timestamp_ns(),
+        )
+        self.data_engine.execute(subscribe)
+
+        # Process first batch of subscription ticks
+        for tick in trade_ticks[:5]:  # Process first 5 ticks as subscription ticks
+            self.data_engine.process(tick)
+
+        # Make a request for aggregated bars (with update_subscriptions=False)
+        handler = []
+        params = {}
+        params["bar_types"] = (bar_type,)
+        params["include_external_data"] = False
+        params["update_subscriptions"] = False
+        params["update_catalog"] = False
+
+        request = RequestTradeTicks(
+            instrument_id=bar_type.instrument_id,
+            start=start,
+            end=end,
+            limit=0,
+            client_id=None,
+            venue=symbol_id.venue,
+            callback=handler.append,
+            request_id=UUID4(),
+            ts_init=self.clock.timestamp_ns(),
+            params=params,
+        )
+
+        # Send request (this creates a request aggregator with request_id in key)
+        self.msgbus.request(endpoint="DataEngine.request", request=request)
+
+        # Process historical ticks from the request (these should only go to request aggregator)
+        # Get historical ticks that fall within the request time range
+        historical_ticks = [
+            tick for tick in trade_ticks if start.value <= tick.ts_init <= end.value
+        ]
+        assert len(historical_ticks) > 0, "No historical ticks found in request range"
+
+        for tick in historical_ticks[:10]:  # Process historical ticks
+            self.data_engine.process_historical(tick)
+
+        # Advance clock to trigger any pending timers for historical aggregator
+        events = self.clock.advance_time(utc_now.value + 1)
+        for event in events:
+            event.handle()
+
+        # Process more subscription ticks (these should only go to subscription aggregator)
+        for tick in trade_ticks[5:10]:  # Process next 5 ticks as subscription ticks
+            self.data_engine.process(tick)
+
+        # Advance clock to trigger any pending timers for subscription aggregator
+        events = self.clock.advance_time(utc_now.value + 2)
+        for event in events:
+            event.handle()
+
+        # Finalize the request
+        response = DataResponse(
+            client_id=request.client_id,
+            venue=request.venue,
+            data_type=DataType(TradeTick),
+            data=[],
+            correlation_id=request.id,
+            response_id=UUID4(),
+            start=request.start,
+            end=request.end,
+            ts_init=self.clock.timestamp_ns(),
+            params=params,
+        )
+        self.msgbus.response(response)
+
+        # Assert: Subscription bars should be identical in both runs
+        # The request aggregator should not have polluted the subscription aggregator
+        assert len(subscription_bars_without_request) == len(
+            subscription_bars_with_request,
+        ), "Number of subscription bars should be the same with and without request"
+
+        for i, (bar_without, bar_with) in enumerate(
+            zip(subscription_bars_without_request, subscription_bars_with_request, strict=True),
+        ):
+            assert bar_without == bar_with, (
+                f"Subscription bar {i} should be identical: without_request={bar_without}, with_request={bar_with}"
+            )
+
+        # Assert: Historical bars should be received from the request aggregator
+        assert len(request_historical_bars) > 0, "Request aggregator should produce historical bars"
+        assert all(bar.bar_type == bar_type.standard() for bar in request_historical_bars), (
+            "All historical bars should have the correct bar type"
+        )
+
+    def test_backfill_with_update_subscriptions_restores_live_mode(self):
+        # Arrange
+        self.data_engine.register_client(self.mock_market_data_client)
+        self.mock_market_data_client.start()
+
+        bar_spec = BarSpecification(1, BarAggregation.MINUTE, PriceType.LAST)
+        bar_type = BarType(ETHUSDT_BINANCE.id, bar_spec, AggregationSource.INTERNAL)
+
+        # Set up time for testing
+        # Strategy: Request historical data at the START of a bar period (12:00:00-12:00:30)
+        # Then subscribe and add live data in the SAME bar period (12:00:30-12:00:45)
+        # This ensures both contribute to the same bar, demonstrating continuity
+        bar_start_time = pd.Timestamp("2024-01-01T12:00:00", tz="UTC")
+        self.clock.advance_time(bar_start_time.value)
+
+        # Request historical data from the start of the bar period (12:00:00 to 12:00:30)
+        # This ensures historical ticks are in the same bar as live ticks
+        start = bar_start_time
+        end = bar_start_time + pd.Timedelta(seconds=30)
+
+        # Create historical ticks with LOWER prices (these will set the LOW and OPEN of the bar)
+        # These are at the start of the bar period (12:00:00 - 12:00:30)
+        historical_ticks = []
+        base_time = start.value
+        historical_prices = ["2500.0", "2501.0", "2500.5", "2502.0", "2501.5"]  # Low prices
+        for i, price_str in enumerate(historical_prices):
+            tick = TradeTick(
+                instrument_id=ETHUSDT_BINANCE.id,
+                price=Price.from_str(price_str),
+                size=Quantity.from_int(100),
+                aggressor_side=AggressorSide.BUYER,
+                trade_id=TradeId(f"HIST_{i}"),
+                ts_event=base_time + i * 6_000_000_000,  # 6 seconds apart, starting at 12:00:00
+                ts_init=base_time + i * 6_000_000_000,
+            )
+            historical_ticks.append(tick)
+
+        # Set up mock client to return historical ticks
+        self.mock_market_data_client.trade_ticks = historical_ticks
+
+        # Create live ticks with HIGHER prices (these will set the HIGH and CLOSE of the bar)
+        # These will be processed after subscription, still within the same bar period (12:00:30-12:00:45)
+        live_ticks = []
+        live_base_time = (bar_start_time + pd.Timedelta(seconds=30)).value  # Start at 12:00:30
+        live_prices = ["2505.0", "2506.0", "2507.0", "2506.5", "2508.0"]  # High prices
+        for i, price_str in enumerate(live_prices):
+            tick = TradeTick(
+                instrument_id=ETHUSDT_BINANCE.id,
+                price=Price.from_str(price_str),
+                size=Quantity.from_int(100),
+                aggressor_side=AggressorSide.BUYER,
+                trade_id=TradeId(f"LIVE_{i}"),
+                ts_event=live_base_time
+                + i * 3_000_000_000,  # 3 seconds apart, starting at 12:00:30
+                ts_init=live_base_time + i * 3_000_000_000,
+            )
+            live_ticks.append(tick)
+
+        # Collect bars from subscription to test continuity
+        subscription_bars = []
+
+        self.msgbus.subscribe(
+            topic=f"data.bars.{bar_type.standard()}",
+            handler=subscription_bars.append,
+        )
+
+        # Act: Make a request with update_subscriptions=True
+        handler = []
+        params = {}
+        params["bar_types"] = (bar_type,)
+        params["include_external_data"] = False
+        params["update_subscriptions"] = True
+        params["update_catalog"] = False
+
+        request = RequestTradeTicks(
+            instrument_id=bar_type.instrument_id,
+            start=start,
+            end=end,
+            limit=0,
+            client_id=None,
+            venue=self.mock_market_data_client.venue,
+            callback=handler.append,
+            request_id=UUID4(),
+            ts_init=self.clock.timestamp_ns(),
+            params=params,
+        )
+
+        # Send request (this creates a request aggregator with update_subscriptions=True)
+        # MockMarketDataClient will automatically handle the request, publish ticks to historical topic, and send the response
+        self.msgbus.request(endpoint="DataEngine.request", request=request)
+
+        # Get the aggregator key (with update_subscriptions=True, key should be (bar_type, None))
+        key = (bar_type.standard(), None)
+        aggregator = self.data_engine._bar_aggregators.get(key)
+        assert aggregator is not None, (
+            "Aggregator should exist after request with update_subscriptions=True"
+        )
+
+        # Manually process historical ticks to ensure they're included in the aggregator
+        # The MockMarketDataClient publishes them, but we process them explicitly to ensure
+        # they're in the same bar period and processed before switching to live mode
+        for tick in historical_ticks:
+            self.data_engine.process_historical(tick)
+
+        # Advance clock slightly to ensure any timers are processed
+        events = self.clock.advance_time(bar_start_time.value + 1_000_000_000)  # Advance 1 second
+        for event in events:
+            event.handle()
+
+        # Assert: After request finalization, aggregator should be in historical_mode=True and is_running=False
+        assert aggregator.historical_mode, (
+            "Aggregator should remain in historical_mode after request with update_subscriptions=True"
+        )
+        assert not aggregator.is_running, (
+            "Aggregator should have is_running=False after request finalization"
+        )
+
+        # Act: Make a subscription (this should reuse the aggregator and switch it to live mode)
+        subscribe = SubscribeBars(
+            client_id=None,
+            venue=self.mock_market_data_client.venue,
+            bar_type=bar_type,
+            command_id=UUID4(),
+            ts_init=self.clock.timestamp_ns(),
+        )
+        self.data_engine.execute(subscribe)
+
+        # Assert: After subscription, aggregator should be in historical_mode=False and is_running=True
+        assert not aggregator.historical_mode, (
+            "Aggregator should switch to historical_mode=False after subscription"
+        )
+        assert aggregator.is_running, "Aggregator should have is_running=True after subscription"
+
+        # Process live ticks after subscription (these are in the same bar period as the request)
+        # The aggregator should continue building the bar with this new data
+        for tick in live_ticks:
+            self.data_engine.process(tick)
+
+        # Advance clock to 12:01:00 to trigger bar completion (1-minute bar closes)
+        bar_end_time = bar_start_time + pd.Timedelta(minutes=1)
+        events = self.clock.advance_time(bar_end_time.value)
+        for event in events:
+            event.handle()
+
+        # Assert: Test data continuity - the bar should combine data from both request and subscription
+        assert len(subscription_bars) > 0, (
+            "Subscription should produce bars that depend on data from the request"
+        )
+
+        # Find the bar that was completed after subscription
+        # This bar should have:
+        # - LOW from historical request data (2500.0)
+        # - HIGH from live subscription data (2508.0)
+        # - OPEN from historical data (2500.0)
+        # - CLOSE from live data (2508.0)
+        completed_bar = subscription_bars[-1] if subscription_bars else None
+        assert completed_bar is not None, (
+            "A bar should have been completed after processing live ticks"
+        )
+
+        # Verify the bar contains data from both sources
+        expected_low = Price.from_str("2500.0")  # From historical ticks
+        expected_high = Price.from_str("2508.0")  # From live ticks
+        expected_open = Price.from_str("2500.0")  # First historical tick
+        expected_close = Price.from_str("2508.0")  # Last live tick
+
+        assert completed_bar.low == expected_low, (
+            f"Bar low should be {expected_low} from historical request data, "
+            f"but got {completed_bar.low}"
+        )
+        assert completed_bar.high == expected_high, (
+            f"Bar high should be {expected_high} from live subscription data, "
+            f"but got {completed_bar.high}"
+        )
+        assert completed_bar.open == expected_open, (
+            f"Bar open should be {expected_open} from first historical tick, "
+            f"but got {completed_bar.open}"
+        )
+        assert completed_bar.close == expected_close, (
+            f"Bar close should be {expected_close} from last live tick, "
+            f"but got {completed_bar.close}"
+        )
+
+        # Verify the bar type is correct
+        assert completed_bar.bar_type == bar_type.standard(), (
+            f"Bar type should be {bar_type.standard()}, but got {completed_bar.bar_type}"
+        )
 
     # TODO: Implement with new Rust datafusion backend"
     # def test_request_quote_ticks_when_catalog_registered_using_rust(self) -> None:
@@ -4396,12 +5924,31 @@ class TestDataEngine:
         self.data_engine.process(option2)
 
         # Create spread instrument ID
-        spread_instrument_id = InstrumentId.new_spread(
+        spread_instrument_id = new_generic_spread_id(
             [
                 (option1.id, 1),
                 (option2.id, -1),
             ],
         )
+
+        # Create spread instrument and add to cache
+        spread_instrument = OptionSpread(
+            instrument_id=spread_instrument_id,
+            raw_symbol=spread_instrument_id.symbol,
+            asset_class=option1.asset_class,
+            currency=option1.quote_currency,
+            price_precision=option1.price_precision,
+            price_increment=option1.price_increment,
+            multiplier=option1.multiplier,
+            lot_size=option1.lot_size,
+            underlying="ES",
+            strategy_type="SPREAD",
+            activation_ns=0,
+            expiration_ns=0,
+            ts_event=0,
+            ts_init=0,
+        )
+        self.data_engine.process(spread_instrument)
 
         subscribe = SubscribeQuoteTicks(
             client_id=None,
@@ -4409,6 +5956,7 @@ class TestDataEngine:
             instrument_id=spread_instrument_id,
             command_id=UUID4(),
             ts_init=self.clock.timestamp_ns(),
+            params={"aggregate_spread_quotes": True},
         )
 
         # Act
@@ -4419,6 +5967,90 @@ class TestDataEngine:
         assert self.data_engine.command_count == 3
         # Note: The actual spread quote aggregator creation is now handled by the data client
         # This test verifies that the subscription command is processed correctly
+
+    def test_subscribe_spread_quotes_without_aggregation_flag(self):
+        # Arrange
+        xcme_client = BacktestMarketDataClient(
+            client_id=ClientId("XCME"),
+            msgbus=self.msgbus,
+            cache=self.cache,
+            clock=self.clock,
+        )
+        self.data_engine.register_client(xcme_client)
+        xcme_client.start()
+
+        option1 = OptionContract(
+            instrument_id=InstrumentId(Symbol("ESM4 P5230"), Venue("XCME")),
+            raw_symbol=Symbol("ESM4 P5230"),
+            asset_class=AssetClass.EQUITY,
+            currency=Currency.from_str("USD"),
+            price_precision=2,
+            price_increment=Price.from_str("0.01"),
+            multiplier=Quantity.from_int(100),
+            lot_size=Quantity.from_int(1),
+            underlying="ESM4",
+            option_kind=OptionKind.PUT,
+            activation_ns=0,
+            expiration_ns=1719792000000000000,
+            strike_price=Price.from_str("5230.0"),
+            ts_event=0,
+            ts_init=0,
+        )
+        option2 = OptionContract(
+            instrument_id=InstrumentId(Symbol("ESM4 P5250"), Venue("XCME")),
+            raw_symbol=Symbol("ESM4 P5250"),
+            asset_class=AssetClass.EQUITY,
+            currency=Currency.from_str("USD"),
+            price_precision=2,
+            price_increment=Price.from_str("0.01"),
+            multiplier=Quantity.from_int(100),
+            lot_size=Quantity.from_int(1),
+            underlying="ESM4",
+            option_kind=OptionKind.PUT,
+            activation_ns=0,
+            expiration_ns=1719792000000000000,
+            strike_price=Price.from_str("5250.0"),
+            ts_event=0,
+            ts_init=0,
+        )
+        self.data_engine.process(option1)
+        self.data_engine.process(option2)
+
+        spread_instrument_id = new_generic_spread_id(
+            [(option1.id, 1), (option2.id, -1)],
+        )
+        spread_instrument = OptionSpread(
+            instrument_id=spread_instrument_id,
+            raw_symbol=spread_instrument_id.symbol,
+            asset_class=option1.asset_class,
+            currency=option1.quote_currency,
+            price_precision=option1.price_precision,
+            price_increment=option1.price_increment,
+            multiplier=option1.multiplier,
+            lot_size=option1.lot_size,
+            underlying="ES",
+            strategy_type="SPREAD",
+            activation_ns=0,
+            expiration_ns=0,
+            ts_event=0,
+            ts_init=0,
+        )
+        self.data_engine.process(spread_instrument)
+
+        # Subscribe WITHOUT aggregate_spread_quotes flag (default behavior)
+        subscribe = SubscribeQuoteTicks(
+            client_id=None,
+            venue=Venue("XCME"),
+            instrument_id=spread_instrument_id,
+            command_id=UUID4(),
+            ts_init=self.clock.timestamp_ns(),
+        )
+
+        # Act
+        self.data_engine.execute(subscribe)
+
+        # Assert - Only 1 command (no leg subscriptions created)
+        assert self.data_engine.command_count == 1
 
     def test_unsubscribe_spread_quotes_removes_aggregator(self):
         # Arrange
@@ -4473,12 +6105,31 @@ class TestDataEngine:
         self.data_engine.process(option2)
 
         # Create spread instrument ID
-        spread_instrument_id = InstrumentId.new_spread(
+        spread_instrument_id = new_generic_spread_id(
             [
                 (option1.id, 1),
                 (option2.id, -1),
             ],
         )
+
+        # Create spread instrument and add to cache
+        spread_instrument = OptionSpread(
+            instrument_id=spread_instrument_id,
+            raw_symbol=spread_instrument_id.symbol,
+            asset_class=option1.asset_class,
+            currency=option1.quote_currency,
+            price_precision=option1.price_precision,
+            price_increment=option1.price_increment,
+            multiplier=option1.multiplier,
+            lot_size=option1.lot_size,
+            underlying="ES",
+            strategy_type="SPREAD",
+            activation_ns=0,
+            expiration_ns=0,
+            ts_event=0,
+            ts_init=0,
+        )
+        self.data_engine.process(spread_instrument)
 
         # Subscribe first
         subscribe = SubscribeQuoteTicks(
@@ -4487,6 +6138,7 @@ class TestDataEngine:
             instrument_id=spread_instrument_id,
             command_id=UUID4(),
             ts_init=self.clock.timestamp_ns(),
+            params={"aggregate_spread_quotes": True},
         )
         self.data_engine.execute(subscribe)
 
@@ -4501,13 +6153,12 @@ class TestDataEngine:
             instrument_id=spread_instrument_id,
             command_id=UUID4(),
             ts_init=self.clock.timestamp_ns(),
+            params={"aggregate_spread_quotes": True},
         )
         self.data_engine.execute(unsubscribe)
 
         # Assert - Verify unsubscribe was processed
-        # Command count is 4: 3 for subscribe (spread + 2 components) + 1 for unsubscribe (spread only)
-        # Component instruments may not be unsubscribed if they have other subscribers
-        assert self.data_engine.command_count == 4
+        assert self.data_engine.command_count == 6
 
     def test_spread_quote_generation_and_distribution(self):
         # Arrange
@@ -4562,12 +6213,31 @@ class TestDataEngine:
         self.data_engine.process(option2)
 
         # Create spread instrument ID
-        spread_instrument_id = InstrumentId.new_spread(
+        spread_instrument_id = new_generic_spread_id(
             [
                 (option1.id, 1),
                 (option2.id, -1),
             ],
         )
+
+        # Create spread instrument and add to cache
+        spread_instrument = OptionSpread(
+            instrument_id=spread_instrument_id,
+            raw_symbol=spread_instrument_id.symbol,
+            asset_class=option1.asset_class,
+            currency=option1.quote_currency,
+            price_precision=option1.price_precision,
+            price_increment=option1.price_increment,
+            multiplier=option1.multiplier,
+            lot_size=option1.lot_size,
+            underlying="ES",
+            strategy_type="SPREAD",
+            activation_ns=0,
+            expiration_ns=0,
+            ts_event=0,
+            ts_init=0,
+        )
+        self.data_engine.process(spread_instrument)
 
         # Set up handler to capture spread quotes
         handler = []
@@ -4583,6 +6253,7 @@ class TestDataEngine:
             instrument_id=spread_instrument_id,
             command_id=UUID4(),
             ts_init=self.clock.timestamp_ns(),
+            params={"aggregate_spread_quotes": True},
         )
         self.data_engine.execute(subscribe)
 
@@ -4848,6 +6519,134 @@ class TestDataEngine:
         # Verify spread is preserved
         spread = quote_tick.ask_price - quote_tick.bid_price
         assert spread == Price.from_str("0.25")
+
+    def test_disable_historical_cache_flag_prevents_cache_updates(self):
+        # Arrange
+        self.data_engine.register_client(self.binance_client)
+        self.binance_client.start()
+        self.data_engine.process(ETHUSDT_BINANCE)
+
+        # Create initial quote tick to establish baseline in cache
+        initial_tick = TestDataStubs.quote_tick(
+            instrument=ETHUSDT_BINANCE,
+            bid_price=100.0,
+            ask_price=101.0,
+            ts_event=1_000_000_000,
+            ts_init=1_000_000_000,
+        )
+        self.data_engine.process_historical(initial_tick)
+
+        # Verify initial tick is in cache
+        cached_tick_before = self.cache.quote_tick(ETHUSDT_BINANCE.id)
+        assert cached_tick_before is not None
+        assert cached_tick_before.bid_price == Price.from_str("100.0")
+
+        # Create a request
+        request = RequestQuoteTicks(
+            instrument_id=ETHUSDT_BINANCE.id,
+            start=None,
+            end=None,
+            limit=1000,
+            client_id=ClientId(BINANCE.value),
+            venue=BINANCE,
+            callback=None,
+            request_id=UUID4(),
+            ts_init=self.clock.timestamp_ns(),
+            params=None,
+        )
+
+        # Send request to register it
+        self.data_engine.request(request)
+
+        # Create new quote ticks that should update the cache when flag is False
+        new_tick = TestDataStubs.quote_tick(
+            instrument=ETHUSDT_BINANCE,
+            bid_price=102.0,
+            ask_price=103.0,
+            ts_event=2_000_000_000,
+            ts_init=2_000_000_000,
+        )
+
+        # Test 1: With disable_historical_cache=False, cache should be updated
+        response_with_cache = DataResponse(
+            client_id=request.client_id,
+            venue=request.venue,
+            data_type=DataType(QuoteTick),
+            data=[new_tick],
+            correlation_id=request.id,
+            response_id=UUID4(),
+            start=None,
+            end=None,
+            ts_init=self.clock.timestamp_ns(),
+            params={"disable_historical_cache": False},
+        )
+        self.data_engine.response(response_with_cache)
+
+        # Verify cache was updated
+        cached_tick_after_false = self.cache.quote_tick(ETHUSDT_BINANCE.id)
+        assert cached_tick_after_false is not None
+        assert cached_tick_after_false.bid_price == Price.from_str("102.0")
+        assert cached_tick_after_false.ask_price == Price.from_str("103.0")
+
+        # Reset cache state for next test
+        # Process a new tick directly to establish new baseline
+        baseline_tick = TestDataStubs.quote_tick(
+            instrument=ETHUSDT_BINANCE,
+            bid_price=200.0,
+            ask_price=201.0,
+            ts_event=3_000_000_000,
+            ts_init=3_000_000_000,
+        )
+        self.data_engine.process_historical(baseline_tick)
+        cached_tick_baseline = self.cache.quote_tick(ETHUSDT_BINANCE.id)
+        assert cached_tick_baseline.bid_price == Price.from_str("200.0")
+
+        # Create another request
+        request2 = RequestQuoteTicks(
+            instrument_id=ETHUSDT_BINANCE.id,
+            start=None,
+            end=None,
+            limit=1000,
+            client_id=ClientId(BINANCE.value),
+            venue=BINANCE,
+            callback=None,
+            request_id=UUID4(),
+            ts_init=self.clock.timestamp_ns(),
+            params=None,
+        )
+
+        # Send request to register it
+        self.data_engine.request(request2)
+
+        # Create new quote tick that should NOT update the cache when flag is True
+        new_tick2 = TestDataStubs.quote_tick(
+            instrument=ETHUSDT_BINANCE,
+            bid_price=205.0,
+            ask_price=206.0,
+            ts_event=4_000_000_000,
+            ts_init=4_000_000_000,
+        )
+
+        # Test 2: With disable_historical_cache=True, cache should NOT be updated
+        response_without_cache = DataResponse(
+            client_id=request2.client_id,
+            venue=request2.venue,
+            data_type=DataType(QuoteTick),
+            data=[new_tick2],
+            correlation_id=request2.id,
+            response_id=UUID4(),
+            start=None,
+            end=None,
+            ts_init=self.clock.timestamp_ns(),
+            params={"disable_historical_cache": True},
+        )
+        self.data_engine.response(response_without_cache)
+
+        # Verify cache was NOT updated (should still have the baseline tick)
+        cached_tick_after_true = self.cache.quote_tick(ETHUSDT_BINANCE.id)
+        assert cached_tick_after_true is not None
+        assert cached_tick_after_true.bid_price == Price.from_str("200.0")
+        assert cached_tick_after_true.ask_price == Price.from_str("201.0")
 
 
 class TestDataEngineQuoteFromDepth:
@@ -5207,6 +7006,49 @@ class TestDataBufferEngine:
         assert len(handler) == 2
         assert len(handler[0].deltas) == 1
         assert len(handler[1].deltas) == 1
+
+    def test_process_order_book_deltas_multiple_f_last_publishes_at_each_boundary(self):
+        # Arrange
+        self.data_engine.register_client(self.binance_client)
+        self.binance_client.start()
+
+        self.data_engine.process(ETHUSDT_BINANCE)
+
+        handler = []
+        self.msgbus.subscribe(topic="data.book.deltas.BINANCE.ETHUSDT", handler=handler.append)
+
+        subscribe = SubscribeOrderBook(
+            client_id=ClientId(BINANCE.value),
+            venue=BINANCE,
+            book_data_type=OrderBookDelta,
+            instrument_id=ETHUSDT_BINANCE.id,
+            book_type=BookType.L3_MBO,
+            depth=5,
+            managed=True,
+            command_id=UUID4(),
+            ts_init=self.clock.timestamp_ns(),
+        )
+
+        self.data_engine.execute(subscribe)
+
+        # Two groups packed into a single OrderBookDeltas message
+        delta1 = TestDataStubs.order_book_delta(ETHUSDT_BINANCE.id)
+        delta2 = TestDataStubs.order_book_delta(ETHUSDT_BINANCE.id, flags=RecordFlag.F_LAST)
+        delta3 = TestDataStubs.order_book_delta(ETHUSDT_BINANCE.id)
+        delta4 = TestDataStubs.order_book_delta(ETHUSDT_BINANCE.id, flags=RecordFlag.F_LAST)
+
+        deltas = OrderBookDeltas(
+            instrument_id=ETHUSDT_BINANCE.id,
+            deltas=[delta1, delta2, delta3, delta4],
+        )
+
+        # Act
+        self.data_engine.process(deltas)
+
+        # Assert - should publish at each F_LAST boundary
+        assert len(handler) == 2
+        assert len(handler[0].deltas) == 2
+        assert len(handler[1].deltas) == 2
 
 
 class TestDataEngineQuoteFromBook:
@@ -5663,3 +7505,1820 @@ class TestTimeRangeGenerator:
 
         # Assert
         assert retrieved_generator == self.default_time_range_generator
+
+
+@pytest.mark.xdist_group(name="databento_catalog")
+class TestDataEngineContinuousFuture:
+    @pytest.fixture(autouse=True)
+    def setup_method(self, tmp_path):
+        self.tmp_path = tmp_path
+        self.clock = TestClock()
+        self.trader_id = TestIdStubs.trader_id()
+
+        self.msgbus = MessageBus(
+            trader_id=self.trader_id,
+            clock=self.clock,
+        )
+
+        self.cache = TestComponentStubs.cache()
+
+        self.portfolio = Portfolio(
+            msgbus=self.msgbus,
+            cache=self.cache,
+            clock=self.clock,
+        )
+
+        config = DataEngineConfig(
+            validate_data_sequence=True,
+            emit_quotes_from_book_depths=True,
+            debug=True,
+        )
+        self.data_engine = DataEngine(
+            msgbus=self.msgbus,
+            cache=self.cache,
+            clock=self.clock,
+            config=config,
+        )
+
+        self.binance_client = BacktestMarketDataClient(
+            client_id=ClientId(BINANCE.value),
+            msgbus=self.msgbus,
+            cache=self.cache,
+            clock=self.clock,
+        )
+
+        self.bitmex_client = BacktestMarketDataClient(
+            client_id=ClientId(BITMEX.value),
+            msgbus=self.msgbus,
+            cache=self.cache,
+            clock=self.clock,
+        )
+
+        self.quandl = BacktestMarketDataClient(
+            client_id=ClientId("QUANDL"),
+            msgbus=self.msgbus,
+            cache=self.cache,
+            clock=self.clock,
+        )
+
+        self.betfair = BacktestMarketDataClient(
+            client_id=ClientId("BETFAIR"),
+            msgbus=self.msgbus,
+            cache=self.cache,
+            clock=self.clock,
+        )
+
+        self.mock_market_data_client = MockMarketDataClient(
+            client_id=ClientId(BINANCE.value),
+            msgbus=self.msgbus,
+            cache=self.cache,
+            clock=self.clock,
+        )
+
+        self.data_engine.process(BTCUSDT_BINANCE)
+        self.data_engine.process(ETHUSDT_BINANCE)
+        self.data_engine.process(XBTUSD_BITMEX)
+
+        self.es_root_xcme = FuturesContract(
+            instrument_id=InstrumentId.from_str("ES.XCME"),
+            raw_symbol=Symbol("ES"),
+            asset_class=AssetClass.INDEX,
+            currency=Currency.from_str("USD"),
+            price_precision=2,
+            price_increment=Price.from_str("0.25"),
+            multiplier=Quantity.from_int(50),
+            lot_size=Quantity.from_int(1),
+            underlying="ES",
+            activation_ns=0,
+            expiration_ns=0,
+            ts_event=0,
+            ts_init=0,
+        )
+        self.esh26_xcme = FuturesContract(
+            instrument_id=InstrumentId.from_str("ESH26.XCME"),
+            raw_symbol=Symbol("ESH26"),
+            asset_class=AssetClass.INDEX,
+            currency=Currency.from_str("USD"),
+            price_precision=2,
+            price_increment=Price.from_str("0.25"),
+            multiplier=Quantity.from_int(50),
+            lot_size=Quantity.from_int(1),
+            underlying="ES",
+            activation_ns=0,
+            expiration_ns=1773532800000000000,
+            ts_event=0,
+            ts_init=0,
+        )
+        self.esm26_xcme = FuturesContract(
+            instrument_id=InstrumentId.from_str("ESM26.XCME"),
+            raw_symbol=Symbol("ESM26"),
+            asset_class=AssetClass.INDEX,
+            currency=Currency.from_str("USD"),
+            price_precision=2,
+            price_increment=Price.from_str("0.25"),
+            multiplier=Quantity.from_int(50),
+            lot_size=Quantity.from_int(1),
+            underlying="ES",
+            activation_ns=0,
+            expiration_ns=1781308800000000000,
+            ts_event=0,
+            ts_init=0,
+        )
+        self.esu26_xcme = FuturesContract(
+            instrument_id=InstrumentId.from_str("ESU26.XCME"),
+            raw_symbol=Symbol("ESU26"),
+            asset_class=AssetClass.INDEX,
+            currency=Currency.from_str("USD"),
+            price_precision=2,
+            price_increment=Price.from_str("0.25"),
+            multiplier=Quantity.from_int(50),
+            lot_size=Quantity.from_int(1),
+            underlying="ES",
+            activation_ns=0,
+            expiration_ns=1789257600000000000,
+            ts_event=0,
+            ts_init=0,
+        )
+        self.cache.add_instrument(self.es_root_xcme)
+        self.cache.add_instrument(self.esh26_xcme)
+        self.cache.add_instrument(self.esm26_xcme)
+        self.cache.add_instrument(self.esu26_xcme)
+
+    def test_request_bars_for_continuous_future_adjusts_across_transition(self):
+        catalog = setup_catalog(protocol="file", path=self.tmp_path / "contfut_catalog")
+
+        # Monday of March 2026 expiry week, then Monday of June 2026 expiry week.
+        march_transition_ns = pd.Timestamp("2026-03-16T14:31:00Z").value
+        june_transition_ns = pd.Timestamp("2026-06-15T14:31:00Z").value
+
+        bars = [
+            Bar(
+                BarType.from_str("ESH26.XCME-1-MINUTE-LAST-EXTERNAL"),
+                Price.from_str("6000.00"),
+                Price.from_str("6001.00"),
+                Price.from_str("5999.00"),
+                Price.from_str("6000.50"),
+                Quantity.from_int(10),
+                pd.Timestamp("2026-03-16T14:29:00Z").value,
+                pd.Timestamp("2026-03-16T14:29:00Z").value,
+            ),
+            Bar(
+                BarType.from_str("ESH26.XCME-1-MINUTE-LAST-EXTERNAL"),
+                Price.from_str("6000.50"),
+                Price.from_str("6001.50"),
+                Price.from_str("6000.00"),
+                Price.from_str("6001.00"),
+                Quantity.from_int(11),
+                pd.Timestamp("2026-03-16T14:30:00Z").value,
+                pd.Timestamp("2026-03-16T14:30:00Z").value,
+            ),
+            Bar(
+                BarType.from_str("ESM26.XCME-1-MINUTE-LAST-EXTERNAL"),
+                Price.from_str("5995.00"),
+                Price.from_str("5996.00"),
+                Price.from_str("5994.50"),
+                Price.from_str("5995.50"),
+                Quantity.from_int(12),
+                pd.Timestamp("2026-03-16T14:31:00Z").value,
+                pd.Timestamp("2026-03-16T14:31:00Z").value,
+            ),
+            Bar(
+                BarType.from_str("ESM26.XCME-1-MINUTE-LAST-EXTERNAL"),
+                Price.from_str("5995.50"),
+                Price.from_str("5996.50"),
+                Price.from_str("5995.00"),
+                Price.from_str("5996.00"),
+                Quantity.from_int(13),
+                pd.Timestamp("2026-03-16T14:32:00Z").value,
+                pd.Timestamp("2026-03-16T14:32:00Z").value,
+            ),
+            Bar(
+                BarType.from_str("ESM26.XCME-1-MINUTE-LAST-EXTERNAL"),
+                Price.from_str("6100.00"),
+                Price.from_str("6101.00"),
+                Price.from_str("6099.50"),
+                Price.from_str("6100.50"),
+                Quantity.from_int(14),
+                pd.Timestamp("2026-06-15T14:29:00Z").value,
+                pd.Timestamp("2026-06-15T14:29:00Z").value,
+            ),
+            Bar(
+                BarType.from_str("ESM26.XCME-1-MINUTE-LAST-EXTERNAL"),
+                Price.from_str("6100.50"),
+                Price.from_str("6101.50"),
+                Price.from_str("6100.00"),
+                Price.from_str("6101.00"),
+                Quantity.from_int(15),
+                pd.Timestamp("2026-06-15T14:30:00Z").value,
+                pd.Timestamp("2026-06-15T14:30:00Z").value,
+            ),
+            Bar(
+                BarType.from_str("ESU26.XCME-1-MINUTE-LAST-EXTERNAL"),
+                Price.from_str("6094.50"),
+                Price.from_str("6095.50"),
+                Price.from_str("6094.00"),
+                Price.from_str("6095.00"),
+                Quantity.from_int(16),
+                pd.Timestamp("2026-06-15T14:31:00Z").value,
+                pd.Timestamp("2026-06-15T14:31:00Z").value,
+            ),
+            Bar(
+                BarType.from_str("ESU26.XCME-1-MINUTE-LAST-EXTERNAL"),
+                Price.from_str("6095.00"),
+                Price.from_str("6096.00"),
+                Price.from_str("6094.50"),
+                Price.from_str("6095.50"),
+                Quantity.from_int(17),
+                pd.Timestamp("2026-06-15T14:32:00Z").value,
+                pd.Timestamp("2026-06-15T14:32:00Z").value,
+            ),
+        ]
+        catalog.write_data(bars)
+        self.clock.set_time(to_time_ns=pd.Timestamp("2026-06-15T14:32:00Z").value)
+        self.data_engine.register_catalog(catalog)
+
+        bar_type = BarType.from_str("ES.XCME-1-MINUTE-LAST-INTERNAL@1-MINUTE-EXTERNAL")
+        bars_received = []
+        self.msgbus.subscribe(
+            topic=f"historical.data.bars.{bar_type.standard()}",
+            handler=bars_received.append,
+        )
+
+        handler = []
+        request = RequestBars(
+            bar_type=bar_type,
+            start=pd.Timestamp("2026-03-16T14:29:00Z"),
+            end=pd.Timestamp("2026-06-15T14:32:00Z"),
+            limit=0,
+            client_id=None,
+            venue=Venue("XCME"),
+            callback=handler.append,
+            request_id=UUID4(),
+            ts_init=self.clock.timestamp_ns(),
+            params={
+                "continuous_future_transitions": [
+                    {
+                        "transition_time_ns": march_transition_ns,
+                        "pre_instrument_id": "ESH26.XCME",
+                        "post_instrument_id": "ESM26.XCME",
+                        "pre_price": "6001.00",
+                        "post_price": "5995.50",
+                    },
+                    {
+                        "transition_time_ns": june_transition_ns,
+                        "pre_instrument_id": "ESM26.XCME",
+                        "post_instrument_id": "ESU26.XCME",
+                        "pre_price": "6101.00",
+                        "post_price": "6095.00",
+                    },
+                ],
+                "continuous_future_adjustment_mode": ContinuousFutureAdjustmentType.BACKWARD_SPREAD,
+                "update_catalog": False,
+                "skip_catalog_data": False,
+            },
+        )
+
+        self.msgbus.request(endpoint="DataEngine.request", request=request)
+
+        assert len(handler) == 1
+        assert handler[0].data == []
+        assert handler[0].params["data_count"] == 8
+        assert len(bars_received) == 8
+        first_bar = bars_received[0]
+        last_bar = bars_received[-1]
+        assert first_bar.bar_type == bar_type.standard()
+        assert first_bar.open == Price.from_str("5988.50")
+        assert first_bar.high == Price.from_str("5989.50")
+        assert first_bar.low == Price.from_str("5987.50")
+        assert first_bar.close == Price.from_str("5989.00")
+        assert first_bar.volume == Quantity.from_int(10)
+        assert last_bar.bar_type == bar_type.standard()
+        assert last_bar.open == Price.from_str("6095.00")
+        assert last_bar.high == Price.from_str("6096.00")
+        assert last_bar.low == Price.from_str("6094.50")
+        assert last_bar.close == Price.from_str("6095.50")
+        assert last_bar.volume == Quantity.from_int(17)
+
+    def test_request_bars_for_continuous_future_applies_multiplicative_adjustment(self):
+        catalog = setup_catalog(protocol="file", path=self.tmp_path / "contfut_catalog_mult")
+        transition_ns = pd.Timestamp("2026-03-16T14:31:00Z").value
+
+        bars = [
+            Bar(
+                BarType.from_str("ESH26.XCME-1-MINUTE-LAST-EXTERNAL"),
+                Price.from_str("6000.00"),
+                Price.from_str("6001.00"),
+                Price.from_str("5999.00"),
+                Price.from_str("6000.50"),
+                Quantity.from_int(10),
+                pd.Timestamp("2026-03-16T14:29:00Z").value,
+                pd.Timestamp("2026-03-16T14:29:00Z").value,
+            ),
+            Bar(
+                BarType.from_str("ESH26.XCME-1-MINUTE-LAST-EXTERNAL"),
+                Price.from_str("6000.50"),
+                Price.from_str("6001.50"),
+                Price.from_str("6000.00"),
+                Price.from_str("6001.00"),
+                Quantity.from_int(11),
+                pd.Timestamp("2026-03-16T14:30:00Z").value,
+                pd.Timestamp("2026-03-16T14:30:00Z").value,
+            ),
+            Bar(
+                BarType.from_str("ESM26.XCME-1-MINUTE-LAST-EXTERNAL"),
+                Price.from_str("5995.00"),
+                Price.from_str("5996.00"),
+                Price.from_str("5994.50"),
+                Price.from_str("5995.50"),
+                Quantity.from_int(12),
+                pd.Timestamp("2026-03-16T14:31:00Z").value,
+                pd.Timestamp("2026-03-16T14:31:00Z").value,
+            ),
+            Bar(
+                BarType.from_str("ESM26.XCME-1-MINUTE-LAST-EXTERNAL"),
+                Price.from_str("5995.50"),
+                Price.from_str("5996.50"),
+                Price.from_str("5995.00"),
+                Price.from_str("5996.00"),
+                Quantity.from_int(13),
+                pd.Timestamp("2026-03-16T14:32:00Z").value,
+                pd.Timestamp("2026-03-16T14:32:00Z").value,
+            ),
+        ]
+        catalog.write_data(bars)
+        self.clock.set_time(to_time_ns=pd.Timestamp("2026-03-16T14:32:00Z").value)
+        self.data_engine.register_catalog(catalog)
+
+        bar_type = BarType.from_str("ES.XCME-1-MINUTE-LAST-INTERNAL@1-MINUTE-EXTERNAL")
+        bars_received = []
+        self.msgbus.subscribe(
+            topic=f"historical.data.bars.{bar_type.standard()}",
+            handler=bars_received.append,
+        )
+
+        handler = []
+        request = RequestBars(
+            bar_type=bar_type,
+            start=pd.Timestamp("2026-03-16T14:29:00Z"),
+            end=pd.Timestamp("2026-03-16T14:32:00Z"),
+            limit=0,
+            client_id=None,
+            venue=Venue("XCME"),
+            callback=handler.append,
+            request_id=UUID4(),
+            ts_init=self.clock.timestamp_ns(),
+            params={
+                "continuous_future_transitions": [
+                    {
+                        "transition_time_ns": transition_ns,
+                        "pre_instrument_id": "ESH26.XCME",
+                        "post_instrument_id": "ESM26.XCME",
+                        "pre_price": "6001.00",
+                        "post_price": "5995.50",
+                    },
+                ],
+                "continuous_future_adjustment_mode": ContinuousFutureAdjustmentType.BACKWARD_RATIO,
+                "update_catalog": False,
+                "skip_catalog_data": False,
+            },
+        )
+
+        self.msgbus.request(endpoint="DataEngine.request", request=request)
+
+        assert len(handler) == 1
+        assert handler[0].params["data_count"] == 4
+        assert len(bars_received) == 4
+        assert bars_received[0].open == Price.from_str("5994.50")
+        assert bars_received[0].high == Price.from_str("5995.50")
+        assert bars_received[0].low == Price.from_str("5993.50")
+        assert bars_received[0].close == Price.from_str("5995.00")
+        assert bars_received[-1].open == Price.from_str("5995.50")
+        assert bars_received[-1].high == Price.from_str("5996.50")
+        assert bars_received[-1].low == Price.from_str("5995.00")
+        assert bars_received[-1].close == Price.from_str("5996.00")
+
+    def test_request_bars_for_continuous_future_preserves_bar_type_chain(self):
+        catalog = setup_catalog(protocol="file", path=self.tmp_path / "contfut_catalog_chain")
+        transition_ns = pd.Timestamp("2026-03-16T14:31:00Z").value
+
+        bars = [
+            Bar(
+                BarType.from_str("ESH26.XCME-1-MINUTE-LAST-EXTERNAL"),
+                Price.from_str("6000.00"),
+                Price.from_str("6001.00"),
+                Price.from_str("5999.00"),
+                Price.from_str("6000.50"),
+                Quantity.from_int(10),
+                pd.Timestamp("2026-03-16T14:29:00Z").value,
+                pd.Timestamp("2026-03-16T14:29:00Z").value,
+            ),
+            Bar(
+                BarType.from_str("ESH26.XCME-1-MINUTE-LAST-EXTERNAL"),
+                Price.from_str("6000.50"),
+                Price.from_str("6001.50"),
+                Price.from_str("6000.00"),
+                Price.from_str("6001.00"),
+                Quantity.from_int(11),
+                pd.Timestamp("2026-03-16T14:30:00Z").value,
+                pd.Timestamp("2026-03-16T14:30:00Z").value,
+            ),
+            Bar(
+                BarType.from_str("ESM26.XCME-1-MINUTE-LAST-EXTERNAL"),
+                Price.from_str("5995.00"),
+                Price.from_str("5996.00"),
+                Price.from_str("5994.50"),
+                Price.from_str("5995.50"),
+                Quantity.from_int(12),
+                pd.Timestamp("2026-03-16T14:31:00Z").value,
+                pd.Timestamp("2026-03-16T14:31:00Z").value,
+            ),
+            Bar(
+                BarType.from_str("ESM26.XCME-1-MINUTE-LAST-EXTERNAL"),
+                Price.from_str("5995.50"),
+                Price.from_str("5996.50"),
+                Price.from_str("5995.00"),
+                Price.from_str("5996.00"),
+                Quantity.from_int(13),
+                pd.Timestamp("2026-03-16T14:32:00Z").value,
+                pd.Timestamp("2026-03-16T14:32:00Z").value,
+            ),
+        ]
+        catalog.write_data(bars)
+        self.clock.set_time(to_time_ns=pd.Timestamp("2026-03-16T14:32:00Z").value)
+        self.data_engine.register_catalog(catalog)
+
+        bar_type_1 = BarType.from_str("ES.XCME-2-MINUTE-LAST-INTERNAL@1-MINUTE-EXTERNAL")
+        bar_type_2 = BarType.from_str("ES.XCME-4-MINUTE-LAST-INTERNAL@2-MINUTE-INTERNAL")
+        bars_1_received = []
+        bars_2_received = []
+        self.msgbus.subscribe(
+            topic=f"historical.data.bars.{bar_type_1.standard()}",
+            handler=bars_1_received.append,
+        )
+        self.msgbus.subscribe(
+            topic=f"historical.data.bars.{bar_type_2.standard()}",
+            handler=bars_2_received.append,
+        )
+
+        handler = []
+        request = RequestBars(
+            bar_type=bar_type_2,
+            start=pd.Timestamp("2026-03-16T14:29:00Z"),
+            end=pd.Timestamp("2026-03-16T14:32:00Z"),
+            limit=0,
+            client_id=None,
+            venue=Venue("XCME"),
+            callback=handler.append,
+            request_id=UUID4(),
+            ts_init=self.clock.timestamp_ns(),
+            params={
+                "bar_types": (bar_type_1, bar_type_2),
+                "continuous_future_transitions": [
+                    {
+                        "transition_time_ns": transition_ns,
+                        "pre_instrument_id": "ESH26.XCME",
+                        "post_instrument_id": "ESM26.XCME",
+                        "pre_price": "6001.00",
+                        "post_price": "5995.50",
+                    },
+                ],
+                "continuous_future_adjustment_mode": ContinuousFutureAdjustmentType.BACKWARD_SPREAD,
+                "update_catalog": False,
+                "skip_catalog_data": False,
+            },
+        )
+
+        self.msgbus.request(endpoint="DataEngine.request", request=request)
+
+        assert len(handler) == 1
+        assert handler[0].params["data_count"] == 4
+        assert len(bars_1_received) == 2
+        assert len(bars_2_received) == 1
+        assert bars_1_received[0].open == Price.from_str("5994.50")
+        assert bars_1_received[0].high == Price.from_str("5996.00")
+        assert bars_1_received[0].low == Price.from_str("5993.50")
+        assert bars_1_received[0].close == Price.from_str("5995.50")
+        assert bars_1_received[0].volume == Quantity.from_int(21)
+        assert bars_1_received[1].open == Price.from_str("5995.00")
+        assert bars_1_received[1].high == Price.from_str("5996.50")
+        assert bars_1_received[1].low == Price.from_str("5994.50")
+        assert bars_1_received[1].close == Price.from_str("5996.00")
+        assert bars_1_received[1].volume == Quantity.from_int(25)
+        assert bars_2_received[0].open == Price.from_str("5994.50")
+        assert bars_2_received[0].high == Price.from_str("5996.50")
+        assert bars_2_received[0].low == Price.from_str("5993.50")
+        assert bars_2_received[0].close == Price.from_str("5996.00")
+        assert bars_2_received[0].volume == Quantity.from_int(46)
+
+    def test_subscribe_bars_for_continuous_future_rolls_subscription_at_transition(self):
+        xcme_client = BacktestMarketDataClient(
+            client_id=ClientId("XCME"),
+            msgbus=self.msgbus,
+            cache=self.cache,
+            clock=self.clock,
+        )
+        self.data_engine.register_client(xcme_client)
+        xcme_client.start()
+
+        transition_ns = pd.Timestamp("2026-03-16T14:30:30Z").value
+        bar_type = BarType.from_str("ES.XCME-1-MINUTE-LAST-INTERNAL")
+        bars_received = []
+        self.msgbus.subscribe(
+            topic=f"data.bars.{bar_type.standard()}",
+            handler=bars_received.append,
+        )
+
+        self.clock.set_time(to_time_ns=pd.Timestamp("2026-03-16T14:30:01Z").value)
+
+        subscribe = SubscribeBars(
+            client_id=ClientId("XCME"),
+            venue=Venue("XCME"),
+            bar_type=bar_type,
+            command_id=UUID4(),
+            ts_init=self.clock.timestamp_ns(),
+            params={
+                "continuous_future_transitions": [
+                    {
+                        "transition_time_ns": transition_ns,
+                        "pre_instrument_id": "ESH26.XCME",
+                        "post_instrument_id": "ESM26.XCME",
+                        "pre_price": "6001.00",
+                        "post_price": "5995.50",
+                    },
+                ],
+                "continuous_future_adjustment_mode": ContinuousFutureAdjustmentType.BACKWARD_SPREAD,
+            },
+        )
+
+        self.data_engine.execute(subscribe)
+
+        assert xcme_client.subscribed_trade_ticks() == [self.esh26_xcme.id]
+
+        self.data_engine.process(
+            TradeTick(
+                instrument_id=self.esh26_xcme.id,
+                price=Price.from_str("6000.00"),
+                size=Quantity.from_int(1),
+                aggressor_side=AggressorSide.BUYER,
+                trade_id=TradeId("ESH26-1"),
+                ts_event=pd.Timestamp("2026-03-16T14:30:10Z").value,
+                ts_init=pd.Timestamp("2026-03-16T14:30:10Z").value,
+            ),
+        )
+        self.data_engine.process(
+            TradeTick(
+                instrument_id=self.esh26_xcme.id,
+                price=Price.from_str("6001.00"),
+                size=Quantity.from_int(2),
+                aggressor_side=AggressorSide.BUYER,
+                trade_id=TradeId("ESH26-2"),
+                ts_event=pd.Timestamp("2026-03-16T14:30:20Z").value,
+                ts_init=pd.Timestamp("2026-03-16T14:30:20Z").value,
+            ),
+        )
+
+        events = self.clock.advance_time(transition_ns)
+        for event in events:
+            event.handle()
+
+        assert xcme_client.subscribed_trade_ticks() == [self.esm26_xcme.id]
+
+        self.data_engine.process(
+            TradeTick(
+                instrument_id=self.esh26_xcme.id,
+                price=Price.from_str("7000.00"),
+                size=Quantity.from_int(10),
+                aggressor_side=AggressorSide.BUYER,
+                trade_id=TradeId("ESH26-IGNORED"),
+                ts_event=pd.Timestamp("2026-03-16T14:30:35Z").value,
+                ts_init=pd.Timestamp("2026-03-16T14:30:35Z").value,
+            ),
+        )
+        self.data_engine.process(
+            TradeTick(
+                instrument_id=self.esm26_xcme.id,
+                price=Price.from_str("5995.00"),
+                size=Quantity.from_int(3),
+                aggressor_side=AggressorSide.BUYER,
+                trade_id=TradeId("ESM26-1"),
+                ts_event=pd.Timestamp("2026-03-16T14:30:40Z").value,
+                ts_init=pd.Timestamp("2026-03-16T14:30:40Z").value,
+            ),
+        )
+        self.data_engine.process(
+            TradeTick(
+                instrument_id=self.esm26_xcme.id,
+                price=Price.from_str("5996.00"),
+                size=Quantity.from_int(4),
+                aggressor_side=AggressorSide.BUYER,
+                trade_id=TradeId("ESM26-2"),
+                ts_event=pd.Timestamp("2026-03-16T14:30:50Z").value,
+                ts_init=pd.Timestamp("2026-03-16T14:30:50Z").value,
+            ),
+        )
+
+        events = self.clock.advance_time(pd.Timestamp("2026-03-16T14:31:00Z").value)
+
+        for event in events:
+            event.handle()
+
+        assert len(bars_received) == 1
+        assert bars_received[0].bar_type == bar_type.standard()
+        assert bars_received[0].open == Price.from_str("5994.50")
+        assert bars_received[0].high == Price.from_str("5996.00")
+        assert bars_received[0].low == Price.from_str("5994.50")
+        assert bars_received[0].close == Price.from_str("5996.00")
+        assert bars_received[0].volume == Quantity.from_int(10)
+
+        self.msgbus.unsubscribe(
+            topic=f"data.bars.{bar_type.standard()}",
+            handler=bars_received.append,
+        )
+        self.data_engine.execute(
+            UnsubscribeBars(
+                client_id=ClientId("XCME"),
+                venue=Venue("XCME"),
+                bar_type=bar_type,
+                command_id=UUID4(),
+                ts_init=self.clock.timestamp_ns(),
+                params=subscribe.params.copy(),
+            ),
+        )
+
+        assert xcme_client.subscribed_trade_ticks() == []
+
+    def test_subscribe_bars_for_continuous_future_mid_bar_roll_preserves_pre_boundary_ohlc(self):
+        # Pin mid-bar roll: pre-boundary OHLC kept, post-boundary uses new offset
+        xcme_client = BacktestMarketDataClient(
+            client_id=ClientId("XCME"),
+            msgbus=self.msgbus,
+            cache=self.cache,
+            clock=self.clock,
+        )
+        self.data_engine.register_client(xcme_client)
+        xcme_client.start()
+
+        transition_ns = pd.Timestamp("2026-03-16T14:30:30Z").value
+        bar_type = BarType.from_str("ES.XCME-1-MINUTE-LAST-INTERNAL")
+        bars_received = []
+        self.msgbus.subscribe(
+            topic=f"data.bars.{bar_type.standard()}",
+            handler=bars_received.append,
+        )
+
+        self.clock.set_time(to_time_ns=pd.Timestamp("2026-03-16T14:30:01Z").value)
+
+        self.data_engine.execute(
+            SubscribeBars(
+                client_id=ClientId("XCME"),
+                venue=Venue("XCME"),
+                bar_type=bar_type,
+                command_id=UUID4(),
+                ts_init=self.clock.timestamp_ns(),
+                params={
+                    "continuous_future_transitions": [
+                        {
+                            "transition_time_ns": transition_ns,
+                            "pre_instrument_id": "ESH26.XCME",
+                            "post_instrument_id": "ESM26.XCME",
+                            "pre_price": "100.00",
+                            "post_price": "95.00",
+                        },
+                    ],
+                    "continuous_future_adjustment_mode": ContinuousFutureAdjustmentType.FORWARD_SPREAD,
+                },
+            ),
+        )
+
+        # Pre-transition: ESH26 ticks ingest unadjusted (anchor segment)
+        self.data_engine.process(
+            TradeTick(
+                instrument_id=self.esh26_xcme.id,
+                price=Price.from_str("100.00"),
+                size=Quantity.from_int(1),
+                aggressor_side=AggressorSide.BUYER,
+                trade_id=TradeId("ESH26-1"),
+                ts_event=pd.Timestamp("2026-03-16T14:30:10Z").value,
+                ts_init=pd.Timestamp("2026-03-16T14:30:10Z").value,
+            ),
+        )
+        self.data_engine.process(
+            TradeTick(
+                instrument_id=self.esh26_xcme.id,
+                price=Price.from_str("101.00"),
+                size=Quantity.from_int(2),
+                aggressor_side=AggressorSide.BUYER,
+                trade_id=TradeId("ESH26-2"),
+                ts_event=pd.Timestamp("2026-03-16T14:30:20Z").value,
+                ts_init=pd.Timestamp("2026-03-16T14:30:20Z").value,
+            ),
+        )
+
+        for event in self.clock.advance_time(transition_ns):
+            event.handle()
+
+        # Post-transition: ESM26 ticks ingest with +5.00 forward-spread offset
+        self.data_engine.process(
+            TradeTick(
+                instrument_id=self.esm26_xcme.id,
+                price=Price.from_str("95.00"),
+                size=Quantity.from_int(3),
+                aggressor_side=AggressorSide.BUYER,
+                trade_id=TradeId("ESM26-1"),
+                ts_event=pd.Timestamp("2026-03-16T14:30:40Z").value,
+                ts_init=pd.Timestamp("2026-03-16T14:30:40Z").value,
+            ),
+        )
+        self.data_engine.process(
+            TradeTick(
+                instrument_id=self.esm26_xcme.id,
+                price=Price.from_str("96.00"),
+                size=Quantity.from_int(4),
+                aggressor_side=AggressorSide.BUYER,
+                trade_id=TradeId("ESM26-2"),
+                ts_event=pd.Timestamp("2026-03-16T14:30:50Z").value,
+                ts_init=pd.Timestamp("2026-03-16T14:30:50Z").value,
+            ),
+        )
+
+        for event in self.clock.advance_time(pd.Timestamp("2026-03-16T14:31:00Z").value):
+            event.handle()
+
+        assert len(bars_received) == 1
+        bar = bars_received[0]
+        assert bar.open == Price.from_str("100.00")
+        assert bar.high == Price.from_str("101.00")
+        assert bar.low == Price.from_str("100.00")
+        assert bar.close == Price.from_str("101.00")
+        assert bar.volume == Quantity.from_int(10)
+
+    def test_request_bars_for_continuous_future_forward_direction(self):
+        catalog = setup_catalog(protocol="file", path=self.tmp_path / "contfut_catalog_forward")
+        transition_ns = pd.Timestamp("2026-03-16T14:31:00Z").value
+
+        bars = [
+            Bar(
+                BarType.from_str("ESH26.XCME-1-MINUTE-LAST-EXTERNAL"),
+                Price.from_str("100.00"),
+                Price.from_str("101.00"),
+                Price.from_str("99.00"),
+                Price.from_str("100.50"),
+                Quantity.from_int(1),
+                pd.Timestamp("2026-03-16T14:30:00Z").value,
+                pd.Timestamp("2026-03-16T14:30:00Z").value,
+            ),
+            Bar(
+                BarType.from_str("ESM26.XCME-1-MINUTE-LAST-EXTERNAL"),
+                Price.from_str("95.00"),
+                Price.from_str("96.00"),
+                Price.from_str("94.50"),
+                Price.from_str("95.50"),
+                Quantity.from_int(2),
+                pd.Timestamp("2026-03-16T14:31:00Z").value,
+                pd.Timestamp("2026-03-16T14:31:00Z").value,
+            ),
+        ]
+        catalog.write_data(bars)
+        self.clock.set_time(to_time_ns=pd.Timestamp("2026-03-16T14:32:00Z").value)
+        self.data_engine.register_catalog(catalog)
+
+        bar_type = BarType.from_str("ES.XCME-1-MINUTE-LAST-INTERNAL@1-MINUTE-EXTERNAL")
+        bars_received = []
+        self.msgbus.subscribe(
+            topic=f"historical.data.bars.{bar_type.standard()}",
+            handler=bars_received.append,
+        )
+
+        handler = []
+        request = RequestBars(
+            bar_type=bar_type,
+            start=pd.Timestamp("2026-03-16T14:30:00Z"),
+            end=pd.Timestamp("2026-03-16T14:32:00Z"),
+            limit=0,
+            client_id=None,
+            venue=Venue("XCME"),
+            callback=handler.append,
+            request_id=UUID4(),
+            ts_init=self.clock.timestamp_ns(),
+            params={
+                "continuous_future_transitions": [
+                    {
+                        "transition_time_ns": transition_ns,
+                        "pre_instrument_id": "ESH26.XCME",
+                        "post_instrument_id": "ESM26.XCME",
+                        "pre_price": "100.00",
+                        "post_price": "95.00",
+                    },
+                ],
+                "continuous_future_adjustment_mode": ContinuousFutureAdjustmentType.FORWARD_SPREAD,
+                "update_catalog": False,
+                "skip_catalog_data": False,
+            },
+        )
+
+        self.msgbus.request(endpoint="DataEngine.request", request=request)
+
+        # Forward: pre-transition segment unadjusted, post-transition segment shifted by (pre - post) = +5
+        assert len(bars_received) == 2
+        assert bars_received[0].open == Price.from_str("100.00")
+        assert bars_received[0].close == Price.from_str("100.50")
+        assert bars_received[1].open == Price.from_str("100.00")
+        assert bars_received[1].high == Price.from_str("101.00")
+        assert bars_received[1].low == Price.from_str("99.50")
+        assert bars_received[1].close == Price.from_str("100.50")
+
+    def test_request_bars_for_continuous_future_composes_with_time_range_generator(self):
+        catalog = setup_catalog(protocol="file", path=self.tmp_path / "contfut_catalog_trg")
+        transition_ns = pd.Timestamp("2026-03-16T14:31:00Z").value
+
+        # Three 1-minute bars per contract so the inner request is chunked by durations_seconds.
+        bars = [
+            Bar(
+                BarType.from_str("ESH26.XCME-1-MINUTE-LAST-EXTERNAL"),
+                Price.from_str("100.00"),
+                Price.from_str("100.50"),
+                Price.from_str("99.50"),
+                Price.from_str("100.00"),
+                Quantity.from_int(1),
+                pd.Timestamp("2026-03-16T14:29:00Z").value,
+                pd.Timestamp("2026-03-16T14:29:00Z").value,
+            ),
+            Bar(
+                BarType.from_str("ESH26.XCME-1-MINUTE-LAST-EXTERNAL"),
+                Price.from_str("100.00"),
+                Price.from_str("101.00"),
+                Price.from_str("99.00"),
+                Price.from_str("100.50"),
+                Quantity.from_int(2),
+                pd.Timestamp("2026-03-16T14:30:00Z").value,
+                pd.Timestamp("2026-03-16T14:30:00Z").value,
+            ),
+            Bar(
+                BarType.from_str("ESM26.XCME-1-MINUTE-LAST-EXTERNAL"),
+                Price.from_str("95.00"),
+                Price.from_str("96.00"),
+                Price.from_str("94.50"),
+                Price.from_str("95.50"),
+                Quantity.from_int(3),
+                pd.Timestamp("2026-03-16T14:31:00Z").value,
+                pd.Timestamp("2026-03-16T14:31:00Z").value,
+            ),
+            Bar(
+                BarType.from_str("ESM26.XCME-1-MINUTE-LAST-EXTERNAL"),
+                Price.from_str("95.50"),
+                Price.from_str("96.50"),
+                Price.from_str("95.00"),
+                Price.from_str("96.00"),
+                Quantity.from_int(4),
+                pd.Timestamp("2026-03-16T14:32:00Z").value,
+                pd.Timestamp("2026-03-16T14:32:00Z").value,
+            ),
+        ]
+        catalog.write_data(bars)
+        self.clock.set_time(to_time_ns=pd.Timestamp("2026-03-16T14:33:00Z").value)
+        self.data_engine.register_catalog(catalog)
+
+        bar_type = BarType.from_str("ES.XCME-1-MINUTE-LAST-INTERNAL@1-MINUTE-EXTERNAL")
+        bars_received = []
+        self.msgbus.subscribe(
+            topic=f"historical.data.bars.{bar_type.standard()}",
+            handler=bars_received.append,
+        )
+
+        handler = []
+        request = RequestBars(
+            bar_type=bar_type,
+            start=pd.Timestamp("2026-03-16T14:29:00Z"),
+            end=pd.Timestamp("2026-03-16T14:32:00Z"),
+            limit=0,
+            client_id=None,
+            venue=Venue("XCME"),
+            callback=handler.append,
+            request_id=UUID4(),
+            ts_init=self.clock.timestamp_ns(),
+            params={
+                "continuous_future_transitions": [
+                    {
+                        "transition_time_ns": transition_ns,
+                        "pre_instrument_id": "ESH26.XCME",
+                        "post_instrument_id": "ESM26.XCME",
+                        "pre_price": "100.50",
+                        "post_price": "95.00",
+                    },
+                ],
+                "continuous_future_adjustment_mode": ContinuousFutureAdjustmentType.BACKWARD_SPREAD,
+                # Each segment's inner request chunks into ~60s sub-requests via the long-request loop
+                "time_range_generator": "",
+                "durations_seconds": [60],
+                "update_catalog": False,
+                "skip_catalog_data": False,
+            },
+        )
+
+        self.msgbus.request(endpoint="DataEngine.request", request=request)
+
+        # Backward offset = post - pre = -5.5 → pre-transition bars shifted down by 5.5
+        # Inner requests were chunked but the final adjusted series is identical
+        assert len(handler) == 1
+        assert len(bars_received) == 4
+        assert bars_received[0].open == Price.from_str("94.50")
+        assert bars_received[1].close == Price.from_str("95.00")
+        assert bars_received[2].open == Price.from_str("95.00")
+        assert bars_received[3].close == Price.from_str("96.00")
+
+    def test_request_bars_for_continuous_future_single_segment_no_transition_in_range(self):
+        catalog = setup_catalog(protocol="file", path=self.tmp_path / "contfut_catalog_single")
+        transition_ns = pd.Timestamp("2026-06-15T14:31:00Z").value
+
+        bars = [
+            Bar(
+                BarType.from_str("ESH26.XCME-1-MINUTE-LAST-EXTERNAL"),
+                Price.from_str("100.00"),
+                Price.from_str("101.00"),
+                Price.from_str("99.00"),
+                Price.from_str("100.50"),
+                Quantity.from_int(1),
+                pd.Timestamp("2026-03-16T14:29:00Z").value,
+                pd.Timestamp("2026-03-16T14:29:00Z").value,
+            ),
+            Bar(
+                BarType.from_str("ESH26.XCME-1-MINUTE-LAST-EXTERNAL"),
+                Price.from_str("100.50"),
+                Price.from_str("101.50"),
+                Price.from_str("100.00"),
+                Price.from_str("101.00"),
+                Quantity.from_int(2),
+                pd.Timestamp("2026-03-16T14:30:00Z").value,
+                pd.Timestamp("2026-03-16T14:30:00Z").value,
+            ),
+        ]
+        catalog.write_data(bars)
+        self.clock.set_time(to_time_ns=pd.Timestamp("2026-03-16T14:31:00Z").value)
+        self.data_engine.register_catalog(catalog)
+
+        bar_type = BarType.from_str("ES.XCME-1-MINUTE-LAST-INTERNAL@1-MINUTE-EXTERNAL")
+        bars_received = []
+        self.msgbus.subscribe(
+            topic=f"historical.data.bars.{bar_type.standard()}",
+            handler=bars_received.append,
+        )
+
+        handler = []
+        request = RequestBars(
+            bar_type=bar_type,
+            # Request range entirely before the only transition
+            start=pd.Timestamp("2026-03-16T14:29:00Z"),
+            end=pd.Timestamp("2026-03-16T14:31:00Z"),
+            limit=0,
+            client_id=None,
+            venue=Venue("XCME"),
+            callback=handler.append,
+            request_id=UUID4(),
+            ts_init=self.clock.timestamp_ns(),
+            params={
+                "continuous_future_transitions": [
+                    {
+                        "transition_time_ns": transition_ns,
+                        "pre_instrument_id": "ESH26.XCME",
+                        "post_instrument_id": "ESM26.XCME",
+                        "pre_price": "101.00",
+                        "post_price": "95.00",
+                    },
+                ],
+                "continuous_future_adjustment_mode": ContinuousFutureAdjustmentType.BACKWARD_SPREAD,
+                "update_catalog": False,
+                "skip_catalog_data": False,
+            },
+        )
+
+        self.msgbus.request(endpoint="DataEngine.request", request=request)
+
+        # Single segment before the transition: backward offset = -6 applied
+        assert len(bars_received) == 2
+        assert bars_received[0].open == Price.from_str("94.00")
+        assert bars_received[0].close == Price.from_str("94.50")
+        assert bars_received[1].close == Price.from_str("95.00")
+
+    def test_request_bars_for_continuous_future_stops_adjustment_at_last_post_instrument_id(self):
+        catalog = setup_catalog(protocol="file", path=self.tmp_path / "contfut_catalog_last_post")
+        t1_ns = pd.Timestamp("2026-03-16T14:31:00Z").value
+        t2_ns = pd.Timestamp("2026-06-15T14:31:00Z").value
+
+        bars = [
+            Bar(
+                BarType.from_str("ESH26.XCME-1-MINUTE-LAST-EXTERNAL"),
+                Price.from_str("100.00"),
+                Price.from_str("101.00"),
+                Price.from_str("99.00"),
+                Price.from_str("100.50"),
+                Quantity.from_int(1),
+                pd.Timestamp("2026-03-16T14:30:00Z").value,
+                pd.Timestamp("2026-03-16T14:30:00Z").value,
+            ),
+            Bar(
+                BarType.from_str("ESM26.XCME-1-MINUTE-LAST-EXTERNAL"),
+                Price.from_str("95.00"),
+                Price.from_str("96.00"),
+                Price.from_str("94.50"),
+                Price.from_str("95.50"),
+                Quantity.from_int(2),
+                pd.Timestamp("2026-03-16T14:31:00Z").value,
+                pd.Timestamp("2026-03-16T14:31:00Z").value,
+            ),
+        ]
+        catalog.write_data(bars)
+        self.clock.set_time(to_time_ns=pd.Timestamp("2026-03-16T14:32:00Z").value)
+        self.data_engine.register_catalog(catalog)
+
+        bar_type = BarType.from_str("ES.XCME-1-MINUTE-LAST-INTERNAL@1-MINUTE-EXTERNAL")
+        bars_received = []
+        self.msgbus.subscribe(
+            topic=f"historical.data.bars.{bar_type.standard()}",
+            handler=bars_received.append,
+        )
+
+        handler = []
+        request = RequestBars(
+            bar_type=bar_type,
+            start=pd.Timestamp("2026-03-16T14:30:00Z"),
+            end=pd.Timestamp("2026-03-16T14:31:00Z"),
+            limit=0,
+            client_id=None,
+            venue=Venue("XCME"),
+            callback=handler.append,
+            request_id=UUID4(),
+            ts_init=self.clock.timestamp_ns(),
+            params={
+                "continuous_future_transitions": [
+                    {
+                        "transition_time_ns": t1_ns,
+                        "pre_instrument_id": "ESH26.XCME",
+                        "post_instrument_id": "ESM26.XCME",
+                        "pre_price": "100.50",
+                        "post_price": "95.00",
+                    },
+                    {
+                        "transition_time_ns": t2_ns,
+                        "pre_instrument_id": "ESM26.XCME",
+                        "post_instrument_id": "ESU26.XCME",
+                        "pre_price": "105.00",
+                        "post_price": "100.00",
+                    },
+                ],
+                "continuous_future_adjustment_mode": ContinuousFutureAdjustmentType.BACKWARD_SPREAD,
+                "last_post_instrument_id": "ESM26.XCME",
+                "update_catalog": False,
+                "skip_catalog_data": False,
+            },
+        )
+
+        self.msgbus.request(endpoint="DataEngine.request", request=request)
+
+        assert len(handler) == 1
+        assert len(bars_received) == 2
+        assert bars_received[0].open == Price.from_str("94.50")
+        assert bars_received[0].high == Price.from_str("95.50")
+        assert bars_received[0].low == Price.from_str("93.50")
+        assert bars_received[0].close == Price.from_str("95.00")
+        assert bars_received[1].open == Price.from_str("95.00")
+        assert bars_received[1].high == Price.from_str("96.00")
+        assert bars_received[1].low == Price.from_str("94.50")
+        assert bars_received[1].close == Price.from_str("95.50")
+
+    def test_request_bars_for_continuous_future_anchors_forward_at_first_pre_instrument_id(self):
+        catalog = setup_catalog(protocol="file", path=self.tmp_path / "contfut_catalog_first_pre")
+        t1_ns = pd.Timestamp("2026-03-16T14:31:00Z").value
+        t2_ns = pd.Timestamp("2026-06-15T14:31:00Z").value
+
+        bars = [
+            Bar(
+                BarType.from_str("ESM26.XCME-1-MINUTE-LAST-EXTERNAL"),
+                Price.from_str("95.00"),
+                Price.from_str("96.00"),
+                Price.from_str("94.50"),
+                Price.from_str("95.50"),
+                Quantity.from_int(2),
+                pd.Timestamp("2026-03-16T14:31:00Z").value,
+                pd.Timestamp("2026-03-16T14:31:00Z").value,
+            ),
+            Bar(
+                BarType.from_str("ESU26.XCME-1-MINUTE-LAST-EXTERNAL"),
+                Price.from_str("100.00"),
+                Price.from_str("101.00"),
+                Price.from_str("99.50"),
+                Price.from_str("100.50"),
+                Quantity.from_int(3),
+                pd.Timestamp("2026-06-15T14:31:00Z").value,
+                pd.Timestamp("2026-06-15T14:31:00Z").value,
+            ),
+        ]
+        catalog.write_data(bars)
+        self.clock.set_time(to_time_ns=pd.Timestamp("2026-06-15T14:32:00Z").value)
+        self.data_engine.register_catalog(catalog)
+
+        bar_type = BarType.from_str("ES.XCME-1-MINUTE-LAST-INTERNAL@1-MINUTE-EXTERNAL")
+        bars_received = []
+        self.msgbus.subscribe(
+            topic=f"historical.data.bars.{bar_type.standard()}",
+            handler=bars_received.append,
+        )
+
+        handler = []
+        request = RequestBars(
+            bar_type=bar_type,
+            start=pd.Timestamp("2026-03-16T14:31:00Z"),
+            end=pd.Timestamp("2026-06-15T14:32:00Z"),
+            limit=0,
+            client_id=None,
+            venue=Venue("XCME"),
+            callback=handler.append,
+            request_id=UUID4(),
+            ts_init=self.clock.timestamp_ns(),
+            params={
+                "continuous_future_transitions": [
+                    {
+                        "transition_time_ns": t1_ns,
+                        "pre_instrument_id": "ESH26.XCME",
+                        "post_instrument_id": "ESM26.XCME",
+                        "pre_price": "100.50",
+                        "post_price": "95.00",
+                    },
+                    {
+                        "transition_time_ns": t2_ns,
+                        "pre_instrument_id": "ESM26.XCME",
+                        "post_instrument_id": "ESU26.XCME",
+                        "pre_price": "105.00",
+                        "post_price": "100.00",
+                    },
+                ],
+                "continuous_future_adjustment_mode": ContinuousFutureAdjustmentType.FORWARD_SPREAD,
+                "first_pre_instrument_id": "ESM26.XCME",
+                "update_catalog": False,
+                "skip_catalog_data": False,
+            },
+        )
+
+        self.msgbus.request(endpoint="DataEngine.request", request=request)
+
+        # Forward + first_pre=ESM26 anchors on ESM26: ESM26 segment unadjusted,
+        # ESU26 segment shifted by transitions[1].pre - transitions[1].post = +5.
+        assert len(handler) == 1
+        assert len(bars_received) == 2
+        assert bars_received[0].open == Price.from_str("95.00")
+        assert bars_received[0].high == Price.from_str("96.00")
+        assert bars_received[0].low == Price.from_str("94.50")
+        assert bars_received[0].close == Price.from_str("95.50")
+        assert bars_received[1].open == Price.from_str("105.00")
+        assert bars_received[1].high == Price.from_str("106.00")
+        assert bars_received[1].low == Price.from_str("104.50")
+        assert bars_received[1].close == Price.from_str("105.50")
+
+    def test_request_bars_for_continuous_future_aborts_on_zero_pre_price_ratio(self):
+        transition_ns = pd.Timestamp("2026-03-16T14:31:00Z").value
+        self.clock.set_time(to_time_ns=pd.Timestamp("2026-03-16T14:32:00Z").value)
+
+        bar_type = BarType.from_str("ES.XCME-1-MINUTE-LAST-INTERNAL@1-MINUTE-EXTERNAL")
+        request = RequestBars(
+            bar_type=bar_type,
+            start=pd.Timestamp("2026-03-16T14:30:00Z"),
+            end=pd.Timestamp("2026-03-16T14:32:00Z"),
+            limit=0,
+            client_id=None,
+            venue=Venue("XCME"),
+            callback=(lambda _: None),
+            request_id=UUID4(),
+            ts_init=self.clock.timestamp_ns(),
+            params={
+                "continuous_future_transitions": [
+                    {
+                        "transition_time_ns": transition_ns,
+                        "pre_instrument_id": "ESH26.XCME",
+                        "post_instrument_id": "ESM26.XCME",
+                        # Invalid for RATIO mode: division by zero
+                        "pre_price": "0",
+                        "post_price": "95.00",
+                    },
+                ],
+                "continuous_future_adjustment_mode": ContinuousFutureAdjustmentType.BACKWARD_RATIO,
+                "update_catalog": False,
+                "skip_catalog_data": False,
+            },
+        )
+
+        self.data_engine._requests[request.id] = request
+        self.data_engine._handle_continuous_future_request(request)
+
+        assert request.id not in self.data_engine._requests
+        assert self.data_engine._bar_aggregators == {}
+
+    @pytest.mark.parametrize(
+        ("transition_overrides", "params_overrides"),
+        [
+            ({"pre_instrument_id": "ESH26"}, {}),
+            ({"transition_time_ns": None}, {}),
+            ({"pre_price": "not-a-price"}, {}),
+            (
+                {"post_price": "0"},
+                {"continuous_future_adjustment_mode": ContinuousFutureAdjustmentType.FORWARD_RATIO},
+            ),
+            ({}, {"last_post_instrument_id": "ESZ26.XCME"}),
+            ({}, {"first_pre_instrument_id": "ESZ26.XCME"}),
+        ],
+    )
+    def test_request_bars_for_continuous_future_aborts_on_invalid_transition_metadata(
+        self,
+        transition_overrides,
+        params_overrides,
+    ):
+        transition = {
+            "transition_time_ns": pd.Timestamp("2026-03-16T14:31:00Z").value,
+            "pre_instrument_id": "ESH26.XCME",
+            "post_instrument_id": "ESM26.XCME",
+            "pre_price": "101.00",
+            "post_price": "95.00",
+        }
+        transition.update(transition_overrides)
+        params = {
+            "continuous_future_transitions": [transition],
+            "continuous_future_adjustment_mode": ContinuousFutureAdjustmentType.BACKWARD_SPREAD,
+            "update_catalog": False,
+            "skip_catalog_data": False,
+        }
+        params.update(params_overrides)
+        self.clock.set_time(to_time_ns=pd.Timestamp("2026-03-16T14:32:00Z").value)
+
+        request = RequestBars(
+            bar_type=BarType.from_str("ES.XCME-1-MINUTE-LAST-INTERNAL@1-MINUTE-EXTERNAL"),
+            start=pd.Timestamp("2026-03-16T14:30:00Z"),
+            end=pd.Timestamp("2026-03-16T14:32:00Z"),
+            limit=0,
+            client_id=None,
+            venue=Venue("XCME"),
+            callback=(lambda _: None),
+            request_id=UUID4(),
+            ts_init=self.clock.timestamp_ns(),
+            params=params,
+        )
+
+        self.data_engine._requests[request.id] = request
+        self.data_engine._handle_continuous_future_request(request)
+
+        assert request.id not in self.data_engine._requests
+        assert self.data_engine._bar_aggregators == {}
+
+    def test_request_bars_for_continuous_future_aborts_on_unsorted_transition_times(self):
+        params = {
+            "continuous_future_transitions": [
+                {
+                    "transition_time_ns": pd.Timestamp("2026-06-15T14:31:00Z").value,
+                    "pre_instrument_id": "ESH26.XCME",
+                    "post_instrument_id": "ESM26.XCME",
+                    "pre_price": "101.00",
+                    "post_price": "95.00",
+                },
+                {
+                    "transition_time_ns": pd.Timestamp("2026-03-16T14:31:00Z").value,
+                    "pre_instrument_id": "ESM26.XCME",
+                    "post_instrument_id": "ESU26.XCME",
+                    "pre_price": "96.00",
+                    "post_price": "92.00",
+                },
+            ],
+            "continuous_future_adjustment_mode": ContinuousFutureAdjustmentType.BACKWARD_SPREAD,
+            "update_catalog": False,
+            "skip_catalog_data": False,
+        }
+        self.clock.set_time(to_time_ns=pd.Timestamp("2026-06-15T14:32:00Z").value)
+
+        request = RequestBars(
+            bar_type=BarType.from_str("ES.XCME-1-MINUTE-LAST-INTERNAL@1-MINUTE-EXTERNAL"),
+            start=pd.Timestamp("2026-03-16T14:30:00Z"),
+            end=pd.Timestamp("2026-06-15T14:32:00Z"),
+            limit=0,
+            client_id=None,
+            venue=Venue("XCME"),
+            callback=(lambda _: None),
+            request_id=UUID4(),
+            ts_init=self.clock.timestamp_ns(),
+            params=params,
+        )
+
+        self.data_engine._requests[request.id] = request
+        self.data_engine._handle_continuous_future_request(request)
+
+        assert request.id not in self.data_engine._requests
+        assert self.data_engine._bar_aggregators == {}
+
+    def test_request_bars_for_continuous_future_aborts_on_chain_discontinuity(self):
+        params = {
+            "continuous_future_transitions": [
+                {
+                    "transition_time_ns": pd.Timestamp("2026-03-16T14:31:00Z").value,
+                    "pre_instrument_id": "ESH26.XCME",
+                    "post_instrument_id": "ESM26.XCME",
+                    "pre_price": "101.00",
+                    "post_price": "95.00",
+                },
+                # Discontinuity: prior post was ESM26 but this row's pre is ESU26
+                {
+                    "transition_time_ns": pd.Timestamp("2026-06-15T14:31:00Z").value,
+                    "pre_instrument_id": "ESU26.XCME",
+                    "post_instrument_id": "ESZ26.XCME",
+                    "pre_price": "96.00",
+                    "post_price": "92.00",
+                },
+            ],
+            "continuous_future_adjustment_mode": ContinuousFutureAdjustmentType.BACKWARD_SPREAD,
+            "update_catalog": False,
+            "skip_catalog_data": False,
+        }
+        self.clock.set_time(to_time_ns=pd.Timestamp("2026-06-15T14:32:00Z").value)
+
+        request = RequestBars(
+            bar_type=BarType.from_str("ES.XCME-1-MINUTE-LAST-INTERNAL@1-MINUTE-EXTERNAL"),
+            start=pd.Timestamp("2026-03-16T14:30:00Z"),
+            end=pd.Timestamp("2026-06-15T14:32:00Z"),
+            limit=0,
+            client_id=None,
+            venue=Venue("XCME"),
+            callback=(lambda _: None),
+            request_id=UUID4(),
+            ts_init=self.clock.timestamp_ns(),
+            params=params,
+        )
+
+        self.data_engine._requests[request.id] = request
+        self.data_engine._handle_continuous_future_request(request)
+
+        assert request.id not in self.data_engine._requests
+        assert self.data_engine._bar_aggregators == {}
+
+    def test_request_bars_for_continuous_future_synthesizes_target_instrument(self):
+        catalog = setup_catalog(protocol="file", path=self.tmp_path / "contfut_catalog_synth")
+        transition_ns = pd.Timestamp("2026-03-16T14:31:00Z").value
+        catalog.write_data(
+            [
+                Bar(
+                    BarType.from_str("ESH26.XCME-1-MINUTE-LAST-EXTERNAL"),
+                    Price.from_str("100.00"),
+                    Price.from_str("101.00"),
+                    Price.from_str("99.00"),
+                    Price.from_str("100.50"),
+                    Quantity.from_int(1),
+                    pd.Timestamp("2026-03-16T14:30:00Z").value,
+                    pd.Timestamp("2026-03-16T14:30:00Z").value,
+                ),
+            ],
+        )
+        self.clock.set_time(to_time_ns=pd.Timestamp("2026-03-16T14:32:00Z").value)
+        cache = TestComponentStubs.cache()
+        cache.add_instrument(self.esh26_xcme)
+        cache.add_instrument(self.esm26_xcme)
+        msgbus = MessageBus(
+            trader_id=self.trader_id,
+            clock=self.clock,
+        )
+        data_engine = DataEngine(
+            msgbus=msgbus,
+            cache=cache,
+            clock=self.clock,
+            config=DataEngineConfig(debug=True),
+        )
+        data_engine.register_catalog(catalog)
+
+        bar_type = BarType.from_str("ES.XCME-1-MINUTE-LAST-INTERNAL@1-MINUTE-EXTERNAL")
+        handler = []
+        request = RequestBars(
+            bar_type=bar_type,
+            start=pd.Timestamp("2026-03-16T14:30:00Z"),
+            end=pd.Timestamp("2026-03-16T14:30:00Z"),
+            limit=0,
+            client_id=None,
+            venue=Venue("XCME"),
+            callback=handler.append,
+            request_id=UUID4(),
+            ts_init=self.clock.timestamp_ns(),
+            params={
+                "continuous_future_transitions": [
+                    {
+                        "transition_time_ns": transition_ns,
+                        "pre_instrument_id": "ESH26.XCME",
+                        "post_instrument_id": "ESM26.XCME",
+                        "pre_price": "100.50",
+                        "post_price": "95.00",
+                    },
+                ],
+                "continuous_future_adjustment_mode": ContinuousFutureAdjustmentType.BACKWARD_SPREAD,
+                "update_catalog": False,
+                "skip_catalog_data": False,
+            },
+        )
+
+        msgbus.request(endpoint="DataEngine.request", request=request)
+
+        target_instrument = cache.instrument(bar_type.instrument_id)
+        assert isinstance(target_instrument, FuturesContract)
+        assert target_instrument.id == bar_type.instrument_id
+        assert target_instrument.raw_symbol == Symbol("ES")
+        assert target_instrument.price_increment == self.esh26_xcme.price_increment
+        assert target_instrument.expiration_ns == 0
+        assert len(handler) == 1
+
+    def test_request_bars_for_continuous_future_trade_tick_source(self):
+        catalog = setup_catalog(protocol="file", path=self.tmp_path / "contfut_catalog_trades")
+        transition_ns = pd.Timestamp("2026-03-16T14:30:30Z").value
+
+        trades = [
+            TradeTick(
+                instrument_id=self.esh26_xcme.id,
+                price=Price.from_str("100.00"),
+                size=Quantity.from_int(1),
+                aggressor_side=AggressorSide.BUYER,
+                trade_id=TradeId("ESH26-A"),
+                ts_event=pd.Timestamp("2026-03-16T14:30:10Z").value,
+                ts_init=pd.Timestamp("2026-03-16T14:30:10Z").value,
+            ),
+            TradeTick(
+                instrument_id=self.esh26_xcme.id,
+                price=Price.from_str("101.00"),
+                size=Quantity.from_int(2),
+                aggressor_side=AggressorSide.BUYER,
+                trade_id=TradeId("ESH26-B"),
+                ts_event=pd.Timestamp("2026-03-16T14:30:20Z").value,
+                ts_init=pd.Timestamp("2026-03-16T14:30:20Z").value,
+            ),
+            TradeTick(
+                instrument_id=self.esm26_xcme.id,
+                price=Price.from_str("95.00"),
+                size=Quantity.from_int(3),
+                aggressor_side=AggressorSide.BUYER,
+                trade_id=TradeId("ESM26-A"),
+                ts_event=pd.Timestamp("2026-03-16T14:30:40Z").value,
+                ts_init=pd.Timestamp("2026-03-16T14:30:40Z").value,
+            ),
+            TradeTick(
+                instrument_id=self.esm26_xcme.id,
+                price=Price.from_str("96.00"),
+                size=Quantity.from_int(4),
+                aggressor_side=AggressorSide.BUYER,
+                trade_id=TradeId("ESM26-B"),
+                ts_event=pd.Timestamp("2026-03-16T14:30:50Z").value,
+                ts_init=pd.Timestamp("2026-03-16T14:30:50Z").value,
+            ),
+            # Trailing trade after the 14:30 bucket close to trigger bar emission
+            TradeTick(
+                instrument_id=self.esm26_xcme.id,
+                price=Price.from_str("97.00"),
+                size=Quantity.from_int(5),
+                aggressor_side=AggressorSide.BUYER,
+                trade_id=TradeId("ESM26-C"),
+                ts_event=pd.Timestamp("2026-03-16T14:31:10Z").value,
+                ts_init=pd.Timestamp("2026-03-16T14:31:10Z").value,
+            ),
+        ]
+        catalog.write_data(trades)
+        self.clock.set_time(to_time_ns=pd.Timestamp("2026-03-16T14:31:30Z").value)
+        self.data_engine.register_catalog(catalog)
+
+        bar_type = BarType.from_str("ES.XCME-1-MINUTE-LAST-INTERNAL")
+        bars_received = []
+        self.msgbus.subscribe(
+            topic=f"historical.data.bars.{bar_type.standard()}",
+            handler=bars_received.append,
+        )
+
+        handler = []
+        request = RequestBars(
+            bar_type=bar_type,
+            start=pd.Timestamp("2026-03-16T14:30:00Z"),
+            end=pd.Timestamp("2026-03-16T14:31:30Z"),
+            limit=0,
+            client_id=None,
+            venue=Venue("XCME"),
+            callback=handler.append,
+            request_id=UUID4(),
+            ts_init=self.clock.timestamp_ns(),
+            params={
+                "continuous_future_transitions": [
+                    {
+                        "transition_time_ns": transition_ns,
+                        "pre_instrument_id": "ESH26.XCME",
+                        "post_instrument_id": "ESM26.XCME",
+                        "pre_price": "101.00",
+                        "post_price": "95.00",
+                    },
+                ],
+                "continuous_future_adjustment_mode": ContinuousFutureAdjustmentType.BACKWARD_SPREAD,
+                "update_catalog": False,
+                "skip_catalog_data": False,
+            },
+        )
+
+        self.msgbus.request(endpoint="DataEngine.request", request=request)
+
+        # Backward offset = -6 on the pre-transition trades.
+        # 14:30 bucket: pre-T 100→94, 101→95; post-T 95, 96 → OHLC(94, 96, 94, 96) vol=10.
+        # The 14:31:10 trade closes the 14:30 bucket and opens a new (incomplete) bucket.
+        assert len(bars_received) == 1
+        assert bars_received[0].open == Price.from_str("94.00")
+        assert bars_received[0].high == Price.from_str("96.00")
+        assert bars_received[0].low == Price.from_str("94.00")
+        assert bars_received[0].close == Price.from_str("96.00")
+        assert bars_received[0].volume == Quantity.from_int(10)
+
+    def test_request_bars_for_continuous_future_quote_tick_source(self):
+        catalog = setup_catalog(protocol="file", path=self.tmp_path / "contfut_catalog_quotes")
+        transition_ns = pd.Timestamp("2026-03-16T14:30:30Z").value
+
+        quotes = [
+            QuoteTick(
+                instrument_id=self.esh26_xcme.id,
+                bid_price=Price.from_str("100.00"),
+                ask_price=Price.from_str("100.50"),
+                bid_size=Quantity.from_int(1),
+                ask_size=Quantity.from_int(1),
+                ts_event=pd.Timestamp("2026-03-16T14:30:10Z").value,
+                ts_init=pd.Timestamp("2026-03-16T14:30:10Z").value,
+            ),
+            QuoteTick(
+                instrument_id=self.esh26_xcme.id,
+                bid_price=Price.from_str("100.50"),
+                ask_price=Price.from_str("101.00"),
+                bid_size=Quantity.from_int(1),
+                ask_size=Quantity.from_int(1),
+                ts_event=pd.Timestamp("2026-03-16T14:30:20Z").value,
+                ts_init=pd.Timestamp("2026-03-16T14:30:20Z").value,
+            ),
+            QuoteTick(
+                instrument_id=self.esm26_xcme.id,
+                bid_price=Price.from_str("94.50"),
+                ask_price=Price.from_str("95.00"),
+                bid_size=Quantity.from_int(1),
+                ask_size=Quantity.from_int(1),
+                ts_event=pd.Timestamp("2026-03-16T14:30:40Z").value,
+                ts_init=pd.Timestamp("2026-03-16T14:30:40Z").value,
+            ),
+            QuoteTick(
+                instrument_id=self.esm26_xcme.id,
+                bid_price=Price.from_str("95.00"),
+                ask_price=Price.from_str("95.50"),
+                bid_size=Quantity.from_int(1),
+                ask_size=Quantity.from_int(1),
+                ts_event=pd.Timestamp("2026-03-16T14:30:50Z").value,
+                ts_init=pd.Timestamp("2026-03-16T14:30:50Z").value,
+            ),
+            # Trailing quote past the 14:30 bucket close to trigger emission
+            QuoteTick(
+                instrument_id=self.esm26_xcme.id,
+                bid_price=Price.from_str("96.00"),
+                ask_price=Price.from_str("96.50"),
+                bid_size=Quantity.from_int(1),
+                ask_size=Quantity.from_int(1),
+                ts_event=pd.Timestamp("2026-03-16T14:31:10Z").value,
+                ts_init=pd.Timestamp("2026-03-16T14:31:10Z").value,
+            ),
+        ]
+        catalog.write_data(quotes)
+        self.clock.set_time(to_time_ns=pd.Timestamp("2026-03-16T14:31:30Z").value)
+        self.data_engine.register_catalog(catalog)
+
+        bar_type = BarType.from_str("ES.XCME-1-MINUTE-MID-INTERNAL")
+        bars_received = []
+        self.msgbus.subscribe(
+            topic=f"historical.data.bars.{bar_type.standard()}",
+            handler=bars_received.append,
+        )
+
+        handler = []
+        request = RequestBars(
+            bar_type=bar_type,
+            start=pd.Timestamp("2026-03-16T14:30:00Z"),
+            end=pd.Timestamp("2026-03-16T14:31:30Z"),
+            limit=0,
+            client_id=None,
+            venue=Venue("XCME"),
+            callback=handler.append,
+            request_id=UUID4(),
+            ts_init=self.clock.timestamp_ns(),
+            params={
+                "continuous_future_transitions": [
+                    {
+                        "transition_time_ns": transition_ns,
+                        "pre_instrument_id": "ESH26.XCME",
+                        "post_instrument_id": "ESM26.XCME",
+                        "pre_price": "100.75",
+                        "post_price": "94.75",
+                    },
+                ],
+                "continuous_future_adjustment_mode": ContinuousFutureAdjustmentType.BACKWARD_SPREAD,
+                "update_catalog": False,
+                "skip_catalog_data": False,
+            },
+        )
+
+        self.msgbus.request(endpoint="DataEngine.request", request=request)
+
+        # Backward offset = -6 on the pre-transition quote mids.
+        # Pre-T mids: 100.25, 100.75 → adjusted: 94.25, 94.75.
+        # Post-T mids: 94.75, 95.25 → unchanged.
+        # Trailing 14:31:10 quote closes the 14:30 bucket.
+        assert len(bars_received) == 1
+        assert bars_received[0].open == Price.from_str("94.25")
+        assert bars_received[0].high == Price.from_str("95.25")
+        assert bars_received[0].low == Price.from_str("94.25")
+        assert bars_received[0].close == Price.from_str("95.25")
+
+    def test_subscribe_bars_for_continuous_future_unsubscribe_cancels_pending_timer(self):
+        xcme_client = BacktestMarketDataClient(
+            client_id=ClientId("XCME"),
+            msgbus=self.msgbus,
+            cache=self.cache,
+            clock=self.clock,
+        )
+        self.data_engine.register_client(xcme_client)
+        xcme_client.start()
+
+        transition_ns = pd.Timestamp("2026-03-16T14:30:30Z").value
+        bar_type = BarType.from_str("ES.XCME-1-MINUTE-LAST-INTERNAL")
+        self.clock.set_time(to_time_ns=pd.Timestamp("2026-03-16T14:30:01Z").value)
+
+        subscribe = SubscribeBars(
+            client_id=ClientId("XCME"),
+            venue=Venue("XCME"),
+            bar_type=bar_type,
+            command_id=UUID4(),
+            ts_init=self.clock.timestamp_ns(),
+            params={
+                "continuous_future_transitions": [
+                    {
+                        "transition_time_ns": transition_ns,
+                        "pre_instrument_id": "ESH26.XCME",
+                        "post_instrument_id": "ESM26.XCME",
+                        "pre_price": "101.00",
+                        "post_price": "95.00",
+                    },
+                ],
+                "continuous_future_adjustment_mode": ContinuousFutureAdjustmentType.BACKWARD_SPREAD,
+            },
+        )
+
+        self.data_engine.execute(subscribe)
+
+        pending_timers = [
+            name for name in self.clock.timer_names if "continuous-future-roll" in name
+        ]
+        assert len(pending_timers) == 1
+
+        # Unsubscribe before the transition fires — timer must be cancelled
+        self.data_engine.execute(
+            UnsubscribeBars(
+                client_id=ClientId("XCME"),
+                venue=Venue("XCME"),
+                bar_type=bar_type,
+                command_id=UUID4(),
+                ts_init=self.clock.timestamp_ns(),
+                params=subscribe.params.copy(),
+            ),
+        )
+
+        pending_timers = [
+            name for name in self.clock.timer_names if "continuous-future-roll" in name
+        ]
+        assert len(pending_timers) == 0
+
+    def test_subscribe_bars_for_continuous_future_rolls_multiple_transitions(self):
+        xcme_client = BacktestMarketDataClient(
+            client_id=ClientId("XCME"),
+            msgbus=self.msgbus,
+            cache=self.cache,
+            clock=self.clock,
+        )
+        self.data_engine.register_client(xcme_client)
+        xcme_client.start()
+
+        t1_ns = pd.Timestamp("2026-03-16T14:30:30Z").value
+        t2_ns = pd.Timestamp("2026-03-16T14:31:30Z").value
+        bar_type = BarType.from_str("ES.XCME-1-MINUTE-LAST-INTERNAL")
+        self.clock.set_time(to_time_ns=pd.Timestamp("2026-03-16T14:30:01Z").value)
+
+        self.data_engine.execute(
+            SubscribeBars(
+                client_id=ClientId("XCME"),
+                venue=Venue("XCME"),
+                bar_type=bar_type,
+                command_id=UUID4(),
+                ts_init=self.clock.timestamp_ns(),
+                params={
+                    "continuous_future_transitions": [
+                        {
+                            "transition_time_ns": t1_ns,
+                            "pre_instrument_id": "ESH26.XCME",
+                            "post_instrument_id": "ESM26.XCME",
+                            "pre_price": "100.00",
+                            "post_price": "95.00",
+                        },
+                        {
+                            "transition_time_ns": t2_ns,
+                            "pre_instrument_id": "ESM26.XCME",
+                            "post_instrument_id": "ESU26.XCME",
+                            "pre_price": "96.00",
+                            "post_price": "92.00",
+                        },
+                    ],
+                    "continuous_future_adjustment_mode": ContinuousFutureAdjustmentType.BACKWARD_SPREAD,
+                },
+            ),
+        )
+
+        assert xcme_client.subscribed_trade_ticks() == [self.esh26_xcme.id]
+
+        for event in self.clock.advance_time(t1_ns):
+            event.handle()
+
+        assert xcme_client.subscribed_trade_ticks() == [self.esm26_xcme.id]
+
+        for event in self.clock.advance_time(t2_ns):
+            event.handle()
+
+        assert xcme_client.subscribed_trade_ticks() == [self.esu26_xcme.id]
+
+    def test_subscribe_bars_for_continuous_future_quote_tick_source(self):
+        xcme_client = BacktestMarketDataClient(
+            client_id=ClientId("XCME"),
+            msgbus=self.msgbus,
+            cache=self.cache,
+            clock=self.clock,
+        )
+        self.data_engine.register_client(xcme_client)
+        xcme_client.start()
+
+        transition_ns = pd.Timestamp("2026-03-16T14:30:30Z").value
+        bar_type = BarType.from_str("ES.XCME-1-MINUTE-MID-INTERNAL")
+        bars_received = []
+        self.msgbus.subscribe(
+            topic=f"data.bars.{bar_type.standard()}",
+            handler=bars_received.append,
+        )
+        self.clock.set_time(to_time_ns=pd.Timestamp("2026-03-16T14:30:01Z").value)
+
+        self.data_engine.execute(
+            SubscribeBars(
+                client_id=ClientId("XCME"),
+                venue=Venue("XCME"),
+                bar_type=bar_type,
+                command_id=UUID4(),
+                ts_init=self.clock.timestamp_ns(),
+                params={
+                    "continuous_future_transitions": [
+                        {
+                            "transition_time_ns": transition_ns,
+                            "pre_instrument_id": "ESH26.XCME",
+                            "post_instrument_id": "ESM26.XCME",
+                            "pre_price": "100.75",
+                            "post_price": "94.75",
+                        },
+                    ],
+                    "continuous_future_adjustment_mode": ContinuousFutureAdjustmentType.BACKWARD_SPREAD,
+                },
+            ),
+        )
+
+        assert xcme_client.subscribed_quote_ticks() == [self.esh26_xcme.id]
+
+        self.data_engine.process(
+            QuoteTick(
+                instrument_id=self.esh26_xcme.id,
+                bid_price=Price.from_str("100.50"),
+                ask_price=Price.from_str("101.00"),
+                bid_size=Quantity.from_int(1),
+                ask_size=Quantity.from_int(1),
+                ts_event=pd.Timestamp("2026-03-16T14:30:10Z").value,
+                ts_init=pd.Timestamp("2026-03-16T14:30:10Z").value,
+            ),
+        )
+
+        for event in self.clock.advance_time(transition_ns):
+            event.handle()
+
+        assert xcme_client.subscribed_quote_ticks() == [self.esm26_xcme.id]
+
+        self.data_engine.process(
+            QuoteTick(
+                instrument_id=self.esm26_xcme.id,
+                bid_price=Price.from_str("94.50"),
+                ask_price=Price.from_str("95.00"),
+                bid_size=Quantity.from_int(1),
+                ask_size=Quantity.from_int(1),
+                ts_event=pd.Timestamp("2026-03-16T14:30:40Z").value,
+                ts_init=pd.Timestamp("2026-03-16T14:30:40Z").value,
+            ),
+        )
+
+        for event in self.clock.advance_time(pd.Timestamp("2026-03-16T14:31:00Z").value):
+            event.handle()
+
+        # Pre-transition mid = 100.75 adjusted by spread = -6 → 94.75
+        # Post-transition mid = 94.75 unchanged
+        assert len(bars_received) == 1
+        assert bars_received[0].open == Price.from_str("94.75")
+        assert bars_received[0].close == Price.from_str("94.75")

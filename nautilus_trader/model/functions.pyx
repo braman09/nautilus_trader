@@ -1,5 +1,5 @@
 # -------------------------------------------------------------------------------------------------
-#  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+#  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 #  https://nautechsystems.io
 #
 #  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -55,6 +55,8 @@ from nautilus_trader.core.rust.model cimport order_status_from_cstr
 from nautilus_trader.core.rust.model cimport order_status_to_cstr
 from nautilus_trader.core.rust.model cimport order_type_from_cstr
 from nautilus_trader.core.rust.model cimport order_type_to_cstr
+from nautilus_trader.core.rust.model cimport oto_trigger_mode_from_cstr
+from nautilus_trader.core.rust.model cimport oto_trigger_mode_to_cstr
 from nautilus_trader.core.rust.model cimport position_adjustment_type_from_cstr
 from nautilus_trader.core.rust.model cimport position_adjustment_type_to_cstr
 from nautilus_trader.core.rust.model cimport position_side_from_cstr
@@ -203,6 +205,14 @@ cpdef str option_kind_to_str(OptionKind value):
     return cstr_to_pystr(option_kind_to_cstr(value))
 
 
+cpdef OtoTriggerMode oto_trigger_mode_from_str(str value):
+    return oto_trigger_mode_from_cstr(pystr_to_cstr(value))
+
+
+cpdef str oto_trigger_mode_to_str(OtoTriggerMode value):
+    return cstr_to_pystr(oto_trigger_mode_to_cstr(value))
+
+
 cpdef OrderSide order_side_from_str(str value):
     return order_side_from_cstr(pystr_to_cstr(value))
 
@@ -289,6 +299,17 @@ cpdef TriggerType trigger_type_from_str(str value):
 
 cpdef str trigger_type_to_str(TriggerType value):
     return cstr_to_pystr(trigger_type_to_cstr(value))
+
+
+cpdef account_type_to_pyo3(AccountType value):
+    if value == AccountType.CASH:
+        return nautilus_pyo3.AccountType.CASH
+    if value == AccountType.MARGIN:
+        return nautilus_pyo3.AccountType.MARGIN
+    if value == AccountType.BETTING:
+        return nautilus_pyo3.AccountType.BETTING
+
+    raise ValueError(f"Unsupported `AccountType`, was '{account_type_to_str(value)}'")
 
 
 cpdef order_side_to_pyo3(OrderSide value):

@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -27,6 +27,10 @@ const MAX_PERIOD: usize = 1_024;
 #[cfg_attr(
     feature = "python",
     pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.indicators")
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.indicators")
 )]
 pub struct OnBalanceVolume {
     pub period: usize,
@@ -103,22 +107,28 @@ impl OnBalanceVolume {
             0.0
         };
 
-        let _ = self.obv.push_back(delta);
-
-        self.value = self.obv.iter().sum();
+        if self.period == 0 {
+            // Unbounded cumulative OBV (matches the Cython `deque(maxlen=None)` reference).
+            self.value += delta;
+        } else {
+            // Rolling sum over the last `period` deltas (Cython `deque(maxlen=period)`).
+            if self.obv.len() == self.period {
+                let _ = self.obv.pop_front();
+            }
+            let _ = self.obv.push_back(delta);
+            self.value = self.obv.iter().sum();
+        }
 
         if !self.initialized {
             self.has_inputs = true;
-            if (self.period == 0 && !self.obv.is_empty()) || self.obv.len() >= self.period {
+
+            if self.period == 0 || self.obv.len() >= self.period {
                 self.initialized = true;
             }
         }
     }
 }
 
-////////////////////////////////////////////////////////////////////////////////
-// Tests
-////////////////////////////////////////////////////////////////////////////////
 #[cfg(test)]
 mod tests {
     use rstest::rstest;
@@ -162,12 +172,13 @@ mod tests {
             1000.0, 1200.0, 1500.0, 1800.0, 2000.0, 2200.0, 2500.0, 2800.0, 3000.0, 3200.0, 3500.0,
             3800.0, 4000.0, 4200.0, 4500.0,
         ];
+
         for i in 0..15 {
             obv_10.update_raw(open_values[i], close_values[i], volume_values[i]);
         }
 
         assert!(obv_10.initialized());
-        assert_eq!(obv_10.value, 41200.0);
+        assert_eq!(obv_10.value, 33700.0);
     }
 
     #[rstest]
@@ -183,5 +194,35 @@ mod tests {
         assert_eq!(obv_10.obv.len(), 0);
         assert!(!obv_10.has_inputs);
         assert!(!obv_10.initialized);
+    }
+
+    #[rstest]
+    fn test_value_respects_period_window() {
+        let mut obv = OnBalanceVolume::new(3);
+
+        // Each bar closes up, so delta = +volume; the early large volume must
+        // leave the 3-period window.
+        obv.update_raw(1.0, 2.0, 1000.0); // delta +1000 (early spike)
+        obv.update_raw(1.0, 2.0, 1.0);
+        obv.update_raw(1.0, 2.0, 2.0);
+        obv.update_raw(1.0, 2.0, 3.0);
+
+        // Window is now [1, 2, 3]: the 1000 spike has been evicted, so value = 6.
+        assert_eq!(obv.value, 6.0);
+    }
+
+    #[rstest]
+    fn test_period_zero_is_unbounded_cumulative() {
+        let mut obv = OnBalanceVolume::new(0);
+
+        // Feed more than MAX_PERIOD up-closes of +1; a fixed 1024-wide deque
+        // would cap the sum, but period == 0 is an unbounded cumulative total.
+        let count = MAX_PERIOD + 100;
+        for _ in 0..count {
+            obv.update_raw(1.0, 2.0, 1.0);
+        }
+
+        assert!(obv.initialized());
+        assert_eq!(obv.value, count as f64);
     }
 }

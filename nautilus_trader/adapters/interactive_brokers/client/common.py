@@ -1,5 +1,5 @@
 # -------------------------------------------------------------------------------------------------
-#  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+#  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 #  https://nautechsystems.io
 #
 #  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -25,7 +25,7 @@ from typing import NamedTuple
 
 import msgspec
 from ibapi.client import EClient
-from ibapi.commission_report import CommissionReport
+from ibapi.commission_and_fees_report import CommissionAndFeesReport
 from ibapi.common import BarData
 from ibapi.execution import Execution
 
@@ -37,11 +37,37 @@ from nautilus_trader.common.component import MessageBus
 from nautilus_trader.model.data import BarType
 from nautilus_trader.model.enums import OrderSide
 from nautilus_trader.model.identifiers import InstrumentId
+from nautilus_trader.model.identifiers import VenueOrderId
 
 
 class AccountOrderRef(NamedTuple):
     account_id: str
     order_id: str
+
+
+def get_venue_order_id(order_id: int, perm_id: int) -> VenueOrderId:
+    """
+    Get venue order ID, preferring IB's permanent order ID.
+
+    IB order IDs are only unique within an API client/session, so once a permId
+    is available it is used as the stable venue order ID. A raw orderId is only
+    used as a temporary fallback while IB has not yet assigned a permId.
+
+    Parameters
+    ----------
+    order_id : int
+        The IB order ID.
+    perm_id : int
+        The permanent order ID (unique across all orders).
+
+    Returns
+    -------
+    VenueOrderId
+
+    """
+    if perm_id != 0:
+        return VenueOrderId(f"PERM-{perm_id}")
+    return VenueOrderId(str(order_id))
 
 
 class IBPosition(NamedTuple):
@@ -499,7 +525,11 @@ class BaseMixin:
     _msgbus: MessageBus
     _host: str
     _port: int
+    _configured_client_id: int
     _client_id: int
+    _randomize_client_id_on_next_connect: bool
+    _fetch_all_open_orders: bool
+    _request_timeout_secs: int
     _requests: Requests
     _instrument_provider: (
         Any  # InteractiveBrokersInstrumentProvider | None - Will be set by data/execution client
@@ -527,6 +557,8 @@ class BaseMixin:
     # Connection
     _reconnect_attempts: int
     _reconnect_delay: int
+    _reconnect_delay_max: int
+    _reconnect_jitter_secs: int
     _max_reconnect_attempts: int
     _indefinite_reconnect: bool
     _last_disconnection_ns: int | None
@@ -534,13 +566,13 @@ class BaseMixin:
     # MarketData
     _bar_type_to_last_bar: dict[str, BarData | None]
     _bar_timeout_tasks: dict[str, Any]  # asyncio.Task
-    _order_id_to_order_ref: dict[int, AccountOrderRef]
+    _order_id_to_order_ref: dict[VenueOrderId, AccountOrderRef]
 
     # Order
     _next_valid_order_id: int
     _exec_id_details: dict[
         str,
-        dict[str, Execution | (CommissionReport | str)],
+        dict[str, Execution | (CommissionAndFeesReport | str)],
     ]
 
 

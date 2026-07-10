@@ -1,5 +1,5 @@
 # -------------------------------------------------------------------------------------------------
-#  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+#  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 #  https://nautechsystems.io
 #
 #  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -13,13 +13,22 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 """
-NautilusTrader (http://nautilustrader.io) is an open-source, high-performance, production-grade
-algorithmic trading platform, providing quantitative traders with the ability to backtest
-portfolios of automated trading strategies on historical data with an event-driven engine,
-and also deploy those same strategies live, with no code changes.
+NautilusTrader (https://nautilustrader.io) is an open-source, production-grade, Rust-native
+engine for multi-asset, multi-venue trading systems.
+
+The system spans research, deterministic simulation, and live execution within a single
+event-driven architecture, with Python serving as the control plane for strategy logic,
+configuration, and orchestration.
 """
+
+import importlib.metadata as _metadata
 
 from nautilus_trader._libnautilus import *  # noqa: F403 (undefined-local-with-import-star)
 
 
-__version__ = "2.0.0-dev"
+# Derive the version from installed distribution metadata so it always matches the built
+# wheel. `_metadata` is underscore-aliased so the star import above cannot shadow it.
+try:
+    __version__ = _metadata.version("nautilus-trader")
+except _metadata.PackageNotFoundError:  # pragma: no cover
+    __version__ = "unknown"

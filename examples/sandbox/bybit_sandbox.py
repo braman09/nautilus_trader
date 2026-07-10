@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -------------------------------------------------------------------------------------------------
-#  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+#  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 #  https://nautechsystems.io
 #
 #  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -18,6 +18,7 @@ import asyncio
 from decimal import Decimal
 
 from nautilus_trader.adapters.bybit import BybitDataClientConfig
+from nautilus_trader.adapters.bybit import BybitEnvironment
 from nautilus_trader.adapters.bybit import BybitLiveDataClientFactory
 from nautilus_trader.adapters.bybit import BybitProductType
 from nautilus_trader.adapters.sandbox.config import SandboxExecutionClientConfig
@@ -68,11 +69,9 @@ async def main():
         ),
         data_clients={
             "BYBIT": BybitDataClientConfig(
-                api_key=None,  # 'BYBIT_API_KEY' env var
-                api_secret=None,  # 'BYBIT_API_SECRET' env var
+                environment=BybitEnvironment.MAINNET,
                 instrument_provider=instrument_provider_config,
                 product_types=(BybitProductType.LINEAR,),
-                testnet=False,  # If client uses the testnet
             ),
         },
         exec_clients=exec_clients,

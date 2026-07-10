@@ -1,5 +1,8 @@
 @0xd4e5f60718293041;
 # Cap'n Proto schema for Nautilus order events
+#
+# WARNING: This schema is not yet stable and may change without notice
+# between releases. Do not depend on wire compatibility across versions.
 
 using Identifiers = import "../common/identifiers.capnp";
 using Types = import "../common/types.capnp";
@@ -73,6 +76,7 @@ struct OrderInitialized {
     execAlgorithmParams @30 :Base.StringMap;
     execSpawnId @31 :Identifiers.ClientOrderId;
     tags @32 :List(Text);
+    activationPrice @33 :Types.Price;
 }
 
 # OrderDenied - order denied by system
@@ -264,6 +268,7 @@ struct OrderUpdated {
     tsEvent @11 :Base.UnixNanos;
     tsInit @12 :Base.UnixNanos;
     reconciliation @13 :Bool;
+    isQuoteQuantity @14 :Bool;
 }
 
 # OrderFilled - order fill execution
@@ -287,4 +292,5 @@ struct OrderFilled {
     reconciliation @16 :Bool;
     positionId @17 :Identifiers.PositionId;
     commission @18 :Types.Money;
+    info @19 :Base.StringMap;
 }

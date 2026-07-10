@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -------------------------------------------------------------------------------------------------
-#  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+#  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 #  https://nautechsystems.io
 #
 #  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -18,9 +18,9 @@ import asyncio
 from decimal import Decimal
 
 from nautilus_trader.adapters.binance import BINANCE
-from nautilus_trader.adapters.binance import BINANCE_VENUE
 from nautilus_trader.adapters.binance import BinanceAccountType
 from nautilus_trader.adapters.binance import BinanceDataClientConfig
+from nautilus_trader.adapters.binance.common.enums import BinanceEnvironment
 from nautilus_trader.adapters.binance.factories import BinanceLiveDataClientFactory
 from nautilus_trader.adapters.sandbox.config import SandboxExecutionClientConfig
 from nautilus_trader.adapters.sandbox.factory import SandboxLiveExecClientFactory
@@ -80,19 +80,17 @@ async def main():
         # ),
         data_clients={
             BINANCE: BinanceDataClientConfig(
-                api_key=None,  # 'BINANCE_API_KEY' env var
-                api_secret=None,  # 'BINANCE_API_SECRET' env var
                 account_type=BinanceAccountType.USDT_FUTURES,
                 base_url_http=None,  # Override with custom endpoint
                 base_url_ws=None,  # Override with custom endpoint
+                environment=BinanceEnvironment.TESTNET,
                 us=False,  # If client is for Binance US
-                testnet=True,  # If client uses the testnet
                 instrument_provider=InstrumentProviderConfig(load_all=True),
             ),
         },
         exec_clients={
             BINANCE: SandboxExecutionClientConfig(
-                venue=BINANCE_VENUE,
+                venue=BINANCE,
                 starting_balances=["10_000 USDT", "10 ETH"],
             ),
         },

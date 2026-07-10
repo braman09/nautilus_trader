@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -32,8 +32,8 @@ macro_rules! enum_strum_serde {
             where
                 D: Deserializer<'de>,
             {
-                let s = String::deserialize(deserializer)?;
-                <$type>::from_str(&s).map_err(serde::de::Error::custom)
+                let s: std::borrow::Cow<'de, str> = Deserialize::deserialize(deserializer)?;
+                <$type>::from_str(s.as_ref()).map_err(serde::de::Error::custom)
             }
         }
     };

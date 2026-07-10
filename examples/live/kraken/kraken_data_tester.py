@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -------------------------------------------------------------------------------------------------
-#  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+#  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 #  https://nautechsystems.io
 #
 #  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -36,16 +36,18 @@ from nautilus_trader.test_kit.strategies.tester_data import DataTesterConfig
 
 # Configuration - Change product_type to switch between trading modes
 product_type = KrakenProductType.FUTURES  # SPOT or FUTURES
-token = "ETH"
+token = None  # FUTURES uses "XBT", SPOT uses "BTC"
 
 # Symbol and settings based on product type
 if product_type == KrakenProductType.SPOT:
+    token = token or "BTC"
     symbol = f"{token}/USD"
-    environment = KrakenEnvironment.MAINNET
+    environment = KrakenEnvironment.LIVE
 elif product_type == KrakenProductType.FUTURES:
     # Kraken Futures perpetual symbols use PI_ prefix (e.g., PI_XBTUSD, PI_ETHUSD)
+    token = token or "XBT"
     symbol = f"PI_{token}USD"
-    environment = KrakenEnvironment.MAINNET
+    environment = KrakenEnvironment.LIVE
     # environment = KrakenEnvironment.DEMO  # Use demo-futures.kraken.com
 else:
     raise ValueError(f"Unsupported product type: {product_type}")
@@ -66,8 +68,6 @@ config_node = TradingNodeConfig(
     ),
     data_clients={
         KRAKEN: KrakenDataClientConfig(
-            api_key=None,  # 'KRAKEN_API_KEY' env var
-            api_secret=None,  # 'KRAKEN_API_SECRET' env var
             environment=environment,
             product_types=product_types,
             instrument_provider=InstrumentProviderConfig(load_all=True),
@@ -86,16 +86,16 @@ config_tester = DataTesterConfig(
     instrument_ids=[instrument_id],
     bar_types=[BarType.from_str(f"{instrument_id.value}-1-MINUTE-LAST-EXTERNAL")],
     subscribe_instrument=True,
+    # subscribe_book_deltas=True,
+    # subscribe_book_depth=True,
+    # subscribe_book_at_interval=True,
     subscribe_quotes=True,
     subscribe_trades=True,
     subscribe_mark_prices=product_type == KrakenProductType.FUTURES,
     subscribe_index_prices=product_type == KrakenProductType.FUTURES,
-    # subscribe_bars=True,
-    # subscribe_book_deltas=True,
-    # subscribe_book_depth=True,
-    # subscribe_book_at_interval=True,
+    subscribe_bars=product_type == KrakenProductType.SPOT,
     # book_depth=10,
-    # book_interval_ms=10,
+    book_interval_ms=10,
     # requests_start_delta=pd.Timedelta(days=1),
     # request_bars=True,
     # request_trades=True,

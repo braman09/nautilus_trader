@@ -1,5 +1,5 @@
 # -------------------------------------------------------------------------------------------------
-#  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+#  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 #  https://nautechsystems.io
 #
 #  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -47,6 +47,28 @@ class BinanceKeyType(Enum):
     HMAC = "HMAC"
     RSA = "RSA"
     ED25519 = "Ed25519"
+
+
+@unique
+class BinanceEnvironment(Enum):
+    """
+    Represents a Binance trading environment.
+    """
+
+    LIVE = "LIVE"
+    TESTNET = "TESTNET"
+    DEMO = "DEMO"
+
+    @property
+    def is_live(self) -> bool:
+        return self == BinanceEnvironment.LIVE
+
+    @property
+    def is_sandbox(self) -> bool:
+        """
+        True for any non-production environment (testnet or demo).
+        """
+        return self != BinanceEnvironment.LIVE
 
 
 @unique
@@ -221,6 +243,9 @@ class BinanceOrderStatus(Enum):
     EXPIRED_IN_MATCH = "EXPIRED_IN_MATCH"
     NEW_INSURANCE = "NEW_INSURANCE"  # Liquidation with Insurance Fund
     NEW_ADL = "NEW_ADL"  # Counterparty Liquidation
+    TRIGGERING = "TRIGGERING"  # Algo order forwarded to matching engine
+    TRIGGERED = "TRIGGERED"  # Algo order successfully placed in matching engine
+    FINISHED = "FINISHED"  # Algo order triggered order filled or canceled
 
 
 @unique
@@ -254,6 +279,8 @@ class BinanceOrderType(Enum):
     STOP_MARKET = "STOP_MARKET"  # FUTURES only
     TAKE_PROFIT_MARKET = "TAKE_PROFIT_MARKET"  # FUTURES only
     TRAILING_STOP_MARKET = "TRAILING_STOP_MARKET"  # FUTURES only
+    LIQUIDATION = "LIQUIDATION"  # FUTURES only
+    ADL = "ADL"  # FUTURES only
     INSURANCE_FUND = "INSURANCE_FUND"
 
 
@@ -513,6 +540,9 @@ class BinanceEnumParser:
             BinanceOrderStatus.NEW_INSURANCE: OrderStatus.FILLED,
             BinanceOrderStatus.EXPIRED: OrderStatus.EXPIRED,
             BinanceOrderStatus.EXPIRED_IN_MATCH: OrderStatus.CANCELED,  # Canceled due self-trade prevention (STP)
+            BinanceOrderStatus.TRIGGERING: OrderStatus.ACCEPTED,  # Algo order forwarding to matching engine
+            BinanceOrderStatus.TRIGGERED: OrderStatus.ACCEPTED,  # Algo order placed in matching engine
+            # FINISHED intentionally omitted - requires aq field to determine filled vs canceled
         }
 
         self.ext_to_int_order_side = {

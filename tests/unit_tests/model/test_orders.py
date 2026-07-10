@@ -1,5 +1,5 @@
 # -------------------------------------------------------------------------------------------------
-#  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+#  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 #  https://nautechsystems.io
 #
 #  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -41,8 +41,8 @@ from nautilus_trader.model.identifiers import ClientOrderId
 from nautilus_trader.model.identifiers import ExecAlgorithmId
 from nautilus_trader.model.identifiers import OrderListId
 from nautilus_trader.model.identifiers import PositionId
-from nautilus_trader.model.identifiers import StrategyId
 from nautilus_trader.model.identifiers import TradeId
+from nautilus_trader.model.identifiers import Venue
 from nautilus_trader.model.identifiers import VenueOrderId
 from nautilus_trader.model.objects import Money
 from nautilus_trader.model.objects import Price
@@ -51,6 +51,7 @@ from nautilus_trader.model.orders import LimitOrder
 from nautilus_trader.model.orders import MarketOrder
 from nautilus_trader.model.orders import MarketToLimitOrder
 from nautilus_trader.model.orders import Order
+from nautilus_trader.model.orders import OrderList
 from nautilus_trader.model.orders import StopLimitOrder
 from nautilus_trader.model.orders import StopMarketOrder
 from nautilus_trader.test_kit.providers import TestInstrumentProvider
@@ -60,6 +61,7 @@ from nautilus_trader.test_kit.stubs.identifiers import TestIdStubs
 
 
 AUDUSD_SIM = TestInstrumentProvider.default_fx_ccy("AUD/USD")
+EURUSD_SIM = TestInstrumentProvider.default_fx_ccy("EUR/USD")
 
 
 class TestOrders:
@@ -143,7 +145,7 @@ class TestOrders:
             self.trader_id,
             self.strategy_id,
             AUDUSD_SIM.id,
-            ClientOrderId("O-123456"),
+            TestIdStubs.client_order_id(),
             order_side,
             Quantity.from_int(1),
             UUID4(),
@@ -163,7 +165,7 @@ class TestOrders:
                 self.trader_id,
                 self.strategy_id,
                 AUDUSD_SIM.id,
-                ClientOrderId("O-123456"),
+                TestIdStubs.client_order_id(),
                 OrderSide.BUY,
                 Quantity.zero(),  # <- invalid
                 UUID4(),
@@ -177,7 +179,7 @@ class TestOrders:
                 self.trader_id,
                 self.strategy_id,
                 AUDUSD_SIM.id,
-                ClientOrderId("O-123456"),
+                TestIdStubs.client_order_id(),
                 OrderSide.BUY,
                 Quantity.from_int(100_000),
                 UUID4(),
@@ -192,7 +194,7 @@ class TestOrders:
                 self.trader_id,
                 self.strategy_id,
                 AUDUSD_SIM.id,
-                ClientOrderId("O-123456"),
+                TestIdStubs.client_order_id(),
                 OrderSide.BUY,
                 Quantity.from_int(100_000),
                 trigger_price=Price.from_str("1.00000"),
@@ -209,7 +211,7 @@ class TestOrders:
                 self.trader_id,
                 self.strategy_id,
                 AUDUSD_SIM.id,
-                ClientOrderId("O-123456"),
+                TestIdStubs.client_order_id(),
                 OrderSide.BUY,
                 Quantity.from_int(100_000),
                 price=Price.from_str("1.00001"),
@@ -227,7 +229,7 @@ class TestOrders:
                 self.trader_id,
                 self.strategy_id,
                 AUDUSD_SIM.id,
-                ClientOrderId("O-123456"),
+                TestIdStubs.client_order_id(),
                 OrderSide.BUY,
                 Quantity.from_int(100_000),
                 UUID4(),
@@ -330,7 +332,7 @@ class TestOrders:
             self.trader_id,
             self.strategy_id,
             AUDUSD_SIM.id,
-            ClientOrderId("O-123456"),
+            TestIdStubs.client_order_id(),
             OrderSide.BUY,
             Quantity.from_str("2450.5"),
             Price.from_str("1.00000"),
@@ -1873,6 +1875,142 @@ class TestOrders:
             "OrderList(id=OL-19700101-000000-000-001-1, instrument_id=AUD/USD.SIM, strategy_id=S-001, orders=[MarketOrder(BUY 100_000 AUD/USD.SIM MARKET GTC, status=INITIALIZED, client_order_id=O-19700101-000000-000-001-1, venue_order_id=None, position_id=None, contingency_type=OTO, linked_order_ids=[O-19700101-000000-000-001-2, O-19700101-000000-000-001-3], tags=['ENTRY']), StopMarketOrder(SELL 100_000 AUD/USD.SIM STOP_MARKET @ 0.99990[DEFAULT] GTC, status=INITIALIZED, client_order_id=O-19700101-000000-000-001-2, venue_order_id=None, position_id=None, contingency_type=OUO, linked_order_ids=[O-19700101-000000-000-001-3], parent_order_id=O-19700101-000000-000-001-1, tags=['STOP_LOSS']), LimitOrder(SELL 100_000 AUD/USD.SIM LIMIT @ 1.00010 GTC, status=INITIALIZED, client_order_id=O-19700101-000000-000-001-3, venue_order_id=None, position_id=None, contingency_type=OUO, linked_order_ids=[O-19700101-000000-000-001-2], parent_order_id=O-19700101-000000-000-001-1, tags=['TAKE_PROFIT'])])"
         )
 
+    def test_order_list_accepts_mixed_instruments_same_venue(self):
+        # Arrange
+        order_a = self.order_factory.market(
+            AUDUSD_SIM.id,
+            OrderSide.BUY,
+            Quantity.from_int(100_000),
+        )
+        order_b = self.order_factory.market(
+            EURUSD_SIM.id,
+            OrderSide.BUY,
+            Quantity.from_int(100_000),
+        )
+
+        # Act
+        order_list = OrderList(
+            order_list_id=OrderListId("OL-MIXED-001"),
+            orders=[order_a, order_b],
+        )
+
+        # Assert
+        assert len(order_list) == 2
+        assert order_list.instrument_id == AUDUSD_SIM.id  # representative
+        assert order_list.is_uniform_instrument() is False
+        assert order_list.instrument_ids() == {AUDUSD_SIM.id, EURUSD_SIM.id}
+
+    def test_order_list_rejects_mixed_venues(self):
+        # Arrange
+        order_a = self.order_factory.market(
+            AUDUSD_SIM.id,
+            OrderSide.BUY,
+            Quantity.from_int(100_000),
+        )
+        other_venue_instrument = TestInstrumentProvider.default_fx_ccy(
+            "EUR/USD",
+            venue=Venue("IDEALPRO"),
+        )
+        order_b = self.order_factory.market(
+            other_venue_instrument.id,
+            OrderSide.BUY,
+            Quantity.from_int(100_000),
+        )
+
+        # Act, Assert
+        with pytest.raises(ValueError, match="same venue"):
+            OrderList(
+                order_list_id=OrderListId("OL-MIXED-002"),
+                orders=[order_a, order_b],
+            )
+
+    def test_order_list_is_uniform_instrument_true_for_single_instrument(self):
+        # Arrange
+        bracket = self.order_factory.bracket(
+            AUDUSD_SIM.id,
+            OrderSide.BUY,
+            Quantity.from_int(100_000),
+            sl_trigger_price=Price.from_str("0.99990"),
+            tp_price=Price.from_str("1.00010"),
+        )
+
+        # Act, Assert
+        assert bracket.is_uniform_instrument() is True
+        assert bracket.instrument_ids() == {AUDUSD_SIM.id}
+
+    def test_is_bracket_with_valid_bracket_order(self):
+        # Arrange
+        bracket = self.order_factory.bracket(
+            AUDUSD_SIM.id,
+            OrderSide.BUY,
+            Quantity.from_int(100_000),
+            sl_trigger_price=Price.from_str("0.99990"),
+            tp_price=Price.from_str("1.00010"),
+        )
+
+        # Act, Assert
+        assert bracket.is_bracket() is True
+
+    def test_is_bracket_with_single_order_returns_false(self):
+        # Arrange
+        order = self.order_factory.market(
+            AUDUSD_SIM.id,
+            OrderSide.BUY,
+            Quantity.from_int(100_000),
+        )
+        order_list = OrderList(
+            order_list_id=OrderListId("OL-001"),
+            orders=[order],
+        )
+
+        # Act, Assert
+        assert order_list.is_bracket() is False
+
+    def test_is_bracket_with_two_orders_returns_false(self):
+        # Arrange
+        order1 = self.order_factory.market(
+            AUDUSD_SIM.id,
+            OrderSide.BUY,
+            Quantity.from_int(100_000),
+        )
+        order2 = self.order_factory.market(
+            AUDUSD_SIM.id,
+            OrderSide.SELL,
+            Quantity.from_int(100_000),
+        )
+        order_list = OrderList(
+            order_list_id=OrderListId("OL-001"),
+            orders=[order1, order2],
+        )
+
+        # Act, Assert
+        assert order_list.is_bracket() is False
+
+    def test_is_bracket_with_entry_not_oto_returns_false(self):
+        # Arrange: Create a 3-order list where entry doesn't have OTO contingency
+        order1 = self.order_factory.market(
+            AUDUSD_SIM.id,
+            OrderSide.BUY,
+            Quantity.from_int(100_000),
+        )
+        order2 = self.order_factory.market(
+            AUDUSD_SIM.id,
+            OrderSide.SELL,
+            Quantity.from_int(100_000),
+        )
+        order3 = self.order_factory.market(
+            AUDUSD_SIM.id,
+            OrderSide.SELL,
+            Quantity.from_int(100_000),
+        )
+        order_list = OrderList(
+            order_list_id=OrderListId("OL-001"),
+            orders=[order1, order2, order3],
+        )
+
+        # Act, Assert
+        assert order_list.is_bracket() is False
+
     def test_apply_order_denied_event(self):
         # Arrange
         order = self.order_factory.market(
@@ -2110,7 +2248,7 @@ class TestOrders:
             order.strategy_id,
             order.instrument_id,
             order.client_order_id,
-            VenueOrderId("1"),
+            TestIdStubs.venue_order_id(),
             order.account_id,
             Quantity.from_int(120000),
             None,
@@ -2125,7 +2263,7 @@ class TestOrders:
 
         # Assert
         assert order.status == OrderStatus.ACCEPTED
-        assert order.venue_order_id == VenueOrderId("1")
+        assert order.venue_order_id == TestIdStubs.venue_order_id()
         assert order.quantity == Quantity.from_int(120_000)
         assert order.trigger_price == Price.from_str("1.00001")
         assert not order.is_inflight
@@ -2158,7 +2296,7 @@ class TestOrders:
             order.strategy_id,
             order.instrument_id,
             order.client_order_id,
-            VenueOrderId("1"),
+            TestIdStubs.venue_order_id(),
             order.account_id,
             Quantity.from_int(120_000),
             None,
@@ -2173,7 +2311,7 @@ class TestOrders:
 
         # Assert
         assert order.status == OrderStatus.PARTIALLY_FILLED
-        assert order.venue_order_id == VenueOrderId("1")
+        assert order.venue_order_id == TestIdStubs.venue_order_id()
         assert order.quantity == Quantity.from_int(120_000)
         assert order.filled_qty == Quantity.from_int(50_000)
         assert order.leaves_qty == Quantity.from_int(70_000)
@@ -2207,7 +2345,7 @@ class TestOrders:
             order.strategy_id,
             order.instrument_id,
             order.client_order_id,
-            VenueOrderId("1"),
+            TestIdStubs.venue_order_id(),
             order.account_id,
             Quantity.from_int(120_000),
             None,
@@ -2222,7 +2360,7 @@ class TestOrders:
 
         # Assert
         assert order.status == OrderStatus.PARTIALLY_FILLED
-        assert order.venue_order_id == VenueOrderId("1")
+        assert order.venue_order_id == TestIdStubs.venue_order_id()
         assert order.quantity == Quantity.from_int(120_000)
         assert order.filled_qty == Quantity.from_int(50_000)
         assert order.leaves_qty == Quantity.from_int(70_000)
@@ -2265,7 +2403,80 @@ class TestOrders:
 
         # Assert
         assert order.venue_order_id == VenueOrderId("2")
-        assert order.venue_order_ids == [VenueOrderId("1")]
+        assert order.venue_order_ids == [TestIdStubs.venue_order_id()]
+
+    def test_order_updated_clears_quote_quantity_flag(self):
+        # Arrange
+        order = self.order_factory.market(
+            AUDUSD_SIM.id,
+            OrderSide.BUY,
+            Quantity.from_str("10.000000"),
+            quote_quantity=True,
+        )
+
+        order.apply(TestEventStubs.order_submitted(order))
+        order.apply(TestEventStubs.order_accepted(order))
+
+        assert order.is_quote_quantity
+
+        updated = OrderUpdated(
+            order.trader_id,
+            order.strategy_id,
+            order.instrument_id,
+            order.client_order_id,
+            order.venue_order_id,
+            order.account_id,
+            Quantity.from_str("47.393365"),
+            None,
+            None,
+            UUID4(),
+            0,
+            0,
+            False,
+            False,  # is_quote_quantity
+        )
+
+        # Act
+        order.apply(updated)
+
+        # Assert
+        assert not order.is_quote_quantity
+        assert order.quantity == Quantity.from_str("47.393365")
+        assert order.leaves_qty == Quantity.from_str("47.393365")
+
+    def test_order_updated_dict_roundtrip_preserves_is_quote_quantity(self):
+        # Arrange
+        order = self.order_factory.market(
+            AUDUSD_SIM.id,
+            OrderSide.BUY,
+            Quantity.from_str("10.000000"),
+        )
+        order.apply(TestEventStubs.order_submitted(order))
+        order.apply(TestEventStubs.order_accepted(order))
+
+        event = OrderUpdated(
+            order.trader_id,
+            order.strategy_id,
+            order.instrument_id,
+            order.client_order_id,
+            order.venue_order_id,
+            order.account_id,
+            Quantity.from_str("47.393365"),
+            None,
+            None,
+            UUID4(),
+            0,
+            0,
+            False,
+            False,  # is_quote_quantity
+        )
+
+        # Act
+        result = OrderUpdated.from_dict(OrderUpdated.to_dict(event))
+
+        # Assert
+        assert result == event
+        assert not result.is_quote_quantity
 
     def test_apply_order_filled_event_to_order_without_accepted(self):
         # Arrange
@@ -2282,7 +2493,7 @@ class TestOrders:
             order,
             instrument=AUDUSD_SIM,
             position_id=PositionId("P-123456"),
-            strategy_id=StrategyId("S-001"),
+            strategy_id=TestIdStubs.strategy_id(),
             last_px=Price.from_str("1.00001"),
             ts_event=1,
         )
@@ -2318,7 +2529,7 @@ class TestOrders:
             order,
             instrument=AUDUSD_SIM,
             position_id=PositionId("P-123456"),
-            strategy_id=StrategyId("S-001"),
+            strategy_id=TestIdStubs.strategy_id(),
             last_px=Price.from_str("1.00001"),
         )
 
@@ -2353,9 +2564,9 @@ class TestOrders:
         fill1 = TestEventStubs.order_filled(
             order,
             instrument=AUDUSD_SIM,
-            trade_id=TradeId("1"),
+            trade_id=TestIdStubs.trade_id(),
             position_id=PositionId("P-123456"),
-            strategy_id=StrategyId("S-001"),
+            strategy_id=TestIdStubs.strategy_id(),
             last_px=Price.from_str("1.00001"),
             last_qty=Quantity.from_int(20_000),
         )
@@ -2365,7 +2576,7 @@ class TestOrders:
             instrument=AUDUSD_SIM,
             trade_id=TradeId("2"),
             position_id=PositionId("P-123456"),
-            strategy_id=StrategyId("S-001"),
+            strategy_id=TestIdStubs.strategy_id(),
             last_px=Price.from_str("1.00002"),
             last_qty=Quantity.from_int(40_000),
         )
@@ -2402,9 +2613,9 @@ class TestOrders:
         fill1 = TestEventStubs.order_filled(
             order,
             instrument=AUDUSD_SIM,
-            trade_id=TradeId("1"),
+            trade_id=TestIdStubs.trade_id(),
             position_id=PositionId("P-123456"),
-            strategy_id=StrategyId("S-001"),
+            strategy_id=TestIdStubs.strategy_id(),
             last_px=Price.from_str("1.00001"),
             last_qty=Quantity.from_int(20_000),
         )
@@ -2414,7 +2625,7 @@ class TestOrders:
             instrument=AUDUSD_SIM,
             trade_id=TradeId("2"),
             position_id=PositionId("P-123456"),
-            strategy_id=StrategyId("S-001"),
+            strategy_id=TestIdStubs.strategy_id(),
             last_px=Price.from_str("1.00002"),
             last_qty=Quantity.from_int(40_000),
         )
@@ -2424,7 +2635,7 @@ class TestOrders:
             instrument=AUDUSD_SIM,
             trade_id=TradeId("3"),
             position_id=PositionId("P-123456"),
-            strategy_id=StrategyId("S-001"),
+            strategy_id=TestIdStubs.strategy_id(),
             last_px=Price.from_str("1.00003"),
             last_qty=Quantity.from_int(40_000),
         )
@@ -2463,7 +2674,7 @@ class TestOrders:
             order.strategy_id,
             order.instrument_id,
             order.client_order_id,
-            VenueOrderId("1"),
+            TestIdStubs.venue_order_id(),
             order.account_id,
             TradeId("E-1"),
             PositionId("P-1"),
@@ -2510,7 +2721,7 @@ class TestOrders:
             order.strategy_id,
             order.instrument_id,
             order.client_order_id,
-            VenueOrderId("1"),
+            TestIdStubs.venue_order_id(),
             order.account_id,
             TradeId("E-1"),
             PositionId("P-1"),

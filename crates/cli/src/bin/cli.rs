@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -13,19 +13,30 @@
 //  limitations under the License.
 // -------------------------------------------------------------------------------------------------
 
-use clap::Parser;
-use log::LevelFilter;
+#![warn(clippy::pedantic)]
+
+use std::process::ExitCode;
+
+use clap::FromArgMatches;
+use mimalloc::MiMalloc;
 use nautilus_cli::opt::NautilusCli;
+use nautilus_common::logging::ensure_logging_initialized;
+
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
 
 #[tokio::main]
-async fn main() {
+async fn main() -> ExitCode {
     dotenvy::dotenv().ok();
-    simple_logger::SimpleLogger::new()
-        .with_level(LevelFilter::Info)
-        .with_module_level("sqlx", LevelFilter::Off)
-        .init()
-        .unwrap();
-    if let Err(e) = nautilus_cli::run(NautilusCli::parse()).await {
+    ensure_logging_initialized();
+
+    let matches = nautilus_cli::cli_command().get_matches();
+    let cli = NautilusCli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+
+    if let Err(e) = Box::pin(nautilus_cli::run(cli)).await {
         log::error!("Error executing Nautilus CLI: {e}");
+        return ExitCode::FAILURE;
     }
+
+    ExitCode::SUCCESS
 }

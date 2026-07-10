@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -23,7 +23,7 @@
 //!
 //! Only a very small API surface is exposed to C:
 //!
-//! * `cvec_new` – create an empty `CVec` sentinel that can be returned to foreign code.
+//! - `cvec_new` – create an empty `CVec` sentinel that can be returned to foreign code.
 //!
 //! De-allocation is intentionally **not** provided via a generic helper. Instead each FFI module
 //! must expose its own *type-specific* `vec_*_drop` function which reconstructs the original
@@ -34,7 +34,7 @@
 //! rules for memory safety straightforward: foreign callers must treat the memory region pointed
 //! to by `ptr` as **opaque** and interact with it solely through the functions provided here.
 
-use std::{ffi::c_void, fmt::Display, ptr::null};
+use std::{ffi::c_void, fmt::Display, ptr::NonNull};
 
 use crate::ffi::abort_on_panic;
 
@@ -57,35 +57,18 @@ pub struct CVec {
     pub cap: usize,
 }
 
-// SAFETY: CVec is marked as Send to satisfy PyO3's PyCapsule requirements, which need
-// to transfer ownership across the Python/Rust boundary. However, CVec contains raw
-// pointers and is only safe to use in single-threaded contexts or with external
-// synchronization guarantees.
-//
-// The Send impl is required for:
-// 1. PyO3's PyCapsule::new_with_destructor which has a Send bound
-// 2. Transferring CVec ownership to Python (which runs on a single GIL-protected thread)
-//
-// IMPORTANT: Do not send CVec instances across threads without ensuring:
-// - The underlying data type T is itself Send + Sync
-// - Proper external synchronization (e.g., mutex) protects concurrent access
-// - The CVec is consumed on the same thread where it will be reconstructed
-//
-// In practice, CVec usage in this codebase is confined to the Python FFI boundary
-// where the Python GIL provides the necessary synchronization.
-unsafe impl Send for CVec {}
-
 impl CVec {
     /// Returns an empty [`CVec`].
     ///
     /// This is primarily useful for constructing a sentinel value that represents the
     /// absence of data when crossing the FFI boundary.
+    ///
+    /// Uses a dangling pointer (like `Vec::new()`) rather than null to satisfy
+    /// `Vec::from_raw_parts` preconditions when the `CVec` is later dropped.
     #[must_use]
-    pub const fn empty() -> Self {
+    pub fn empty() -> Self {
         Self {
-            // Explicitly type cast the pointer to some type to satisfy the
-            // compiler. Since the pointer is null it works for any type.
-            ptr: null::<bool>() as *mut c_void,
+            ptr: NonNull::<u8>::dangling().as_ptr().cast::<c_void>(),
             len: 0,
             cap: 0,
         }
@@ -105,6 +88,10 @@ impl<T> From<Vec<T>> for CVec {
             let len = data.len();
             let cap = data.capacity();
             let ptr = data.as_mut_ptr();
+            #[allow(
+                clippy::mem_forget,
+                reason = "intentional ownership transfer to C; matching CVec::drop reclaims via Vec::from_raw_parts"
+            )]
             std::mem::forget(data);
             Self {
                 ptr: ptr.cast::<std::ffi::c_void>(),
@@ -161,6 +148,11 @@ mod tests {
         assert_eq!(cap, vec_cap);
 
         let data = ptr.cast::<u64>();
+        // SAFETY: data points to a valid Vec<u64> of length 3 owned by `cvec`
+        #[allow(
+            clippy::multiple_unsafe_ops_per_block,
+            reason = "test asserts on three pointer reads in sequence"
+        )]
         unsafe {
             assert_eq!(*data, test_data[0]);
             assert_eq!(*data.add(1), test_data[1]);
@@ -173,11 +165,13 @@ mod tests {
         }
     }
 
-    /// An empty vector gets converted to a null pointer wrapped in a [`CVec`].
+    /// An empty vector gets converted to a dangling (non-null) pointer in a [`CVec`].
     #[rstest]
-    fn empty_vec_should_give_null_ptr() {
+    fn empty_vec_should_give_dangling_ptr() {
         let data: Vec<u64> = vec![];
         let cvec: CVec = data.into();
-        assert_eq!(cvec.ptr.cast::<u64>(), std::ptr::null_mut::<u64>());
+        assert!(!cvec.ptr.is_null());
+        assert_eq!(cvec.len, 0);
+        assert_eq!(cvec.cap, 0);
     }
 }

@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -21,8 +21,9 @@ use nautilus_model::{
 };
 use sqlx::{Error, FromRow, Row, postgres::PgRow};
 
-use crate::sql::models::enums::{
-    AggregationSourceModel, AggressorSideModel, BarAggregationModel, PriceTypeModel,
+use crate::sql::models::{
+    enums::{AggregationSourceModel, AggressorSideModel, BarAggregationModel, PriceTypeModel},
+    read_usize,
 };
 
 #[derive(Debug)]
@@ -91,7 +92,7 @@ impl<'r> FromRow<'r, PgRow> for BarModel {
         let instrument_id = row
             .try_get::<&str, _>("instrument_id")
             .map(InstrumentId::from)?;
-        let step = row.try_get::<i32, _>("step")?;
+        let step = read_usize(row, "step")?;
         let price_type = row
             .try_get::<PriceTypeModel, _>("price_type")
             .map(|x| x.0)?;
@@ -103,7 +104,7 @@ impl<'r> FromRow<'r, PgRow> for BarModel {
             .map(|x| x.0)?;
         let bar_type = BarType::new(
             instrument_id,
-            BarSpecification::new(step as usize, bar_aggregation, price_type),
+            BarSpecification::new(step, bar_aggregation, price_type),
             aggregation_source,
         );
         let open = row.try_get::<&str, _>("open").map(Price::from)?;

@@ -1,5 +1,5 @@
 # -------------------------------------------------------------------------------------------------
-#  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+#  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 #  https://nautechsystems.io
 #
 #  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -19,10 +19,12 @@ from unittest.mock import call
 
 import msgspec
 
+from nautilus_trader.adapters.binance.futures.schemas.user import BinanceFuturesAlgoUpdateWrapper
 from nautilus_trader.adapters.binance.futures.schemas.user import BinanceFuturesOrderUpdateWrapper
 from nautilus_trader.adapters.binance.spot.schemas.user import BinanceSpotOrderUpdateWrapper
 from nautilus_trader.model.enums import LiquiditySide
 from nautilus_trader.model.enums import OrderSide
+from nautilus_trader.model.enums import OrderType
 from nautilus_trader.model.identifiers import ClientOrderId
 from nautilus_trader.model.identifiers import StrategyId
 from nautilus_trader.model.identifiers import VenueOrderId
@@ -236,6 +238,10 @@ class TestBinanceSpotExecutionHandlers:
         exec_client._cache.strategy_id_for_order.return_value = StrategyId("S-001")
         exec_client._get_cached_instrument_id.return_value = ETHUSDT_BINANCE.id
 
+        mock_order = mocker.MagicMock()
+        mock_order.is_closed = False
+        exec_client._cache.order.return_value = mock_order
+
         # Act
         wrapper.data.handle_execution_report(exec_client)
 
@@ -315,9 +321,6 @@ class TestBinanceSpotExecutionHandlers:
         exec_client._get_cached_instrument_id.return_value = ETHUSDT_BINANCE.id
         exec_client._instrument_provider.find.return_value = ETHUSDT_BINANCE
 
-        # Mock order type to be LIMIT
-        from nautilus_trader.model.enums import OrderType
-
         mock_order.order_type = OrderType.LIMIT
 
         # Act
@@ -356,9 +359,6 @@ class TestBinanceSpotExecutionHandlers:
         exec_client._cache.order.return_value = mock_order
         exec_client._get_cached_instrument_id.return_value = ETHUSDT_BINANCE.id
         exec_client._instrument_provider.find.return_value = ETHUSDT_BINANCE
-
-        # Mock order type to be STOP_LIMIT
-        from nautilus_trader.model.enums import OrderType
 
         mock_order.order_type = OrderType.STOP_LIMIT
 
@@ -403,9 +403,6 @@ class TestBinanceSpotExecutionHandlers:
         exec_client._get_cached_instrument_id.return_value = ETHUSDT_BINANCE.id
         exec_client._instrument_provider.find.return_value = ETHUSDT_BINANCE
 
-        # Mock order type to be LIMIT_IF_TOUCHED
-        from nautilus_trader.model.enums import OrderType
-
         mock_order.order_type = OrderType.LIMIT_IF_TOUCHED
 
         # Act
@@ -424,6 +421,58 @@ class TestBinanceSpotExecutionHandlers:
             "2500.00000000",
         )  # Preserved trigger price
         assert update_kwargs["quantity"] == mock_order.quantity
+
+    def test_custom_client_order_id_without_o_prefix_preserved(self, mocker):
+        """
+        Test that custom client_order_id values not starting with 'O' are preserved.
+
+        Regression test for GitHub issue #3500.
+
+        """
+        # Arrange
+        raw = pkgutil.get_data(
+            package="tests.integration_tests.adapters.binance.resources.ws_messages",
+            resource="ws_spot_execution_report_custom_client_id.json",
+        )
+        decoder = msgspec.json.Decoder(BinanceSpotOrderUpdateWrapper)
+        wrapper = decoder.decode(raw)
+        exec_client = mocker.MagicMock()
+        exec_client._cache.strategy_id_for_order.return_value = StrategyId("S-001")
+        exec_client._get_cached_instrument_id.return_value = ETHUSDT_BINANCE.id
+        exec_client._instrument_provider.find.return_value = ETHUSDT_BINANCE
+        exec_client._enum_parser.parse_binance_order_side.return_value = OrderSide.BUY
+        exec_client._enum_parser.parse_binance_order_type.return_value = mocker.MagicMock()
+
+        # Act
+        wrapper.data.handle_execution_report(exec_client)
+
+        # Assert - client_order_id should be preserved as "INIT-BTC-1234567890"
+        exec_client.generate_order_filled.assert_called_once()
+        call_kwargs = exec_client.generate_order_filled.call_args.kwargs
+        assert call_kwargs["client_order_id"] == ClientOrderId("INIT-BTC-1234567890")
+
+    def test_empty_client_order_id_sends_order_status_report(self, mocker):
+        """
+        Test that empty client_order_id (both c and C fields) sends OrderStatusReport.
+        """
+        # Arrange
+        raw = pkgutil.get_data(
+            package="tests.integration_tests.adapters.binance.resources.ws_messages",
+            resource="ws_spot_execution_report_empty_client_id.json",
+        )
+        decoder = msgspec.json.Decoder(BinanceSpotOrderUpdateWrapper)
+        wrapper = decoder.decode(raw)
+        exec_client = mocker.MagicMock()
+        exec_client._get_cached_instrument_id.return_value = ETHUSDT_BINANCE.id
+
+        # Act
+        wrapper.data.handle_execution_report(exec_client)
+
+        # Assert - should send OrderStatusReport (treated as external order)
+        exec_client._cache.strategy_id_for_order.assert_not_called()
+        exec_client._send_order_status_report.assert_called_once()
+        report = exec_client._send_order_status_report.call_args[0][0]
+        assert report.client_order_id is None
 
 
 class TestBinanceFuturesExecutionHandlers:
@@ -690,6 +739,7 @@ class TestBinanceFuturesExecutionHandlers:
         mock_order.quantity = Quantity.from_str("1.000")
         mock_order.has_price = True  # LIMIT orders have prices
         mock_order.has_trigger_price = False  # LIMIT orders don't have trigger prices
+        mock_order.venue_order_id = VenueOrderId("8765432100")
 
         # Create mocked exec_client
         exec_client = mocker.MagicMock()
@@ -697,9 +747,6 @@ class TestBinanceFuturesExecutionHandlers:
         exec_client._cache.order.return_value = mock_order
         exec_client._get_cached_instrument_id.return_value = ETHUSDT_BINANCE.id
         exec_client._instrument_provider.find.return_value = ETHUSDT_BINANCE
-
-        # Mock order type to be LIMIT
-        from nautilus_trader.model.enums import OrderType
 
         mock_order.order_type = OrderType.LIMIT
 
@@ -732,6 +779,7 @@ class TestBinanceFuturesExecutionHandlers:
         mock_order.quantity = Quantity.from_str("1.000")
         mock_order.has_price = True  # STOP_LIMIT orders have prices
         mock_order.has_trigger_price = True  # STOP_LIMIT orders have trigger prices
+        mock_order.venue_order_id = VenueOrderId("8765432101")
 
         # Create mocked exec_client
         exec_client = mocker.MagicMock()
@@ -739,9 +787,6 @@ class TestBinanceFuturesExecutionHandlers:
         exec_client._cache.order.return_value = mock_order
         exec_client._get_cached_instrument_id.return_value = ETHUSDT_BINANCE.id
         exec_client._instrument_provider.find.return_value = ETHUSDT_BINANCE
-
-        # Mock order type to be STOP_LIMIT
-        from nautilus_trader.model.enums import OrderType
 
         mock_order.order_type = OrderType.STOP_LIMIT
 
@@ -774,6 +819,7 @@ class TestBinanceFuturesExecutionHandlers:
         mock_order.quantity = Quantity.from_str("1.000")
         mock_order.has_price = True  # LIMIT_IF_TOUCHED orders have prices
         mock_order.has_trigger_price = True  # LIMIT_IF_TOUCHED orders have trigger prices
+        mock_order.venue_order_id = VenueOrderId("8765432102")
 
         # Create mocked exec_client
         exec_client = mocker.MagicMock()
@@ -781,9 +827,6 @@ class TestBinanceFuturesExecutionHandlers:
         exec_client._cache.order.return_value = mock_order
         exec_client._get_cached_instrument_id.return_value = ETHUSDT_BINANCE.id
         exec_client._instrument_provider.find.return_value = ETHUSDT_BINANCE
-
-        # Mock order type to be LIMIT_IF_TOUCHED
-        from nautilus_trader.model.enums import OrderType
 
         mock_order.order_type = OrderType.LIMIT_IF_TOUCHED
 
@@ -801,3 +844,371 @@ class TestBinanceFuturesExecutionHandlers:
             "2500.00",
         )  # Preserved trigger price
         assert update_kwargs["quantity"] == mock_order.quantity
+
+    def test_trade_execution_reduce_only_quantity_reduction_generates_order_updated(
+        self,
+        mocker,
+    ):
+        # Arrange: fast-fill scenario where TRADE arrives without prior NEW.
+        raw = pkgutil.get_data(
+            package="tests.integration_tests.adapters.binance.resources.ws_messages",
+            resource="ws_futures_order_update_trade_reduce_only_qty.json",
+        )
+        decoder = msgspec.json.Decoder(BinanceFuturesOrderUpdateWrapper)
+        wrapper = decoder.decode(raw)
+
+        # User submitted qty 2.000 reduce-only, venue auto-reduced to 1.000 and filled.
+        mock_order = mocker.MagicMock()
+        mock_order.price = Price.from_str("2500.00")
+        mock_order.quantity = Quantity.from_str("2.000")
+        mock_order.has_price = True
+        mock_order.has_trigger_price = False
+        mock_order.venue_order_id = VenueOrderId("8765432300")
+        mock_order.order_type = OrderType.LIMIT
+
+        exec_client = mocker.MagicMock()
+        exec_client._cache.strategy_id_for_order.return_value = StrategyId("S-001")
+        exec_client._cache.order.return_value = mock_order
+        exec_client._get_cached_instrument_id.return_value = ETHUSDT_BINANCE.id
+        exec_client._instrument_provider.find.return_value = ETHUSDT_BINANCE
+
+        # Act
+        wrapper.data.o.handle_order_trade_update(exec_client)
+
+        # Assert: OrderUpdated emitted before OrderFilled to reconcile qty delta.
+        exec_client.generate_order_updated.assert_called_once()
+        update_kwargs = exec_client.generate_order_updated.call_args.kwargs
+        assert update_kwargs["quantity"] == Quantity.from_str("1.000")  # venue-reduced
+        assert update_kwargs["price"] == Price.from_str("2500.00")
+
+        exec_client.generate_order_filled.assert_called_once()
+        update_call = call.generate_order_updated(**update_kwargs)
+        fill_kwargs = exec_client.generate_order_filled.call_args.kwargs
+        fill_call = call.generate_order_filled(**fill_kwargs)
+        update_idx = exec_client.mock_calls.index(update_call)
+        fill_idx = exec_client.mock_calls.index(fill_call)
+        assert update_idx < fill_idx, "OrderUpdated must be emitted before OrderFilled"
+
+    def test_new_execution_reduce_only_quantity_reduction_generates_order_updated(self, mocker):
+        # Arrange
+        raw = pkgutil.get_data(
+            package="tests.integration_tests.adapters.binance.resources.ws_messages",
+            resource="ws_futures_order_update_new_reduce_only_qty.json",
+        )
+        decoder = msgspec.json.Decoder(BinanceFuturesOrderUpdateWrapper)
+        wrapper = decoder.decode(raw)
+
+        # User submitted qty 2.000 reduce-only, venue auto-reduced to 1.000 (in fixture).
+        mock_order = mocker.MagicMock()
+        mock_order.price = Price.from_str("2500.00")
+        mock_order.quantity = Quantity.from_str("2.000")
+        mock_order.has_price = True
+        mock_order.has_trigger_price = False
+        mock_order.venue_order_id = VenueOrderId("8765432200")
+        mock_order.order_type = OrderType.LIMIT
+
+        exec_client = mocker.MagicMock()
+        exec_client._cache.strategy_id_for_order.return_value = StrategyId("S-001")
+        exec_client._cache.order.return_value = mock_order
+        exec_client._get_cached_instrument_id.return_value = ETHUSDT_BINANCE.id
+        exec_client._instrument_provider.find.return_value = ETHUSDT_BINANCE
+
+        # Act
+        wrapper.data.o.handle_order_trade_update(exec_client)
+
+        # Assert
+        exec_client.generate_order_accepted.assert_called_once()
+        exec_client.generate_order_updated.assert_called_once()
+
+        update_kwargs = exec_client.generate_order_updated.call_args.kwargs
+        assert update_kwargs["quantity"] == Quantity.from_str("1.000")  # venue-reduced
+        assert update_kwargs["price"] == Price.from_str("2500.00")  # unchanged
+        assert update_kwargs["trigger_price"] is None
+
+    def test_new_execution_with_no_delta_skips_order_updated(self, mocker):
+        # Arrange: venue confirmed identical qty and price.
+        raw = pkgutil.get_data(
+            package="tests.integration_tests.adapters.binance.resources.ws_messages",
+            resource="ws_futures_order_update_new_price_match.json",
+        )
+        decoder = msgspec.json.Decoder(BinanceFuturesOrderUpdateWrapper)
+        wrapper = decoder.decode(raw)
+
+        mock_order = mocker.MagicMock()
+        mock_order.price = Price.from_str("2495.50")  # matches fixture `p`
+        mock_order.quantity = Quantity.from_str("1.000")  # matches fixture `q`
+        mock_order.has_price = True
+        mock_order.has_trigger_price = False
+        mock_order.venue_order_id = VenueOrderId("8765432100")
+        mock_order.order_type = OrderType.LIMIT
+
+        exec_client = mocker.MagicMock()
+        exec_client._cache.strategy_id_for_order.return_value = StrategyId("S-001")
+        exec_client._cache.order.return_value = mock_order
+        exec_client._get_cached_instrument_id.return_value = ETHUSDT_BINANCE.id
+        exec_client._instrument_provider.find.return_value = ETHUSDT_BINANCE
+
+        # Act
+        wrapper.data.o.handle_order_trade_update(exec_client)
+
+        # Assert
+        exec_client.generate_order_accepted.assert_called_once()
+        exec_client.generate_order_updated.assert_not_called()
+
+    def test_trade_execution_with_no_delta_skips_order_updated(self, mocker):
+        # Arrange: venue confirmed identical qty and price; only the fill should fire.
+        raw = pkgutil.get_data(
+            package="tests.integration_tests.adapters.binance.resources.ws_messages",
+            resource="ws_futures_order_update_trade_reduce_only_qty.json",
+        )
+        decoder = msgspec.json.Decoder(BinanceFuturesOrderUpdateWrapper)
+        wrapper = decoder.decode(raw)
+
+        mock_order = mocker.MagicMock()
+        mock_order.price = Price.from_str("2500.00")  # matches fixture `p`
+        mock_order.quantity = Quantity.from_str("1.000")  # matches fixture `q`
+        mock_order.has_price = True
+        mock_order.has_trigger_price = False
+        mock_order.venue_order_id = VenueOrderId("8765432300")
+        mock_order.order_type = OrderType.LIMIT
+
+        exec_client = mocker.MagicMock()
+        exec_client._cache.strategy_id_for_order.return_value = StrategyId("S-001")
+        exec_client._cache.order.return_value = mock_order
+        exec_client._get_cached_instrument_id.return_value = ETHUSDT_BINANCE.id
+        exec_client._instrument_provider.find.return_value = ETHUSDT_BINANCE
+
+        # Act
+        wrapper.data.o.handle_order_trade_update(exec_client)
+
+        # Assert
+        exec_client.generate_order_updated.assert_not_called()
+        exec_client.generate_order_filled.assert_called_once()
+
+    def test_trade_execution_price_only_delta_generates_order_updated(self, mocker):
+        # Arrange: priceMatch fast-fill scenario. Venue qty matches the order's
+        # qty but venue price differs from the local price.
+        raw = pkgutil.get_data(
+            package="tests.integration_tests.adapters.binance.resources.ws_messages",
+            resource="ws_futures_order_update_trade_reduce_only_qty.json",
+        )
+        decoder = msgspec.json.Decoder(BinanceFuturesOrderUpdateWrapper)
+        wrapper = decoder.decode(raw)
+
+        # Fixture has q=1.000 and p=2500.00. Mock order qty matches; price differs.
+        mock_order = mocker.MagicMock()
+        mock_order.price = Price.from_str("2510.00")  # differs from fixture `p`
+        mock_order.quantity = Quantity.from_str("1.000")  # matches fixture `q`
+        mock_order.has_price = True
+        mock_order.has_trigger_price = False
+        mock_order.venue_order_id = VenueOrderId("8765432300")
+        mock_order.order_type = OrderType.LIMIT
+
+        exec_client = mocker.MagicMock()
+        exec_client._cache.strategy_id_for_order.return_value = StrategyId("S-001")
+        exec_client._cache.order.return_value = mock_order
+        exec_client._get_cached_instrument_id.return_value = ETHUSDT_BINANCE.id
+        exec_client._instrument_provider.find.return_value = ETHUSDT_BINANCE
+
+        # Act
+        wrapper.data.o.handle_order_trade_update(exec_client)
+
+        # Assert: OrderUpdated emitted before OrderFilled with the venue price.
+        exec_client.generate_order_updated.assert_called_once()
+        update_kwargs = exec_client.generate_order_updated.call_args.kwargs
+        assert update_kwargs["price"] == Price.from_str("2500.00")  # venue
+        assert update_kwargs["quantity"] == Quantity.from_str("1.000")  # unchanged
+
+        exec_client.generate_order_filled.assert_called_once()
+        update_call = call.generate_order_updated(**update_kwargs)
+        fill_kwargs = exec_client.generate_order_filled.call_args.kwargs
+        fill_call = call.generate_order_filled(**fill_kwargs)
+        update_idx = exec_client.mock_calls.index(update_call)
+        fill_idx = exec_client.mock_calls.index(fill_call)
+        assert update_idx < fill_idx, "OrderUpdated must precede OrderFilled"
+
+
+class TestBinanceFuturesAlgoOrderHandlers:
+    """
+    Tests for Binance Futures algo order (conditional order) handler methods.
+    """
+
+    def test_algo_triggered_adds_to_triggered_set(self, mocker):
+        """
+        Test that TRIGGERED status adds order to _triggered_algo_order_ids set.
+        """
+        # Arrange
+        raw = pkgutil.get_data(
+            package="tests.integration_tests.adapters.binance.resources.ws_messages",
+            resource="ws_futures_algo_update_triggered.json",
+        )
+        decoder = msgspec.json.Decoder(BinanceFuturesAlgoUpdateWrapper)
+        wrapper = decoder.decode(raw)
+
+        # Create mocked exec_client with a real set for tracking
+        exec_client = mocker.MagicMock()
+        exec_client._triggered_algo_order_ids = set()
+
+        mock_order = mocker.MagicMock()
+        mock_order.quantity = Quantity.from_str("38")
+        mock_order.has_price = True
+        mock_order.price = Price.from_str("0.14")
+        mock_order.has_trigger_price = True
+        mock_order.trigger_price = Price.from_str("0.14")
+
+        exec_client._cache.strategy_id_for_order.return_value = StrategyId("S-001")
+        exec_client._cache.order.return_value = mock_order
+        exec_client._get_cached_instrument_id.return_value = ETHUSDT_BINANCE.id
+        exec_client._instrument_provider.find.return_value = ETHUSDT_BINANCE
+
+        # Act
+        wrapper.data.o.handle_algo_update(exec_client, wrapper.data.T * 1_000_000)
+
+        # Assert - order should be added to triggered set
+        client_order_id = ClientOrderId(wrapper.data.o.caid)
+        assert client_order_id in exec_client._triggered_algo_order_ids
+        exec_client.generate_order_updated.assert_called_once()
+
+    def test_algo_canceled_removes_from_triggered_set(self, mocker):
+        """
+        Test that CANCELED status removes order from _triggered_algo_order_ids set.
+        """
+        # Arrange - Create a mock CANCELED message
+        raw = pkgutil.get_data(
+            package="tests.integration_tests.adapters.binance.resources.ws_messages",
+            resource="ws_futures_algo_update_triggered.json",
+        )
+        decoder = msgspec.json.Decoder(BinanceFuturesAlgoUpdateWrapper)
+
+        # Modify status to CANCELED
+        # Since the struct is frozen, we need to decode and modify the raw JSON
+        data = json.loads(raw)
+        data["data"]["o"]["X"] = "CANCELED"
+        modified_raw = json.dumps(data).encode()
+        wrapper = decoder.decode(modified_raw)
+
+        # Create mocked exec_client with order already in triggered set
+        exec_client = mocker.MagicMock()
+        client_order_id = ClientOrderId(wrapper.data.o.caid)
+        exec_client._triggered_algo_order_ids = {client_order_id}
+
+        mock_order = mocker.MagicMock()
+        mock_order.is_closed = False
+        exec_client._cache.strategy_id_for_order.return_value = StrategyId("S-001")
+        exec_client._cache.order.return_value = mock_order
+        exec_client._get_cached_instrument_id.return_value = ETHUSDT_BINANCE.id
+        exec_client._instrument_provider.find.return_value = ETHUSDT_BINANCE
+
+        # Act
+        wrapper.data.o.handle_algo_update(exec_client, wrapper.data.T * 1_000_000)
+
+        # Assert - order should be removed from triggered set
+        assert client_order_id not in exec_client._triggered_algo_order_ids
+        exec_client.generate_order_canceled.assert_called_once()
+
+    def test_algo_finished_removes_from_triggered_set(self, mocker):
+        """
+        Test that FINISHED status removes order from _triggered_algo_order_ids set.
+        """
+        # Arrange
+        raw = pkgutil.get_data(
+            package="tests.integration_tests.adapters.binance.resources.ws_messages",
+            resource="ws_futures_algo_update_finished.json",
+        )
+        decoder = msgspec.json.Decoder(BinanceFuturesAlgoUpdateWrapper)
+        wrapper = decoder.decode(raw)
+
+        # Create mocked exec_client with order in triggered set
+        exec_client = mocker.MagicMock()
+        client_order_id = ClientOrderId(wrapper.data.o.caid)
+        exec_client._triggered_algo_order_ids = {client_order_id}
+
+        mock_order = mocker.MagicMock()
+        mock_order.is_open = True
+        mock_order.is_closed = False
+        mock_order.quantity = Quantity.from_str("38.0")
+        mock_order.filled_qty = Quantity.from_str("0.0")
+        exec_client._cache.strategy_id_for_order.return_value = StrategyId("S-001")
+        exec_client._cache.order.return_value = mock_order
+        exec_client._get_cached_instrument_id.return_value = ETHUSDT_BINANCE.id
+        exec_client._instrument_provider.find.return_value = ETHUSDT_BINANCE
+
+        # Act
+        wrapper.data.o.handle_algo_update(exec_client, wrapper.data.T * 1_000_000)
+
+        # Assert - order should be removed from triggered set
+        assert client_order_id not in exec_client._triggered_algo_order_ids
+
+    def test_order_trade_update_canceled_removes_from_triggered_set(self, mocker):
+        """
+        Test that ORDER_TRADE_UPDATE with CANCELED status removes order from
+        _triggered_algo_order_ids set.
+        """
+        # Arrange - Use an existing fixture and modify for CANCELED status
+        raw = pkgutil.get_data(
+            package="tests.integration_tests.adapters.binance.resources.ws_messages",
+            resource="ws_futures_order_update_new_limit_if_touched_price_match.json",
+        )
+        data = json.loads(raw)
+
+        # Modify to CANCELED execution type and status
+        data["data"]["o"]["x"] = "CANCELED"
+        data["data"]["o"]["X"] = "CANCELED"
+        modified_raw = json.dumps(data).encode()
+
+        decoder = msgspec.json.Decoder(BinanceFuturesOrderUpdateWrapper)
+        wrapper = decoder.decode(modified_raw)
+
+        # Create mocked exec_client with order in triggered set
+        exec_client = mocker.MagicMock()
+        client_order_id = ClientOrderId(wrapper.data.o.c)
+        exec_client._triggered_algo_order_ids = {client_order_id}
+        exec_client.treat_expired_as_canceled = False
+
+        mock_order = mocker.MagicMock()
+        mock_order.is_closed = False
+        exec_client._cache.strategy_id_for_order.return_value = StrategyId("S-001")
+        exec_client._cache.order.return_value = mock_order
+        exec_client._get_cached_instrument_id.return_value = ETHUSDT_BINANCE.id
+        exec_client._instrument_provider.find.return_value = ETHUSDT_BINANCE
+
+        # Act
+        wrapper.data.o.handle_order_trade_update(exec_client)
+
+        # Assert - order should be removed from triggered set
+        assert client_order_id not in exec_client._triggered_algo_order_ids
+        exec_client.generate_order_canceled.assert_called_once()
+
+    def test_order_trade_update_sends_status_report_when_instrument_not_in_cache(self, mocker):
+        # Arrange: tracked order (strategy_id present) but instrument missing from cache
+        raw = pkgutil.get_data(
+            package="tests.integration_tests.adapters.binance.resources.ws_messages",
+            resource="ws_futures_order_update_liquidation.json",
+        )
+        decoder = msgspec.json.Decoder(BinanceFuturesOrderUpdateWrapper)
+        wrapper = decoder.decode(raw)
+
+        exec_client = mocker.MagicMock()
+        exec_client.account_id = mocker.MagicMock()
+        exec_client._cache.strategy_id_for_order.return_value = StrategyId("S-001")
+        exec_client._get_cached_instrument_id.return_value = BTCUSDT_BINANCE.id
+        exec_client._instrument_provider.find.return_value = None  # Not in cache
+        exec_client._clock.timestamp_ns.return_value = 1759347763167000000
+
+        # Act
+        wrapper.data.o.handle_order_trade_update(exec_client)
+
+        # Assert: OrderStatusReport sent for reconciliation, no exception raised
+        exec_client._log.warning.assert_called()
+        warning_msgs = [c[0][0] for c in exec_client._log.warning.call_args_list]
+        assert any("not in cache" in msg for msg in warning_msgs)
+
+        exec_client._send_order_status_report.assert_called_once()
+        report = exec_client._send_order_status_report.call_args[0][0]
+        assert report.instrument_id == BTCUSDT_BINANCE.id
+        assert report.client_order_id == ClientOrderId("autoclose-1234567890123456")
+        assert report.venue_order_id == VenueOrderId("9876543210")
+
+        # No fill report or order events generated
+        exec_client._send_fill_report.assert_not_called()
+        exec_client.generate_order_filled.assert_not_called()

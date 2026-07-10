@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -14,6 +14,7 @@
 // -------------------------------------------------------------------------------------------------
 
 pub mod compare;
+pub mod error;
 pub mod position;
 pub mod profiler;
 pub mod quote;
@@ -22,7 +23,12 @@ pub mod snapshot;
 pub mod swap_math;
 
 // Re-exports
+pub use error::{
+    LiquidityMathError, PoolEventKind, PoolEventLocation, PoolProfilerError,
+    liquidity_error_with_location,
+};
 pub use profiler::PoolProfiler;
+pub use snapshot::PoolSnapshot;
 
 #[cfg(test)]
 pub mod tests;

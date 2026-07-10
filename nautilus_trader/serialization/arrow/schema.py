@@ -1,5 +1,5 @@
 # -------------------------------------------------------------------------------------------------
-#  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+#  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 #  https://nautechsystems.io
 #
 #  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -21,10 +21,12 @@ from nautilus_trader.common.messages import ShutdownSystem
 from nautilus_trader.common.messages import TradingStateChanged
 from nautilus_trader.core import nautilus_pyo3
 from nautilus_trader.model.data import Bar
+from nautilus_trader.model.data import FundingRateUpdate
 from nautilus_trader.model.data import IndexPriceUpdate
 from nautilus_trader.model.data import InstrumentClose
 from nautilus_trader.model.data import InstrumentStatus
 from nautilus_trader.model.data import MarkPriceUpdate
+from nautilus_trader.model.data import OptionGreeks
 from nautilus_trader.model.data import OrderBookDelta
 from nautilus_trader.model.data import OrderBookDepth10
 from nautilus_trader.model.data import QuoteTick
@@ -94,6 +96,48 @@ NAUTILUS_ARROW_SCHEMA = {
             for k, v in nautilus_pyo3.IndexPriceUpdate.get_fields().items()
         ],
     ),
+    FundingRateUpdate: pa.schema(
+        [
+            pa.field("rate", pa.binary(), False),
+            pa.field("interval", pa.uint16(), True),
+            pa.field("next_funding_ns", pa.uint64(), True),
+            pa.field("ts_event", pa.uint64(), False),
+            pa.field("ts_init", pa.uint64(), False),
+        ],
+    ),
+    InstrumentStatus: pa.schema(
+        {
+            "instrument_id": pa.string(),
+            "action": pa.string(),
+            "reason": pa.string(),
+            "trading_event": pa.string(),
+            "is_trading": pa.bool_(),
+            "is_quoting": pa.bool_(),
+            "is_short_sell_restricted": pa.bool_(),
+            "ts_event": pa.uint64(),
+            "ts_init": pa.uint64(),
+        },
+        metadata={"type": "InstrumentStatus"},
+    ),
+    OptionGreeks: pa.schema(
+        [
+            pa.field("instrument_id", pa.string(), False),
+            pa.field("delta", pa.float64(), False),
+            pa.field("gamma", pa.float64(), False),
+            pa.field("vega", pa.float64(), False),
+            pa.field("theta", pa.float64(), False),
+            pa.field("rho", pa.float64(), False),
+            pa.field("mark_iv", pa.float64(), True),
+            pa.field("bid_iv", pa.float64(), True),
+            pa.field("ask_iv", pa.float64(), True),
+            pa.field("underlying_price", pa.float64(), True),
+            pa.field("open_interest", pa.float64(), True),
+            pa.field("ts_event", pa.uint64(), False),
+            pa.field("ts_init", pa.uint64(), False),
+            pa.field("convention", pa.string(), False),
+        ],
+        metadata={"type": "OptionGreeks"},
+    ),
     InstrumentClose: pa.schema(
         {
             "instrument_id": pa.dictionary(pa.int64(), pa.string()),
@@ -110,20 +154,6 @@ NAUTILUS_ARROW_SCHEMA = {
     #         for k, v in nautilus_pyo3.InstrumentClose.get_fields().items()
     #     ],
     # ),
-    InstrumentStatus: pa.schema(
-        {
-            "instrument_id": pa.dictionary(pa.int64(), pa.string()),
-            "action": pa.dictionary(pa.int8(), pa.string()),
-            "reason": pa.string(),
-            "trading_event": pa.string(),
-            "is_trading": pa.bool_(),
-            "is_quoting": pa.bool_(),
-            "is_short_sell_restricted": pa.bool_(),
-            "ts_event": pa.uint64(),
-            "ts_init": pa.uint64(),
-        },
-        metadata={"type": "InstrumentStatus"},
-    ),
     ShutdownSystem: pa.schema(
         {
             "trader_id": pa.dictionary(pa.int16(), pa.string()),
@@ -131,6 +161,7 @@ NAUTILUS_ARROW_SCHEMA = {
             "reason": pa.string(),
             "command_id": pa.string(),
             "ts_init": pa.uint64(),
+            "correlation_id": pa.string(),
         },
         metadata={"type": "ShutdownSystem"},
     ),

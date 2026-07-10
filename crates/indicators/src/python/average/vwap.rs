@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -19,7 +19,9 @@ use pyo3::prelude::*;
 use crate::{average::vwap::VolumeWeightedAveragePrice, indicator::Indicator};
 
 #[pymethods]
+#[pyo3_stub_gen::derive::gen_stub_pymethods]
 impl VolumeWeightedAveragePrice {
+    /// Creates a new `VolumeWeightedAveragePrice` instance.
     #[new]
     #[must_use]
     pub const fn py_new() -> Self {
@@ -56,11 +58,7 @@ impl VolumeWeightedAveragePrice {
 
     #[pyo3(name = "handle_bar")]
     fn py_handle_bar(&mut self, bar: &Bar) {
-        self.py_update_raw(
-            (&bar.close).into(),
-            (&bar.volume).into(),
-            bar.ts_init.as_f64(),
-        );
+        self.handle_bar(bar);
     }
 
     #[pyo3(name = "reset")]

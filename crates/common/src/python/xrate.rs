@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -13,15 +13,21 @@
 //  limitations under the License.
 // -------------------------------------------------------------------------------------------------
 
-use ahash::HashMap;
+use ahash::{AHashMap, HashMap};
 use nautilus_core::python::to_pyvalue_err;
 use nautilus_model::enums::PriceType;
 use pyo3::prelude::*;
+use rust_decimal::{Decimal, prelude::FromPrimitive};
 use ustr::Ustr;
 
 use crate::xrate::get_exchange_rate;
 
 /// Calculates the exchange rate between two currencies using provided bid and ask quotes.
+///
+/// This function builds a graph of direct conversion rates from the quotes and uses a DFS to
+/// accumulate the conversion rate along a valid conversion path. While a full Floyd–Warshall
+/// algorithm could compute all-pairs conversion rates, the DFS approach here provides a quick
+/// solution for a single conversion query.
 ///
 /// # Errors
 ///
@@ -31,6 +37,7 @@ use crate::xrate::get_exchange_rate;
 /// - `quotes_bid` and `quotes_ask` lengths are not equal.
 /// - The bid or ask side of a pair is missing.
 #[pyfunction]
+#[pyo3_stub_gen::derive::gen_stub_pyfunction(module = "nautilus_trader.common")]
 #[pyo3(name = "get_exchange_rate")]
 #[pyo3(signature = (from_currency, to_currency, price_type, quotes_bid, quotes_ask))]
 pub fn py_get_exchange_rate(
@@ -39,13 +46,28 @@ pub fn py_get_exchange_rate(
     price_type: PriceType,
     quotes_bid: HashMap<String, f64>,
     quotes_ask: HashMap<String, f64>,
-) -> PyResult<Option<f64>> {
+) -> PyResult<Option<Decimal>> {
+    let quotes_bid = f64_quotes_to_decimal(quotes_bid).map_err(to_pyvalue_err)?;
+    let quotes_ask = f64_quotes_to_decimal(quotes_ask).map_err(to_pyvalue_err)?;
+
     get_exchange_rate(
         Ustr::from(from_currency),
         Ustr::from(to_currency),
         price_type,
-        quotes_bid.into_iter().collect(),
-        quotes_ask.into_iter().collect(),
+        quotes_bid,
+        quotes_ask,
     )
     .map_err(to_pyvalue_err)
+}
+
+fn f64_quotes_to_decimal(quotes: HashMap<String, f64>) -> anyhow::Result<AHashMap<Ustr, Decimal>> {
+    quotes
+        .into_iter()
+        .map(|(pair, value)| {
+            let rate = Decimal::from_f64(value).ok_or_else(|| {
+                anyhow::anyhow!("Invalid quote rate for pair {pair}, was {value}")
+            })?;
+            Ok((Ustr::from(&pair), rate))
+        })
+        .collect()
 }

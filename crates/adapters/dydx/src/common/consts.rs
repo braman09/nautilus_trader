@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -17,7 +17,7 @@
 
 use std::sync::LazyLock;
 
-use nautilus_model::identifiers::Venue;
+use nautilus_model::identifiers::{ClientId, Venue};
 use nautilus_network::http::StatusCode;
 use ustr::Ustr;
 
@@ -27,6 +27,9 @@ pub const DYDX: &str = "DYDX";
 /// dYdX venue identifier.
 pub static DYDX_VENUE: LazyLock<Venue> = LazyLock::new(|| Venue::new(Ustr::from(DYDX)));
 
+/// dYdX client ID.
+pub static DYDX_CLIENT_ID: LazyLock<ClientId> = LazyLock::new(|| ClientId::new(Ustr::from(DYDX)));
+
 /// dYdX mainnet chain ID.
 pub const DYDX_CHAIN_ID: &str = "dydx-mainnet-1";
 
@@ -35,6 +38,10 @@ pub const DYDX_TESTNET_CHAIN_ID: &str = "dydx-testnet-4";
 
 /// Cosmos SDK bech32 address prefix for dYdX.
 pub const DYDX_BECH32_PREFIX: &str = "dydx";
+
+/// Order router address for the NautilusTrader order attribution.
+/// Defined by dYdX governance proposal 381 (<https://mintscan.io/dydx/proposals/381>).
+pub const DYDX_NAUTILUS_ORDER_ROUTER_ADDRESS: &str = "dydx1pahjv32ex740hahnp5dc4hnmlchkeea6ndqat5";
 
 /// USDC gas denomination (native chain token).
 pub const USDC_GAS_DENOM: &str =
@@ -56,6 +63,11 @@ pub const DYDX_HTTP_URL: &str = "https://indexer.dydx.trade";
 
 /// dYdX v4 mainnet WebSocket URL.
 pub const DYDX_WS_URL: &str = "wss://indexer.dydx.trade/v4/ws";
+
+/// dYdX v4 mainnet REST API URL (Cosmos LCD for chain queries).
+///
+/// Used for querying on-chain state like authenticators.
+pub const DYDX_REST_URL: &str = "https://dydx-ops-rest.kingnodes.com";
 
 /// dYdX v4 mainnet gRPC URLs (public validator nodes with fallbacks).
 ///
@@ -89,6 +101,11 @@ pub const DYDX_TESTNET_HTTP_URL: &str = "https://indexer.v4testnet.dydx.exchange
 
 /// dYdX v4 testnet WebSocket URL.
 pub const DYDX_TESTNET_WS_URL: &str = "wss://indexer.v4testnet.dydx.exchange/v4/ws";
+
+/// dYdX v4 testnet REST API URL (Cosmos LCD for chain queries).
+///
+/// Used for querying on-chain state like authenticators.
+pub const DYDX_TESTNET_REST_URL: &str = "https://test-dydx-rest.kingnodes.com";
 
 /// dYdX v4 testnet gRPC URLs (public validator nodes with fallbacks).
 ///
@@ -129,10 +146,6 @@ pub const DYDX_TESTNET_GRPC_URL: &str = DYDX_TESTNET_GRPC_URLS[0];
 pub const fn should_retry_error_code(status: &StatusCode) -> bool {
     matches!(status.as_u16(), 429 | 500..=599)
 }
-
-////////////////////////////////////////////////////////////////////////////////
-// Tests
-////////////////////////////////////////////////////////////////////////////////
 
 #[cfg(test)]
 mod tests {

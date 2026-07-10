@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -17,12 +17,20 @@
 
 use bytes::Bytes;
 use futures::stream::Stream;
+use ustr::Ustr;
 
-use crate::msgbus::{BusMessage, MStr, Topic};
+use crate::{
+    enums::SerializationEncoding,
+    msgbus::{BusMessage, BusPayloadType, MStr, Topic},
+};
 
 #[cfg_attr(
     feature = "python",
     pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.common")
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.common")
 )]
 #[derive(Debug)]
 pub struct MessageBusListener {
@@ -67,7 +75,15 @@ impl MessageBusListener {
     /// Publishes a message with the given `topic` and `payload`.
     pub fn publish<T: Into<MStr<Topic>>>(&self, topic: T, payload: Bytes) {
         let topic = topic.into();
-        let msg = BusMessage::new(*topic, payload);
+
+        // Listener messages are untyped, so they use default bus headers.
+        let msg = BusMessage::new(
+            *topic,
+            BusPayloadType::Custom(Ustr::default()),
+            payload,
+            SerializationEncoding::default(),
+        );
+
         if let Err(e) = self.tx.send(msg) {
             log::error!("Failed to send message: {e}");
         }
@@ -148,7 +164,7 @@ mod tests {
         // Wait for the message to be processed
         tokio::select! {
             _ = notify_rx.recv() => {},
-            _ = tokio::time::sleep(tokio::time::Duration::from_secs(1)) => {
+            () = tokio::time::sleep(tokio::time::Duration::from_secs(1)) => {
                 panic!("Timeout waiting for message");
             }
         }
@@ -269,7 +285,7 @@ mod tests {
         // Wait for the message to be processed
         tokio::select! {
             _ = notify_rx.recv() => {},
-            _ = tokio::time::sleep(tokio::time::Duration::from_secs(1)) => {
+            () = tokio::time::sleep(tokio::time::Duration::from_secs(1)) => {
                 panic!("Timeout waiting for message");
             }
         }
@@ -303,7 +319,7 @@ mod tests {
 
         tokio::select! {
             _ = notify_rx.recv() => {},
-            _ = tokio::time::sleep(tokio::time::Duration::from_secs(1)) => {
+            () = tokio::time::sleep(tokio::time::Duration::from_secs(1)) => {
                 panic!("Timeout waiting for message");
             }
         }

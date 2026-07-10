@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -15,13 +15,17 @@
 
 use std::str::FromStr;
 
-use nautilus_core::python::{to_pyruntime_err, to_pyvalue_err};
+use nautilus_core::python::{correctness_error_to_pyvalue_err, to_pyruntime_err, to_pyvalue_err};
 use pyo3::{IntoPyObjectExt, prelude::*};
 
-use crate::{enums::CurrencyType, types::Currency};
+use crate::{enums::CurrencyType, python::currency_lookup_error_to_pyvalue_err, types::Currency};
 
 #[pymethods]
+#[pyo3_stub_gen::derive::gen_stub_pymethods]
 impl Currency {
+    /// Represents a medium of exchange in a specified denomination with a fixed decimal precision.
+    ///
+    /// Handles up to `FIXED_PRECISION` decimals of precision.
     #[new]
     fn py_new(
         code: &str,
@@ -30,7 +34,8 @@ impl Currency {
         name: &str,
         currency_type: CurrencyType,
     ) -> PyResult<Self> {
-        Self::new_checked(code, precision, iso4217, name, currency_type).map_err(to_pyvalue_err)
+        Self::new_checked(code, precision, iso4217, name, currency_type)
+            .map_err(correctness_error_to_pyvalue_err)
     }
 
     fn __reduce__(&self, py: Python) -> PyResult<Py<PyAny>> {
@@ -55,7 +60,8 @@ impl Currency {
         currency_type_str: &str,
     ) -> PyResult<Self> {
         let currency_type = CurrencyType::from_str(currency_type_str).map_err(to_pyvalue_err)?;
-        Self::new_checked(code, precision, iso4217, name, currency_type).map_err(to_pyvalue_err)
+        Self::new_checked(code, precision, iso4217, name, currency_type)
+            .map_err(correctness_error_to_pyvalue_err)
     }
 
     fn __repr__(&self) -> String {
@@ -96,22 +102,36 @@ impl Currency {
         self.currency_type
     }
 
+    /// Checks if the currency identified by the given `code` is a fiat currency.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - A currency with the given `code` does not exist.
+    /// - There is a failure acquiring the lock on the currency map.
     #[staticmethod]
     #[pyo3(name = "is_fiat")]
     fn py_is_fiat(code: &str) -> PyResult<bool> {
-        Self::is_fiat(code).map_err(to_pyvalue_err)
+        Self::is_fiat(code).map_err(currency_lookup_error_to_pyvalue_err)
     }
 
+    /// Checks if the currency identified by the given `code` is a cryptocurrency.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - If a currency with the given `code` does not exist.
+    /// - If there is a failure acquiring the lock on the currency map.
     #[staticmethod]
     #[pyo3(name = "is_crypto")]
     fn py_is_crypto(code: &str) -> PyResult<bool> {
-        Self::is_crypto(code).map_err(to_pyvalue_err)
+        Self::is_crypto(code).map_err(currency_lookup_error_to_pyvalue_err)
     }
 
     #[staticmethod]
     #[pyo3(name = "is_commodity_backed")]
     fn py_is_commodidity_backed(code: &str) -> PyResult<bool> {
-        Self::is_commodity_backed(code).map_err(to_pyvalue_err)
+        Self::is_commodity_backed(code).map_err(currency_lookup_error_to_pyvalue_err)
     }
 
     #[staticmethod]
@@ -122,15 +142,23 @@ impl Currency {
             Ok(currency) => Ok(currency),
             Err(e) => {
                 if strict {
-                    Err(to_pyvalue_err(e))
+                    Err(currency_lookup_error_to_pyvalue_err(e))
                 } else {
                     Self::new_checked(value, 8, 0, value, CurrencyType::Crypto)
-                        .map_err(to_pyvalue_err)
+                        .map_err(correctness_error_to_pyvalue_err)
                 }
             }
         }
     }
 
+    /// Register the given `currency` in the internal currency map.
+    ///
+    /// - If `overwrite` is `true`, any existing currency will be replaced.
+    /// - If `overwrite` is `false` and the currency already exists, the operation is a no-op.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if there is a failure acquiring the lock on the currency map.
     #[staticmethod]
     #[pyo3(name = "register")]
     #[pyo3(signature = (currency, overwrite = false))]

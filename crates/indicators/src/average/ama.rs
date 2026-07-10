@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -35,6 +35,10 @@ use crate::{
 #[cfg_attr(
     feature = "python",
     pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.indicators")
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.indicators")
 )]
 pub struct AdaptiveMovingAverage {
     /// The period for the internal `EfficiencyRatio` indicator.
@@ -83,8 +87,9 @@ impl Indicator for AdaptiveMovingAverage {
         self.initialized
     }
 
-    fn handle_quote(&mut self, quote: &QuoteTick) {
-        self.update_raw(quote.extract_price(self.price_type).into());
+    fn handle_quote(&mut self, quote: &QuoteTick) -> anyhow::Result<()> {
+        self.update_raw(quote.extract_price(self.price_type)?.into());
+        Ok(())
     }
 
     fn handle_trade(&mut self, trade: &TradeTick) {
@@ -201,9 +206,6 @@ impl MovingAverage for AdaptiveMovingAverage {
     }
 }
 
-////////////////////////////////////////////////////////////////////////////////
-// Tests
-////////////////////////////////////////////////////////////////////////////////
 #[cfg(test)]
 mod tests {
     use nautilus_model::data::{Bar, QuoteTick, TradeTick};
@@ -281,7 +283,7 @@ mod tests {
 
     #[rstest]
     fn test_handle_quote_tick(mut indicator_ama_10: AdaptiveMovingAverage, stub_quote: QuoteTick) {
-        indicator_ama_10.handle_quote(&stub_quote);
+        indicator_ama_10.handle_quote(&stub_quote).unwrap();
         assert!(indicator_ama_10.has_inputs);
         assert!(!indicator_ama_10.initialized);
         assert_eq!(indicator_ama_10.value, 1501.0);

@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -13,9 +13,9 @@
 //  limitations under the License.
 // -------------------------------------------------------------------------------------------------
 
-//! Technical analysis indicators for [NautilusTrader](http://nautilustrader.io).
+//! Technical analysis indicators for [NautilusTrader](https://nautilustrader.io).
 //!
-//! The `nautilus-indicators` crate provides a comprehensive collection of technical analysis indicators
+//! The `nautilus-indicators` crate provides a collection of technical analysis indicators
 //! for quantitative trading and market research. This includes a wide variety of indicators
 //! organized by category, with a unified trait-based architecture for consistent usage:
 //!
@@ -30,17 +30,15 @@
 //! usage and efficient circular buffer implementations. The crate supports both Rust-native
 //! usage and Python integration for strategy development and backtesting.
 //!
-//! # Platform
+//! # NautilusTrader
 //!
-//! [NautilusTrader](http://nautilustrader.io) is an open-source, high-performance, production-grade
-//! algorithmic trading platform, providing quantitative traders with the ability to backtest
-//! portfolios of automated trading strategies on historical data with an event-driven engine,
-//! and also deploy those same strategies live, with no code changes.
+//! [NautilusTrader](https://nautilustrader.io) is an open-source, production-grade, Rust-native
+//! engine for multi-asset, multi-venue trading systems.
 //!
-//! NautilusTrader's design, architecture, and implementation philosophy prioritizes software correctness and safety at the
-//! highest level, with the aim of supporting mission-critical, trading system backtesting and live deployment workloads.
+//! The system spans research, deterministic simulation, and live execution within a single
+//! event-driven architecture, providing research-to-live semantic parity.
 //!
-//! # Feature flags
+//! # Feature Flags
 //!
 //! This crate provides feature flags to control source code inclusion during compilation,
 //! depending on the intended use case, i.e. whether to provide Python bindings
@@ -51,6 +49,7 @@
 //! - `extension-module`: Builds the crate as a Python extension module.
 
 #![warn(rustc::all)]
+#![warn(clippy::pedantic)]
 #![deny(unsafe_code)]
 #![deny(unsafe_op_in_unsafe_fn)]
 #![deny(nonstandard_style)]
@@ -58,6 +57,26 @@
 #![deny(clippy::missing_errors_doc)]
 #![deny(clippy::missing_panics_doc)]
 #![deny(rustdoc::broken_intra_doc_links)]
+#![allow(
+    clippy::similar_names,
+    reason = "indicator fields such as period_d/period_k and value_d/value_k are intentionally parallel"
+)]
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    reason = "indicator math casts between usize/i64/f64 with values bounded by configured periods"
+)]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::float_cmp,
+        clippy::should_panic_without_expect,
+        clippy::unreadable_literal,
+        reason = "indicator tests assert exact float outputs and decimal constants from algorithm references"
+    )
+)]
 
 pub mod average;
 pub mod book;

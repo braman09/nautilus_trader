@@ -1,5 +1,5 @@
 # -------------------------------------------------------------------------------------------------
-#  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+#  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 #  https://nautechsystems.io
 #
 #  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -21,6 +21,7 @@ import pytest
 from aiohttp.test_utils import TestServer
 
 from nautilus_trader.core.nautilus_pyo3 import WebSocketClient
+from nautilus_trader.core.nautilus_pyo3 import WebSocketClientError
 from nautilus_trader.core.nautilus_pyo3 import WebSocketConfig
 from nautilus_trader.test_kit.functions import eventually
 
@@ -32,12 +33,30 @@ def _server_url(server: TestServer) -> str:
     return f"ws://{server.host}:{server.port}/ws"
 
 
+def test_websocket_config_accepts_proxy_url():
+    # Pin the pyo3 binding signature: a regression that drops the kwarg from
+    # the Rust constructor would surface here as a TypeError.
+    config = WebSocketConfig(
+        url="ws://example.invalid/ws",
+        headers=[],
+        proxy_url="http://127.0.0.1:9999",
+    )
+    assert config is not None
+
+
+def test_websocket_config_proxy_url_omitted():
+    # Default path: no proxy specified, the kwarg falls back to None.
+    config = WebSocketConfig(url="ws://example.invalid/ws", headers=[])
+    assert config is not None
+
+
 @pytest.mark.asyncio
 async def test_connect_and_disconnect(websocket_server):
     # Arrange
     store = []
-    config = WebSocketConfig(_server_url(websocket_server), store.append, [])
-    client = await WebSocketClient.connect(config)
+    loop = asyncio.get_running_loop()
+    config = WebSocketConfig(_server_url(websocket_server), [])
+    client = await WebSocketClient.connect(loop, config, store.append)
 
     # Act, Assert
     await eventually(lambda: client.is_active())
@@ -49,8 +68,9 @@ async def test_connect_and_disconnect(websocket_server):
 async def test_client_send_recv(websocket_server):
     # Arrange
     store = []
-    config = WebSocketConfig(_server_url(websocket_server), store.append, [])
-    client = await WebSocketClient.connect(config)
+    loop = asyncio.get_running_loop()
+    config = WebSocketConfig(_server_url(websocket_server), [])
+    client = await WebSocketClient.connect(loop, config, store.append)
     await eventually(lambda: client.is_active())
 
     # Act
@@ -69,8 +89,9 @@ async def test_client_send_recv(websocket_server):
 async def test_client_send_recv_json(websocket_server):
     # Arrange
     store = []
-    config = WebSocketConfig(_server_url(websocket_server), store.append, [])
-    client = await WebSocketClient.connect(config)
+    loop = asyncio.get_running_loop()
+    config = WebSocketConfig(_server_url(websocket_server), [])
+    client = await WebSocketClient.connect(loop, config, store.append)
     await eventually(lambda: client.is_active())
 
     # Act
@@ -90,8 +111,9 @@ async def test_client_send_recv_json(websocket_server):
 async def test_reconnect_after_close(websocket_server):
     # Arrange
     store = []
-    config = WebSocketConfig(_server_url(websocket_server), store.append, [])
-    client = await WebSocketClient.connect(config)
+    loop = asyncio.get_running_loop()
+    config = WebSocketConfig(_server_url(websocket_server), [])
+    client = await WebSocketClient.connect(loop, config, store.append)
     await eventually(lambda: client.is_active())
 
     # Act
@@ -106,8 +128,9 @@ async def test_reconnect_after_close(websocket_server):
 async def test_exponential_backoff(websocket_server):
     # Arrange
     store = []
-    config = WebSocketConfig(_server_url(websocket_server), store.append, [])
-    client = await WebSocketClient.connect(config)
+    loop = asyncio.get_running_loop()
+    config = WebSocketConfig(_server_url(websocket_server), [])
+    client = await WebSocketClient.connect(loop, config, store.append)
     await eventually(lambda: client.is_active())
 
     # Act
@@ -120,12 +143,61 @@ async def test_exponential_backoff(websocket_server):
 
 
 @pytest.mark.asyncio
+async def test_send_pong_returns_silently_when_disconnected(websocket_server):
+    # py_send_pong must not raise when ConnectionMode is no longer Active.
+    # The controller's liveness watchdog owns reconnect; the caller cannot act.
+    store: list[bytes] = []
+    loop = asyncio.get_running_loop()
+    config = WebSocketConfig(_server_url(websocket_server), [])
+    client = await WebSocketClient.connect(loop, config, store.append)
+    await eventually(lambda: client.is_active())
+
+    await client.disconnect()
+    await eventually(lambda: client.is_closed())
+
+    # Must resolve without raising; py_send_pong now silently drops when
+    # the connection is no longer active.
+    await client.send_pong(b"x")
+
+
+@pytest.mark.asyncio
+async def test_send_raises_websocket_client_error_when_disconnected(websocket_server):
+    store: list[bytes] = []
+    loop = asyncio.get_running_loop()
+    config = WebSocketConfig(_server_url(websocket_server), [])
+    client = await WebSocketClient.connect(loop, config, store.append)
+    await eventually(lambda: client.is_active())
+
+    await client.disconnect()
+    await eventually(lambda: client.is_closed())
+
+    with pytest.raises(WebSocketClientError):
+        await client.send(b"x")
+
+
+@pytest.mark.asyncio
+async def test_send_text_raises_websocket_client_error_when_disconnected(websocket_server):
+    store: list[bytes] = []
+    loop = asyncio.get_running_loop()
+    config = WebSocketConfig(_server_url(websocket_server), [])
+    client = await WebSocketClient.connect(loop, config, store.append)
+    await eventually(lambda: client.is_active())
+
+    await client.disconnect()
+    await eventually(lambda: client.is_closed())
+
+    with pytest.raises(WebSocketClientError):
+        await client.send_text(b"x")
+
+
+@pytest.mark.asyncio
 async def test_websocket_headers(websocket_server):
     # Arrange
     store = []
+    loop = asyncio.get_running_loop()
     headers = [("X-Test-Header", "test-value")]
-    config = WebSocketConfig(_server_url(websocket_server), store.append, headers)
-    client = await WebSocketClient.connect(config)
+    config = WebSocketConfig(_server_url(websocket_server), headers)
+    client = await WebSocketClient.connect(loop, config, store.append)
 
     # Act
     await eventually(lambda: client.is_active())

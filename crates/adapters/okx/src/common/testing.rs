@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -20,7 +20,7 @@ use std::{fs, path::PathBuf};
 #[cfg(test)]
 #[must_use]
 /// Loads a JSON fixture from the adapter test data directory.
-pub fn load_test_json(file_name: &str) -> String {
+pub(crate) fn load_test_json(file_name: &str) -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("test_data")
         .join(file_name);

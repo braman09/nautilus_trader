@@ -1,5 +1,5 @@
 # -------------------------------------------------------------------------------------------------
-#  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+#  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 #  https://nautechsystems.io
 #
 #  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -15,6 +15,7 @@
 
 import asyncio
 import functools
+import secrets
 
 from ibapi import comm
 from ibapi import decoder
@@ -24,6 +25,7 @@ from ibapi.const import NO_VALID_ID
 from ibapi.errors import CONNECT_FAIL
 from ibapi.server_versions import MAX_CLIENT_VER
 from ibapi.server_versions import MIN_CLIENT_VER
+from ibapi.utils import currentTimeMillis
 
 from nautilus_trader.adapters.interactive_brokers.client.common import BaseMixin
 from nautilus_trader.common.enums import LogColor
@@ -70,17 +72,32 @@ class InteractiveBrokersClientConnectionMixin(BaseMixin):
         except ConnectionError:
             self._log.error("Connection failed")
             if self._eclient.wrapper:
-                self._eclient.wrapper.error(NO_VALID_ID, CONNECT_FAIL.code(), CONNECT_FAIL.msg())
+                self._eclient.wrapper.error(
+                    NO_VALID_ID,
+                    currentTimeMillis(),
+                    CONNECT_FAIL.code(),
+                    CONNECT_FAIL.msg(),
+                )
         except TimeoutError:
             self._log.warning("Connection timeout")
             if self._eclient.wrapper:
-                self._eclient.wrapper.error(NO_VALID_ID, CONNECT_FAIL.code(), CONNECT_FAIL.msg())
+                self._eclient.wrapper.error(
+                    NO_VALID_ID,
+                    currentTimeMillis(),
+                    CONNECT_FAIL.code(),
+                    CONNECT_FAIL.msg(),
+                )
         except asyncio.CancelledError:
             self._log.info("Connection cancelled")
         except Exception as e:
             self._log.exception("Connection failed", e)
             if self._eclient.wrapper:
-                self._eclient.wrapper.error(NO_VALID_ID, CONNECT_FAIL.code(), CONNECT_FAIL.msg())
+                self._eclient.wrapper.error(
+                    NO_VALID_ID,
+                    currentTimeMillis(),
+                    CONNECT_FAIL.code(),
+                    CONNECT_FAIL.msg(),
+                )
 
     def _msgspec_decoding_hook(self, byte_data: bytes) -> str:
         """
@@ -124,9 +141,23 @@ class InteractiveBrokersClientConnectionMixin(BaseMixin):
 
         """
         self._eclient.reset()
-        self._eclient._host = self._host
-        self._eclient._port = self._port
+        if self._randomize_client_id_on_next_connect:
+            self._client_id = self._generate_random_client_id()
+            self._randomize_client_id_on_next_connect = False
+        else:
+            self._client_id = self._configured_client_id
+        self._eclient.host = self._host
+        self._eclient.port = self._port
         self._eclient.clientId = self._client_id
+
+    def _generate_random_client_id(self) -> int:
+        reserved_client_ids = {self._configured_client_id, self._client_id}
+        client_id = self._client_id
+
+        while client_id in reserved_client_ids:
+            client_id = 1000 + secrets.randbelow(9000)
+
+        return client_id
 
     async def _connect_socket(self) -> None:
         """
@@ -163,7 +194,7 @@ class InteractiveBrokersClientConnectionMixin(BaseMixin):
         if self._eclient.connectOptions:
             v100version += f" {self._eclient.connectOptions}"
 
-        msg = comm.make_msg(v100version)
+        msg = comm.make_initial_msg(v100version)
         msg2 = str.encode(v100prefix, "ascii") + msg
         await asyncio.to_thread(functools.partial(self._eclient.conn.sendMsg, msg2))
 

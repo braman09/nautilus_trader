@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -15,15 +15,50 @@
 
 //! Common functions to support Databento adapter operations.
 
-use std::fmt::{Debug, Formatter};
+use std::{fmt::Debug, fs, path::Path, sync::LazyLock};
 
 use databento::historical::DateTimeRange;
-use nautilus_core::UnixNanos;
+use indexmap::IndexMap;
+use nautilus_core::{UnixNanos, string::secret::REDACTED};
+use nautilus_model::identifiers::{ClientId, Venue};
 use time::OffsetDateTime;
+use ustr::Ustr;
 use zeroize::ZeroizeOnDrop;
 
+use crate::types::{DatabentoPublisher, PublisherId};
+
+/// Venue identifier string.
 pub const DATABENTO: &str = "DATABENTO";
+
+/// Static venue instance.
+pub static DATABENTO_VENUE: LazyLock<Venue> = LazyLock::new(|| Venue::new(Ustr::from(DATABENTO)));
+
+/// Static client ID instance.
+pub static DATABENTO_CLIENT_ID: LazyLock<ClientId> =
+    LazyLock::new(|| ClientId::new(Ustr::from(DATABENTO)));
+
 pub const ALL_SYMBOLS: &str = "ALL_SYMBOLS";
+
+/// Loads Databento publishers from a JSON file.
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be read or parsed as JSON.
+pub fn load_publishers(filepath: impl AsRef<Path>) -> anyhow::Result<Vec<DatabentoPublisher>> {
+    let file_content = fs::read_to_string(filepath)?;
+    Ok(serde_json::from_str(&file_content)?)
+}
+
+/// Builds the publisher-to-venue map used by Databento decoders.
+#[must_use]
+pub fn build_publisher_venue_map(
+    publishers: &[DatabentoPublisher],
+) -> IndexMap<PublisherId, Venue> {
+    publishers
+        .iter()
+        .map(|p| (p.publisher_id, Venue::from(p.venue.as_str())))
+        .collect()
+}
 
 /// API credentials required for Databento API requests.
 #[derive(Clone, ZeroizeOnDrop)]
@@ -32,9 +67,9 @@ pub struct Credential {
 }
 
 impl Debug for Credential {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Credential")
-            .field("api_key", &"<redacted>")
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct(stringify!(Credential))
+            .field("api_key", &REDACTED)
             .finish()
     }
 }
@@ -58,8 +93,7 @@ impl Credential {
     /// having been created from a String.
     #[must_use]
     pub fn api_key(&self) -> &str {
-        // SAFETY: The API key is always valid UTF-8 since it was created from a String
-        std::str::from_utf8(&self.api_key).unwrap()
+        std::str::from_utf8(&self.api_key).expect("API key is valid UTF-8")
     }
 
     /// Returns a masked version of the API key for logging purposes.
@@ -68,7 +102,7 @@ impl Credential {
     /// For keys shorter than 8 characters, shows asterisks only.
     #[must_use]
     pub fn api_key_masked(&self) -> String {
-        nautilus_core::string::mask_api_key(self.api_key())
+        nautilus_core::string::secret::mask_api_key(self.api_key())
     }
 }
 
@@ -82,9 +116,6 @@ pub fn get_date_time_range(start: UnixNanos, end: UnixNanos) -> anyhow::Result<D
     )))
 }
 
-////////////////////////////////////////////////////////////////////////////////
-// Tests
-////////////////////////////////////////////////////////////////////////////////
 #[cfg(test)]
 mod tests {
     use rstest::*;
@@ -123,7 +154,7 @@ mod tests {
     fn test_credential_debug_redaction() {
         let credential = Credential::new("test_api_key");
         let debug_str = format!("{credential:?}");
-        assert!(debug_str.contains("<redacted>"));
+        assert!(debug_str.contains(REDACTED));
         assert!(!debug_str.contains("test_api_key"));
     }
 }

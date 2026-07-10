@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -15,6 +15,10 @@
 
 //! Provides macros for generating identifier functionality.
 
+// Deserializes via `Cow<'de, str>` so the impl handles both borrowed
+// and owned strings. Owned variants are produced by deserializers that
+// must allocate (e.g. `serde_json` decoding `\uXXXX` escapes, content
+// buffering for `#[serde(tag = "...")]` enums, or `serde_json::Value`).
 macro_rules! impl_serialization_for_identifier {
     ($ty:ty) => {
         impl Serialize for $ty {
@@ -31,9 +35,8 @@ macro_rules! impl_serialization_for_identifier {
             where
                 D: Deserializer<'de>,
             {
-                let value_str: &str = Deserialize::deserialize(deserializer)?;
-                let value: $ty = value_str.into();
-                Ok(value)
+                let value_str: std::borrow::Cow<'de, str> = Deserialize::deserialize(deserializer)?;
+                Self::new_checked(value_str.as_ref()).map_err(serde::de::Error::custom)
             }
         }
     };

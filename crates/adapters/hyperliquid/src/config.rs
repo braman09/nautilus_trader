@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -15,10 +15,35 @@
 
 //! Configuration structures for the Hyperliquid adapter.
 
-use crate::common::consts::{info_url, ws_url};
+use nautilus_network::websocket::TransportBackend;
+use serde::{Deserialize, Serialize};
+
+use crate::common::{
+    consts::{info_url, ws_url},
+    enums::HyperliquidEnvironment,
+};
 
 /// Configuration for the Hyperliquid data client.
-#[derive(Clone, Debug)]
+///
+/// The `stale_stream_*` options control the stream health monitor. With recovery
+/// enabled, a stale stream is warned about first, targeted-resubscribed once per
+/// recovery cooldown (preserving its original `l2Book` options), and escalated to
+/// a full WebSocket reconnect after `stale_stream_max_targeted_resubscribes`
+/// failed attempts; fresh data resets the ladder. See the Hyperliquid integration
+/// guide ("Stream health and recovery") for details.
+#[derive(Debug, Clone, Serialize, Deserialize, bon::Builder)]
+#[serde(default, deny_unknown_fields)]
+#[cfg_attr(
+    feature = "python",
+    pyo3::pyclass(
+        module = "nautilus_trader.core.nautilus_pyo3.hyperliquid",
+        from_py_object
+    )
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.adapters.hyperliquid")
+)]
 pub struct HyperliquidDataClientConfig {
     /// Optional private key for authenticated endpoints.
     pub private_key: Option<String>,
@@ -26,36 +51,53 @@ pub struct HyperliquidDataClientConfig {
     pub base_url_ws: Option<String>,
     /// Override for the HTTP info URL.
     pub base_url_http: Option<String>,
-    /// Optional HTTP proxy URL.
-    pub http_proxy_url: Option<String>,
-    /// Optional WebSocket proxy URL.
-    ///
-    /// Note: WebSocket proxy support is not yet implemented. This field is reserved
-    /// for future functionality. Use `http_proxy_url` for REST API proxy support.
-    pub ws_proxy_url: Option<String>,
-    /// When true the client will use Hyperliquid testnet endpoints.
-    pub is_testnet: bool,
+    /// Optional proxy URL for HTTP and WebSocket transports.
+    pub proxy_url: Option<String>,
+    /// The target environment (mainnet or testnet).
+    #[builder(default)]
+    pub environment: HyperliquidEnvironment,
     /// HTTP timeout in seconds.
-    pub http_timeout_secs: Option<u64>,
+    #[builder(default = 60)]
+    pub http_timeout_secs: u64,
     /// WebSocket timeout in seconds.
-    pub ws_timeout_secs: Option<u64>,
-    /// Optional interval for refreshing instruments.
-    pub update_instruments_interval_mins: Option<u64>,
+    #[builder(default = 30)]
+    pub ws_timeout_secs: u64,
+    /// Receive-age threshold in seconds for warning about stale market-data streams.
+    /// Choose a value above the instrument's expected quiet period.
+    /// Set to 0 to disable the stream health monitor.
+    #[builder(default = 120)]
+    pub stale_stream_receive_timeout_secs: u64,
+    /// Interval in seconds for running market-data stream health checks.
+    /// Set to 0 to disable the stream health monitor.
+    #[builder(default = 15)]
+    pub stream_health_check_interval_secs: u64,
+    /// Cooldown in seconds between stale warnings for the same market-data stream.
+    #[builder(default = 60)]
+    pub stale_stream_warning_cooldown_secs: u64,
+    /// Enables automated stale-stream recovery. Off by default: the stream health
+    /// monitor warns only and never changes subscriptions.
+    #[builder(default = false)]
+    pub stale_stream_recovery_enabled: bool,
+    /// Cooldown in seconds between recovery actions for the same market-data stream.
+    /// Must be positive for recovery to run.
+    #[builder(default = 120)]
+    pub stale_stream_recovery_cooldown_secs: u64,
+    /// Targeted resubscribe attempts for a stale stream before escalating to a
+    /// full WebSocket reconnect.
+    #[builder(default = 3)]
+    pub stale_stream_max_targeted_resubscribes: u32,
+    /// Interval for refreshing instruments in minutes.
+    #[builder(default = 60)]
+    pub update_instruments_interval_mins: u64,
+    /// WebSocket transport backend (`Sockudo` by default; `Tungstenite` when
+    /// the `transport-sockudo` feature is disabled).
+    #[builder(default)]
+    pub transport_backend: TransportBackend,
 }
 
 impl Default for HyperliquidDataClientConfig {
     fn default() -> Self {
-        Self {
-            private_key: None,
-            base_url_ws: None,
-            base_url_http: None,
-            http_proxy_url: None,
-            ws_proxy_url: None,
-            is_testnet: false,
-            http_timeout_secs: Some(60),
-            ws_timeout_secs: Some(30),
-            update_instruments_interval_mins: Some(60),
-        }
+        Self::builder().build()
     }
 }
 
@@ -66,109 +108,244 @@ impl HyperliquidDataClientConfig {
         Self::default()
     }
 
-    /// Returns `true` when private key is populated.
+    /// Returns `true` when private key is populated and non-empty.
     #[must_use]
     pub fn has_credentials(&self) -> bool {
-        self.private_key.is_some()
+        self.private_key
+            .as_deref()
+            .is_some_and(|s| !s.trim().is_empty())
     }
 
-    /// Returns the WebSocket URL, respecting the testnet flag and overrides.
+    /// Returns the WebSocket URL, respecting the environment and overrides.
     #[must_use]
     pub fn ws_url(&self) -> String {
         self.base_url_ws
             .clone()
-            .unwrap_or_else(|| ws_url(self.is_testnet).to_string())
+            .unwrap_or_else(|| ws_url(self.environment).to_string())
     }
 
-    /// Returns the HTTP info URL, respecting the testnet flag and overrides.
+    /// Returns the HTTP info URL, respecting the environment and overrides.
     #[must_use]
     pub fn http_url(&self) -> String {
         self.base_url_http
             .clone()
-            .unwrap_or_else(|| info_url(self.is_testnet).to_string())
+            .unwrap_or_else(|| info_url(self.environment).to_string())
     }
 }
 
 /// Configuration for the Hyperliquid execution client.
-#[derive(Clone, Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize, bon::Builder)]
+#[serde(default, deny_unknown_fields)]
+#[cfg_attr(
+    feature = "python",
+    pyo3::pyclass(
+        module = "nautilus_trader.core.nautilus_pyo3.hyperliquid",
+        from_py_object
+    )
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.adapters.hyperliquid")
+)]
 pub struct HyperliquidExecClientConfig {
-    /// Private key for signing transactions (required for execution).
-    pub private_key: String,
+    /// Private key for signing transactions.
+    ///
+    /// If not provided, falls back to environment variable:
+    /// - Mainnet: `HYPERLIQUID_PK`
+    /// - Testnet: `HYPERLIQUID_TESTNET_PK`
+    pub private_key: Option<String>,
     /// Optional vault address for vault operations.
+    ///
+    /// If not provided, falls back to environment variable:
+    /// - Mainnet: `HYPERLIQUID_VAULT`
+    /// - Testnet: `HYPERLIQUID_TESTNET_VAULT`
     pub vault_address: Option<String>,
+    /// Optional main account address when using an agent wallet (API sub-key).
+    /// When set, used for balance queries, position reports, and WS subscriptions
+    /// instead of the address derived from the private key.
+    ///
+    /// If not provided and no explicit vault address is set, falls back to
+    /// the `HYPERLIQUID_ACCOUNT_ADDRESS` environment variable.
+    pub account_address: Option<String>,
     /// Override for the WebSocket URL.
     pub base_url_ws: Option<String>,
     /// Override for the HTTP info URL.
     pub base_url_http: Option<String>,
     /// Override for the exchange API URL.
     pub base_url_exchange: Option<String>,
-    /// Optional HTTP proxy URL.
-    pub http_proxy_url: Option<String>,
-    /// Optional WebSocket proxy URL.
-    ///
-    /// Note: WebSocket proxy support is not yet implemented. This field is reserved
-    /// for future functionality. Use `http_proxy_url` for REST API proxy support.
-    pub ws_proxy_url: Option<String>,
-    /// When true the client will use Hyperliquid testnet endpoints.
-    pub is_testnet: bool,
+    /// Optional proxy URL for HTTP and WebSocket transports.
+    pub proxy_url: Option<String>,
+    /// The target environment (mainnet or testnet).
+    #[builder(default)]
+    pub environment: HyperliquidEnvironment,
     /// HTTP timeout in seconds.
+    #[builder(default = 60)]
     pub http_timeout_secs: u64,
     /// Maximum number of retry attempts for HTTP requests.
+    #[builder(default = 3)]
     pub max_retries: u32,
     /// Initial retry delay in milliseconds.
+    #[builder(default = 100)]
     pub retry_delay_initial_ms: u64,
     /// Maximum retry delay in milliseconds.
+    #[builder(default = 5000)]
     pub retry_delay_max_ms: u64,
+    /// When true, normalize order prices to 5 significant figures
+    /// before submission (Hyperliquid requirement).
+    #[builder(default = true)]
+    pub normalize_prices: bool,
+    /// Slippage buffer in basis points applied to MARKET orders and
+    /// stop-to-limit trigger derivations. Can be overridden per-order via
+    /// `SubmitOrder.params["market_order_slippage_bps"]`.
+    #[builder(default = 50)]
+    pub market_order_slippage_bps: u32,
+    /// If true, attach Nautilus builder attribution to eligible mainnet orders.
+    #[builder(default = true)]
+    pub include_builder_attribution: bool,
+    /// WebSocket transport backend (`Sockudo` by default; `Tungstenite` when
+    /// the `transport-sockudo` feature is disabled).
+    #[builder(default)]
+    pub transport_backend: TransportBackend,
+    /// Timeout in seconds for WebSocket post trading requests.
+    #[builder(default = 10)]
+    pub ws_post_timeout_secs: u64,
+    /// Poll interval in seconds for `outcomeMeta` settlement detection.
+    /// Disabled by default; venue `Settlement` fills drive HIP-4 settlement
+    /// through the standard user-fills stream. Set to a non-zero value only
+    /// when the venue fill stream is unavailable.
+    #[builder(default = 0)]
+    pub outcome_settlement_poll_secs: u64,
 }
 
 impl Default for HyperliquidExecClientConfig {
     fn default() -> Self {
-        Self {
-            private_key: String::new(),
-            vault_address: None,
-            base_url_ws: None,
-            base_url_http: None,
-            base_url_exchange: None,
-            http_proxy_url: None,
-            ws_proxy_url: None,
-            is_testnet: false,
-            http_timeout_secs: 60,
-            max_retries: 3,
-            retry_delay_initial_ms: 100,
-            retry_delay_max_ms: 5000,
-        }
+        Self::builder().build()
     }
 }
 
 impl HyperliquidExecClientConfig {
-    /// Creates a new configuration with the provided private key.
-    #[must_use]
-    pub fn new(private_key: String) -> Self {
-        Self {
-            private_key,
-            ..Self::default()
-        }
-    }
-
-    /// Returns `true` when private key is populated.
+    /// Returns `true` when private key is populated and non-empty.
     #[must_use]
     pub fn has_credentials(&self) -> bool {
-        !self.private_key.is_empty()
+        self.private_key
+            .as_deref()
+            .is_some_and(|s| !s.trim().is_empty())
     }
 
-    /// Returns the WebSocket URL, respecting the testnet flag and overrides.
+    /// Returns the WebSocket URL, respecting the environment and overrides.
     #[must_use]
     pub fn ws_url(&self) -> String {
         self.base_url_ws
             .clone()
-            .unwrap_or_else(|| ws_url(self.is_testnet).to_string())
+            .unwrap_or_else(|| ws_url(self.environment).to_string())
     }
 
-    /// Returns the HTTP info URL, respecting the testnet flag and overrides.
+    /// Returns the HTTP info URL, respecting the environment and overrides.
     #[must_use]
     pub fn http_url(&self) -> String {
         self.base_url_http
             .clone()
-            .unwrap_or_else(|| info_url(self.is_testnet).to_string())
+            .unwrap_or_else(|| info_url(self.environment).to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rstest::rstest;
+
+    use super::*;
+
+    #[rstest]
+    fn test_exec_config_default_account_address_is_none() {
+        let config = HyperliquidExecClientConfig::default();
+        assert!(config.account_address.is_none());
+    }
+
+    #[rstest]
+    fn test_exec_config_with_account_address() {
+        let config = HyperliquidExecClientConfig {
+            account_address: Some("0x1234".to_string()),
+            ..HyperliquidExecClientConfig::default()
+        };
+        assert_eq!(config.account_address.as_deref(), Some("0x1234"));
+    }
+
+    #[rstest]
+    fn test_data_config_toml_minimal() {
+        let config: HyperliquidDataClientConfig = toml::from_str(
+            r#"
+environment = "testnet"
+http_timeout_secs = 30
+update_instruments_interval_mins = 10
+transport_backend = "tungstenite"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.environment, HyperliquidEnvironment::Testnet);
+        assert_eq!(config.http_timeout_secs, 30);
+        assert_eq!(config.update_instruments_interval_mins, 10);
+        assert_eq!(config.transport_backend, TransportBackend::Tungstenite);
+        assert_eq!(config.stale_stream_receive_timeout_secs, 120);
+        assert_eq!(config.stream_health_check_interval_secs, 15);
+        assert_eq!(config.stale_stream_warning_cooldown_secs, 60);
+        assert!(!config.stale_stream_recovery_enabled);
+        assert_eq!(config.stale_stream_recovery_cooldown_secs, 120);
+        assert_eq!(config.stale_stream_max_targeted_resubscribes, 3);
+    }
+
+    #[rstest]
+    fn test_data_config_toml_stale_stream_settings() {
+        let config: HyperliquidDataClientConfig = toml::from_str(
+            "
+stale_stream_receive_timeout_secs = 30
+stream_health_check_interval_secs = 5
+stale_stream_warning_cooldown_secs = 20
+stale_stream_recovery_enabled = true
+stale_stream_recovery_cooldown_secs = 45
+stale_stream_max_targeted_resubscribes = 5
+",
+        )
+        .unwrap();
+
+        assert_eq!(config.stale_stream_receive_timeout_secs, 30);
+        assert_eq!(config.stream_health_check_interval_secs, 5);
+        assert_eq!(config.stale_stream_warning_cooldown_secs, 20);
+        assert!(config.stale_stream_recovery_enabled);
+        assert_eq!(config.stale_stream_recovery_cooldown_secs, 45);
+        assert_eq!(config.stale_stream_max_targeted_resubscribes, 5);
+    }
+
+    #[rstest]
+    fn test_exec_config_toml_empty_uses_defaults() {
+        let config: HyperliquidExecClientConfig = toml::from_str("").unwrap();
+        let expected = HyperliquidExecClientConfig::default();
+
+        assert_eq!(config.environment, expected.environment);
+        assert_eq!(config.http_timeout_secs, expected.http_timeout_secs);
+        assert_eq!(config.max_retries, expected.max_retries);
+        assert_eq!(config.normalize_prices, expected.normalize_prices);
+        assert_eq!(
+            config.market_order_slippage_bps,
+            expected.market_order_slippage_bps,
+        );
+        assert_eq!(
+            config.include_builder_attribution,
+            expected.include_builder_attribution,
+        );
+        assert_eq!(config.transport_backend, expected.transport_backend);
+        assert_eq!(config.ws_post_timeout_secs, expected.ws_post_timeout_secs);
+        assert_eq!(
+            config.outcome_settlement_poll_secs,
+            expected.outcome_settlement_poll_secs,
+        );
+    }
+
+    #[rstest]
+    fn test_exec_config_toml_include_builder_attribution_false() {
+        let config: HyperliquidExecClientConfig =
+            toml::from_str("include_builder_attribution = false").unwrap();
+
+        assert!(!config.include_builder_attribution);
     }
 }

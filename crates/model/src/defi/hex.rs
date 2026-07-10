@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -60,8 +60,8 @@ pub fn deserialize_hex_number<'de, D>(deserializer: D) -> Result<u64, D::Error>
 where
     D: Deserializer<'de>,
 {
-    let hex_string = String::deserialize(deserializer)?;
-    from_str_hex_to_u64(hex_string.as_str()).map_err(serde::de::Error::custom)
+    let hex_string: std::borrow::Cow<'de, str> = Deserialize::deserialize(deserializer)?;
+    from_str_hex_to_u64(hex_string.as_ref()).map_err(serde::de::Error::custom)
 }
 
 /// Custom deserializer that converts an optional hexadecimal string into an `Option<u64>`.
@@ -127,8 +127,8 @@ pub fn deserialize_hex_timestamp<'de, D>(deserializer: D) -> Result<UnixNanos, D
 where
     D: Deserializer<'de>,
 {
-    let hex_string = String::deserialize(deserializer)?;
-    let seconds = from_str_hex_to_u64(hex_string.as_str()).map_err(serde::de::Error::custom)?;
+    let hex_string: std::borrow::Cow<'de, str> = Deserialize::deserialize(deserializer)?;
+    let seconds = from_str_hex_to_u64(hex_string.as_ref()).map_err(serde::de::Error::custom)?;
 
     // Protect against multiplication overflow (extremely far future dates or malicious input).
     seconds
@@ -136,10 +136,6 @@ where
         .map(UnixNanos::new)
         .ok_or_else(|| serde::de::Error::custom("UnixNanos overflow when converting timestamp"))
 }
-
-////////////////////////////////////////////////////////////////////////////////
-// Tests
-////////////////////////////////////////////////////////////////////////////////
 
 #[cfg(test)]
 mod tests {
@@ -156,7 +152,7 @@ mod tests {
         assert_eq!(from_str_hex_to_u64("0XfF").unwrap(), 255);
         assert_eq!(from_str_hex_to_u64("0xff").unwrap(), 255);
         assert_eq!(from_str_hex_to_u64("0xffffffffffffffff").unwrap(), u64::MAX);
-        assert_eq!(from_str_hex_to_u64("1234abcd").unwrap(), 0x1234abcd);
+        assert_eq!(from_str_hex_to_u64("1234abcd").unwrap(), 0x1234_abcd);
     }
 
     #[rstest]
@@ -180,7 +176,7 @@ mod tests {
     fn test_deserialize_hex_timestamp() {
         // Test that hex timestamp conversion works
         let timestamp_hex = "0x64b5f3bb"; // Some timestamp
-        let expected_nanos = 0x64b5f3bb * NANOSECONDS_IN_SECOND;
+        let expected_nanos = 0x64b5_f3bb * NANOSECONDS_IN_SECOND;
 
         // This tests the conversion logic, though we can't easily test the deserializer directly
         assert_eq!(

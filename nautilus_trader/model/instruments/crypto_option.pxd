@@ -1,5 +1,5 @@
 # -------------------------------------------------------------------------------------------------
-#  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+#  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 #  https://nautechsystems.io
 #
 #  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -23,9 +23,11 @@ from nautilus_trader.model.objects cimport Price
 
 cdef class CryptoOption(Instrument):
     cdef readonly Currency underlying
-    """The underlying asset for the contract.\n\n:returns: `str`"""
+    """The underlying asset for the contract.\n\n:returns: `Currency`"""
     cdef readonly Currency settlement_currency
     """The settlement currency for the instrument.\n\n:returns: `Currency`"""
+    cdef readonly bint is_quanto
+    """If the instrument is quanto.\n\n:returns: `bool`"""
     cdef readonly OptionKind option_kind
     """The option kind (PUT | CALL) for the contract.\n\n:returns: `OptionKind`"""
     cdef readonly Price strike_price

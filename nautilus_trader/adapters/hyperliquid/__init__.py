@@ -1,5 +1,5 @@
 # -------------------------------------------------------------------------------------------------
-#  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+#  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 #  https://nautechsystems.io
 #
 #  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -23,11 +23,17 @@ subpackage's top level, so downstream code can simply import from
 ``nautilus_trader.adapters.hyperliquid``.
 
 """
+
 from nautilus_trader.adapters.hyperliquid.config import HyperliquidDataClientConfig
 from nautilus_trader.adapters.hyperliquid.config import HyperliquidExecClientConfig
 from nautilus_trader.adapters.hyperliquid.constants import HYPERLIQUID
 from nautilus_trader.adapters.hyperliquid.constants import HYPERLIQUID_CLIENT_ID
 from nautilus_trader.adapters.hyperliquid.constants import HYPERLIQUID_VENUE
+from nautilus_trader.adapters.hyperliquid.data import HyperliquidAllDexsAssetCtxs
+from nautilus_trader.adapters.hyperliquid.data import HyperliquidAllMids
+from nautilus_trader.adapters.hyperliquid.data import HyperliquidDexAssetCtx
+from nautilus_trader.adapters.hyperliquid.data import HyperliquidImpactPrices
+from nautilus_trader.adapters.hyperliquid.data import HyperliquidOpenInterest
 from nautilus_trader.adapters.hyperliquid.enums import HyperliquidProductType
 from nautilus_trader.adapters.hyperliquid.factories import HyperliquidLiveDataClientFactory
 from nautilus_trader.adapters.hyperliquid.factories import HyperliquidLiveExecClientFactory
@@ -38,10 +44,15 @@ __all__ = [
     "HYPERLIQUID",
     "HYPERLIQUID_CLIENT_ID",
     "HYPERLIQUID_VENUE",
+    "HyperliquidAllDexsAssetCtxs",
+    "HyperliquidAllMids",
     "HyperliquidDataClientConfig",
+    "HyperliquidDexAssetCtx",
     "HyperliquidExecClientConfig",
+    "HyperliquidImpactPrices",
     "HyperliquidInstrumentProvider",
     "HyperliquidLiveDataClientFactory",
     "HyperliquidLiveExecClientFactory",
+    "HyperliquidOpenInterest",
     "HyperliquidProductType",
 ]

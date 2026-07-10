@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -27,6 +27,10 @@ use crate::indicator::{Indicator, MovingAverage};
 #[cfg_attr(
     feature = "python",
     pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.indicators")
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.indicators")
 )]
 pub struct WilderMovingAverage {
     pub period: usize,
@@ -56,8 +60,9 @@ impl Indicator for WilderMovingAverage {
         self.initialized
     }
 
-    fn handle_quote(&mut self, quote: &QuoteTick) {
-        self.update_raw(quote.extract_price(self.price_type).into());
+    fn handle_quote(&mut self, quote: &QuoteTick) -> anyhow::Result<()> {
+        self.update_raw(quote.extract_price(self.price_type)?.into());
+        Ok(())
     }
 
     fn handle_trade(&mut self, t: &TradeTick) {
@@ -128,9 +133,6 @@ impl MovingAverage for WilderMovingAverage {
     }
 }
 
-////////////////////////////////////////////////////////////////////////////////
-// Tests
-////////////////////////////////////////////////////////////////////////////////
 #[cfg(test)]
 mod tests {
     use nautilus_model::{
@@ -204,7 +206,7 @@ mod tests {
     #[rstest]
     fn test_handle_quote_tick_single(indicator_rma_10: WilderMovingAverage, stub_quote: QuoteTick) {
         let mut rma = indicator_rma_10;
-        rma.handle_quote(&stub_quote);
+        rma.handle_quote(&stub_quote).unwrap();
         assert!(rma.has_inputs());
         assert_eq!(rma.value, 1501.0);
     }
@@ -214,8 +216,8 @@ mod tests {
         let tick1 = stub_quote("1500.0", "1502.0");
         let tick2 = stub_quote("1502.0", "1504.0");
 
-        indicator_rma_10.handle_quote(&tick1);
-        indicator_rma_10.handle_quote(&tick2);
+        indicator_rma_10.handle_quote(&tick1).unwrap();
+        indicator_rma_10.handle_quote(&tick2).unwrap();
         assert_eq!(indicator_rma_10.count, 2);
         assert_eq!(indicator_rma_10.value, 1_501.2);
     }

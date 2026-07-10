@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -14,6 +14,15 @@
 // -------------------------------------------------------------------------------------------------
 
 //! Python bindings from [PyO3](https://pyo3.rs).
+
+#![expect(
+    clippy::missing_errors_doc,
+    reason = "errors documented on underlying Rust methods"
+)]
+#![allow(
+    clippy::unused_self,
+    reason = "PyO3 stub methods take &self for Python API parity even when the body is empty"
+)]
 
 pub mod average;
 pub mod book;
@@ -58,9 +67,11 @@ pub fn indicators(_: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<crate::momentum::vhf::VerticalHorizontalFilter>()?;
     m.add_class::<crate::momentum::kvo::KlingerVolumeOscillator>()?;
     m.add_class::<crate::momentum::dm::DirectionalMovement>()?;
+    m.add_class::<crate::momentum::ichimoku::IchimokuCloud>()?;
     m.add_class::<crate::momentum::amat::ArcherMovingAveragesTrends>()?;
     m.add_class::<crate::momentum::swings::Swings>()?;
     m.add_class::<crate::momentum::bb::BollingerBands>()?;
+    m.add_class::<crate::momentum::stochastics::StochasticsDMethod>()?;
     m.add_class::<crate::momentum::stochastics::Stochastics>()?;
     m.add_class::<crate::momentum::psl::PsychologicalLine>()?;
     m.add_class::<crate::momentum::pressure::Pressure>()?;

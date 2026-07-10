@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -16,14 +16,17 @@
 use std::hash::{Hash, Hasher};
 
 use nautilus_core::{
-    UnixNanos,
-    correctness::{FAILED, check_equal_u8, check_valid_string_ascii_optional},
+    Params, UnixNanos,
+    correctness::{
+        CorrectnessResult, CorrectnessResultExt, FAILED, check_equal_u8,
+        check_valid_string_ascii_optional,
+    },
 };
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use ustr::Ustr;
 
-use super::{Instrument, any::InstrumentAny};
+use super::{Instrument, any::InstrumentAny, tick_scheme::check_tick_scheme};
 use crate::{
     enums::{AssetClass, InstrumentClass, OptionKind},
     identifiers::{InstrumentId, Symbol},
@@ -31,16 +34,20 @@ use crate::{
         currency::Currency,
         money::Money,
         price::{Price, check_positive_price},
-        quantity::Quantity,
+        quantity::{Quantity, check_positive_quantity},
     },
 };
 
 /// Represents a generic equity instrument.
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(
     feature = "python",
-    pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.model")
+    pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.model", from_py_object)
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.model")
 )]
 pub struct Equity {
     /// The instrument ID.
@@ -73,22 +80,28 @@ pub struct Equity {
     pub max_price: Option<Price>,
     /// The minimum allowable quoted price.
     pub min_price: Option<Price>,
+    /// The registered variable tick scheme name.
+    pub tick_scheme: Option<Ustr>,
+    /// Additional instrument metadata as a JSON-serializable dictionary.
+    pub info: Option<Params>,
     /// UNIX timestamp (nanoseconds) when the data event occurred.
     pub ts_event: UnixNanos,
     /// UNIX timestamp (nanoseconds) when the data object was initialized.
     pub ts_init: UnixNanos,
 }
 
+#[bon::bon]
 impl Equity {
     /// Creates a new [`Equity`] instance with correctness checking.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any input validation fails.
     ///
     /// # Notes
     ///
     /// PyO3 requires a `Result` type for proper error handling and stacktrace printing in Python.
-    /// # Errors
-    ///
-    /// Returns an error if any input validation fails.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub fn new_checked(
         instrument_id: InstrumentId,
         raw_symbol: Symbol,
@@ -105,9 +118,11 @@ impl Equity {
         margin_maint: Option<Decimal>,
         maker_fee: Option<Decimal>,
         taker_fee: Option<Decimal>,
+        tick_scheme: Option<Ustr>,
+        info: Option<Params>,
         ts_event: UnixNanos,
         ts_init: UnixNanos,
-    ) -> anyhow::Result<Self> {
+    ) -> CorrectnessResult<Self> {
         check_valid_string_ascii_optional(isin.map(|u| u.as_str()), stringify!(isin))?;
         check_equal_u8(
             price_precision,
@@ -116,6 +131,11 @@ impl Equity {
             stringify!(price_increment.precision),
         )?;
         check_positive_price(price_increment, stringify!(price_increment))?;
+        check_tick_scheme(tick_scheme)?;
+
+        if let Some(lot_size) = lot_size {
+            check_positive_quantity(lot_size, stringify!(lot_size))?;
+        }
 
         Ok(Self {
             id: instrument_id,
@@ -133,6 +153,8 @@ impl Equity {
             margin_maint: margin_maint.unwrap_or_default(),
             maker_fee: maker_fee.unwrap_or_default(),
             taker_fee: taker_fee.unwrap_or_default(),
+            tick_scheme,
+            info,
             ts_event,
             ts_init,
         })
@@ -143,7 +165,8 @@ impl Equity {
     /// # Panics
     ///
     /// Panics if any parameter is invalid (see `new_checked`).
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
+    #[must_use]
     pub fn new(
         instrument_id: InstrumentId,
         raw_symbol: Symbol,
@@ -160,6 +183,8 @@ impl Equity {
         margin_maint: Option<Decimal>,
         maker_fee: Option<Decimal>,
         taker_fee: Option<Decimal>,
+        tick_scheme: Option<Ustr>,
+        info: Option<Params>,
         ts_event: UnixNanos,
         ts_init: UnixNanos,
     ) -> Self {
@@ -179,10 +204,66 @@ impl Equity {
             margin_maint,
             maker_fee,
             taker_fee,
+            tick_scheme,
+            info,
             ts_event,
             ts_init,
         )
-        .expect(FAILED)
+        .expect_display(FAILED)
+    }
+
+    /// Returns a fluent builder for a [`Equity`] instance.
+    ///
+    /// Required fields are enforced at compile time; optional fields can be omitted and default
+    /// the same way they do in [`Equity::new_checked`], which the builder calls so the same
+    /// correctness checks run on `build`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any input validation fails (see [`Equity::new_checked`]).
+    #[builder(start_fn = builder, finish_fn = build)]
+    pub fn build_checked(
+        instrument_id: InstrumentId,
+        raw_symbol: Symbol,
+        isin: Option<Ustr>,
+        currency: Currency,
+        price_precision: u8,
+        price_increment: Price,
+        lot_size: Option<Quantity>,
+        max_quantity: Option<Quantity>,
+        min_quantity: Option<Quantity>,
+        max_price: Option<Price>,
+        min_price: Option<Price>,
+        margin_init: Option<Decimal>,
+        margin_maint: Option<Decimal>,
+        maker_fee: Option<Decimal>,
+        taker_fee: Option<Decimal>,
+        tick_scheme: Option<Ustr>,
+        info: Option<Params>,
+        ts_event: UnixNanos,
+        ts_init: UnixNanos,
+    ) -> CorrectnessResult<Self> {
+        Self::new_checked(
+            instrument_id,
+            raw_symbol,
+            isin,
+            currency,
+            price_precision,
+            price_increment,
+            lot_size,
+            max_quantity,
+            min_quantity,
+            max_price,
+            min_price,
+            margin_init,
+            margin_maint,
+            maker_fee,
+            taker_fee,
+            tick_scheme,
+            info,
+            ts_event,
+            ts_init,
+        )
     }
 }
 
@@ -201,6 +282,9 @@ impl Hash for Equity {
 }
 
 impl Instrument for Equity {
+    fn tick_scheme(&self) -> Option<Ustr> {
+        self.tick_scheme
+    }
     fn into_any(self) -> InstrumentAny {
         InstrumentAny::Equity(self)
     }
@@ -319,20 +403,229 @@ impl Instrument for Equity {
     fn ts_init(&self) -> UnixNanos {
         self.ts_init
     }
+
+    fn margin_init(&self) -> Decimal {
+        self.margin_init
+    }
+
+    fn margin_maint(&self) -> Decimal {
+        self.margin_maint
+    }
+
+    fn maker_fee(&self) -> Decimal {
+        self.maker_fee
+    }
+
+    fn taker_fee(&self) -> Decimal {
+        self.taker_fee
+    }
 }
 
-////////////////////////////////////////////////////////////////////////////////
-// Tests
-////////////////////////////////////////////////////////////////////////////////
 #[cfg(test)]
 mod tests {
     use rstest::rstest;
+    use rust_decimal_macros::dec;
+    use ustr::Ustr;
 
-    use crate::instruments::{Equity, stubs::*};
+    use crate::{
+        enums::{AssetClass, InstrumentClass},
+        identifiers::{InstrumentId, Symbol},
+        instruments::{Equity, Instrument, stubs::*},
+        types::{Currency, Price, Quantity},
+    };
 
     #[rstest]
-    fn test_equality(equity_aapl: Equity) {
-        let cloned = equity_aapl;
-        assert_eq!(equity_aapl, cloned);
+    fn test_trait_accessors(equity_aapl: Equity) {
+        assert_eq!(equity_aapl.id(), InstrumentId::from("AAPL.XNAS"));
+        assert_eq!(equity_aapl.raw_symbol(), Symbol::from("AAPL"));
+        assert_eq!(equity_aapl.asset_class(), AssetClass::Equity);
+        assert_eq!(equity_aapl.instrument_class(), InstrumentClass::Spot);
+        assert_eq!(equity_aapl.quote_currency(), Currency::USD());
+        assert_eq!(equity_aapl.settlement_currency(), Currency::USD());
+        assert!(!equity_aapl.is_inverse());
+        assert_eq!(equity_aapl.price_precision(), 2);
+        assert_eq!(equity_aapl.size_precision(), 0);
+        assert_eq!(equity_aapl.price_increment(), Price::from("0.01"));
+        assert_eq!(equity_aapl.size_increment(), Quantity::from("1"));
+        assert_eq!(equity_aapl.multiplier(), Quantity::from("1"));
+        assert_eq!(equity_aapl.base_currency(), None);
+        assert_eq!(equity_aapl.underlying(), None);
+        assert_eq!(equity_aapl.option_kind(), None);
+        assert_eq!(equity_aapl.strike_price(), None);
+        assert_eq!(equity_aapl.activation_ns(), None);
+        assert_eq!(equity_aapl.expiration_ns(), None);
+    }
+
+    #[rstest]
+    fn test_isin(equity_aapl: Equity) {
+        assert_eq!(
+            equity_aapl.isin().map(|u| u.to_string()),
+            Some("US0378331005".to_string()),
+        );
+    }
+
+    #[rstest]
+    fn test_new_checked_price_precision_mismatch() {
+        let result = Equity::new_checked(
+            InstrumentId::from("AAPL.XNAS"),
+            Symbol::from("AAPL"),
+            None,
+            Currency::USD(),
+            3, // mismatch
+            Price::from("0.01"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            0.into(),
+            0.into(),
+        );
+        assert!(result.is_err());
+    }
+
+    #[rstest]
+    fn test_new_checked_zero_price_increment() {
+        let result = Equity::new_checked(
+            InstrumentId::from("AAPL.XNAS"),
+            Symbol::from("AAPL"),
+            None,
+            Currency::USD(),
+            0,
+            Price::from("0"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            0.into(),
+            0.into(),
+        );
+        assert!(result.is_err());
+    }
+
+    #[rstest]
+    fn test_new_checked_non_ascii_isin() {
+        let result = Equity::new_checked(
+            InstrumentId::from("AAPL.XNAS"),
+            Symbol::from("AAPL"),
+            Some(ustr::Ustr::from("US\u{00E9}378331005")),
+            Currency::USD(),
+            2,
+            Price::from("0.01"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            0.into(),
+            0.into(),
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("non-ASCII"));
+    }
+
+    #[rstest]
+    fn test_new_checked_rejects_non_positive_lot_size() {
+        let result = Equity::new_checked(
+            InstrumentId::from("AAPL.XNAS"),
+            Symbol::from("AAPL"),
+            None,
+            Currency::USD(),
+            2,
+            Price::from("0.01"),
+            Some(Quantity::from("0")),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            0.into(),
+            0.into(),
+        );
+        let error = result.unwrap_err();
+        assert!(error.to_string().contains("not positive"), "{error}");
+    }
+
+    #[rstest]
+    fn test_serialization_roundtrip(equity_aapl: Equity) {
+        let json = serde_json::to_string(&equity_aapl).unwrap();
+        let deserialized: Equity = serde_json::from_str(&json).unwrap();
+        assert_eq!(equity_aapl, deserialized);
+    }
+
+    #[rstest]
+    fn test_builder_matches_new_checked() {
+        let positional = Equity::new_checked(
+            InstrumentId::from("AAPL.XNAS"),
+            Symbol::from("AAPL"),
+            Some(Ustr::from("US0378331005")),
+            Currency::USD(),
+            2,
+            Price::from("0.01"),
+            Some(Quantity::from("100")),
+            Some(Quantity::from("10000.0")),
+            Some(Quantity::from("0.001")),
+            Some(Price::from("9999.99")),
+            Some(Price::from("0.01")),
+            Some(dec!(0.01)),
+            Some(dec!(0.02)),
+            Some(dec!(0.0002)),
+            Some(dec!(0.0004)),
+            None,
+            None,
+            1.into(),
+            2.into(),
+        )
+        .unwrap();
+
+        let built = Equity::builder()
+            .instrument_id(InstrumentId::from("AAPL.XNAS"))
+            .raw_symbol(Symbol::from("AAPL"))
+            .isin(Ustr::from("US0378331005"))
+            .currency(Currency::USD())
+            .price_precision(2)
+            .price_increment(Price::from("0.01"))
+            .lot_size(Quantity::from("100"))
+            .max_quantity(Quantity::from("10000.0"))
+            .min_quantity(Quantity::from("0.001"))
+            .max_price(Price::from("9999.99"))
+            .min_price(Price::from("0.01"))
+            .margin_init(dec!(0.01))
+            .margin_maint(dec!(0.02))
+            .maker_fee(dec!(0.0002))
+            .taker_fee(dec!(0.0004))
+            .ts_event(1.into())
+            .ts_init(2.into())
+            .build()
+            .unwrap();
+
+        assert_eq!(
+            serde_json::to_value(&positional).unwrap(),
+            serde_json::to_value(&built).unwrap(),
+        );
     }
 }

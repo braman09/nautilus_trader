@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -18,18 +18,9 @@ use std::{
     rc::Rc,
 };
 
-use nautilus_common::{
-    cache::Cache,
-    clock::Clock,
-    msgbus::{handler::ShareableMessageHandler, register},
-};
-use nautilus_core::{UUID4, WeakCell};
-use ustr::Ustr;
+use nautilus_common::{cache::Cache, clock::Clock};
 
-use crate::order_emulator::{
-    emulator::OrderEmulator,
-    handlers::{OrderEmulatorExecuteHandler, OrderEmulatorOnEventHandler},
-};
+use crate::order_emulator::emulator::OrderEmulator;
 
 #[derive(Debug)]
 pub struct OrderEmulatorAdapter {
@@ -37,50 +28,11 @@ pub struct OrderEmulatorAdapter {
 }
 
 impl OrderEmulatorAdapter {
+    /// Creates a new [`OrderEmulatorAdapter`] instance.
     pub fn new(clock: Rc<RefCell<dyn Clock>>, cache: Rc<RefCell<Cache>>) -> Self {
         let emulator = Rc::new(RefCell::new(OrderEmulator::new(clock, cache)));
 
-        Self::initialize_execute_handler(emulator.clone());
-        Self::initialize_on_event_handler(emulator.clone());
-        // Self::initialize_submit_order_handler(emulator.clone());
-        // Self::initialize_cancel_order_handler(emulator.clone());
-        // Self::initialize_modify_order_handler(emulator.clone());
-
         Self { emulator }
-    }
-
-    // TODO: WIP: Revisit with actor framework
-    // fn initialize_submit_order_handler(emulator: Rc<RefCell<OrderEmulator>>) {
-    //     let handler = SubmitOrderHandlerAny::OrderEmulator(emulator.clone());
-    //     emulator.borrow_mut().set_submit_order_handler(handler);
-    // }
-    //
-    // fn initialize_cancel_order_handler(emulator: Rc<RefCell<OrderEmulator>>) {
-    //     let handler = CancelOrderHandlerAny::OrderEmulator(emulator.clone());
-    //     emulator.borrow_mut().set_cancel_order_handler(handler);
-    // }
-    //
-    // fn initialize_modify_order_handler(emulator: Rc<RefCell<OrderEmulator>>) {
-    //     let handler = ModifyOrderHandlerAny::OrderEmulator(emulator.clone());
-    //     emulator.borrow_mut().set_modify_order_handler(handler);
-    // }
-
-    fn initialize_execute_handler(emulator: Rc<RefCell<OrderEmulator>>) {
-        let handler = ShareableMessageHandler(Rc::new(OrderEmulatorExecuteHandler::new(
-            Ustr::from(UUID4::new().as_str()),
-            WeakCell::from(Rc::downgrade(&emulator)),
-        )));
-
-        register("OrderEmulator.execute".into(), handler);
-    }
-
-    fn initialize_on_event_handler(emulator: Rc<RefCell<OrderEmulator>>) {
-        let handler = ShareableMessageHandler(Rc::new(OrderEmulatorOnEventHandler::new(
-            Ustr::from(UUID4::new().as_str()),
-            WeakCell::from(Rc::downgrade(&emulator)),
-        )));
-
-        register("OrderEmulator.on_event".into(), handler);
     }
 
     #[must_use]
@@ -91,5 +43,26 @@ impl OrderEmulatorAdapter {
     #[must_use]
     pub fn get_emulator_mut(&self) -> RefMut<'_, OrderEmulator> {
         self.emulator.borrow_mut()
+    }
+
+    #[must_use]
+    pub fn emulator(&self) -> Rc<RefCell<OrderEmulator>> {
+        self.emulator.clone()
+    }
+
+    pub fn start(&self) {
+        self.emulator.borrow_mut().start();
+    }
+
+    pub fn stop(&self) {
+        self.emulator.borrow().stop();
+    }
+
+    pub fn reset(&self) {
+        self.emulator.borrow_mut().reset();
+    }
+
+    pub fn dispose(&self) {
+        self.emulator.borrow_mut().dispose();
     }
 }

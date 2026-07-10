@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -29,8 +29,6 @@ use nautilus_core::{
     datetime::floor_to_nearest_microsecond,
     time::get_atomic_clock_realtime,
 };
-#[cfg(feature = "python")]
-use pyo3::{Py, PyAny, Python};
 use tokio::{
     task::JoinHandle,
     time::{Duration, Instant},
@@ -40,8 +38,56 @@ use ustr::Ustr;
 use super::runtime::get_runtime;
 use crate::{
     runner::TimeEventSender,
-    timer::{TimeEvent, TimeEventCallback, TimeEventHandlerV2},
+    timer::{TimeEvent, TimeEventCallback, TimeEventHandler, Timer},
 };
+
+const TIMER_STARTUP_OVERHEAD: Duration = Duration::from_millis(1);
+
+fn should_fire_scheduled_time(next_time_ns: UnixNanos, stop_time_ns: Option<UnixNanos>) -> bool {
+    stop_time_ns.is_none_or(|stop_time_ns| next_time_ns <= stop_time_ns)
+}
+
+fn expires_after_scheduled_time(next_time_ns: UnixNanos, stop_time_ns: Option<UnixNanos>) -> bool {
+    stop_time_ns == Some(next_time_ns)
+}
+
+fn is_stop_boundary(next_time_ns: u64, stop_time_ns: Option<UnixNanos>) -> bool {
+    stop_time_ns == Some(UnixNanos::from(next_time_ns))
+}
+
+fn should_adjust_past_due_time(
+    observed_next: u64,
+    now_ns: UnixNanos,
+    stop_time_ns: Option<UnixNanos>,
+) -> bool {
+    observed_next <= now_ns.as_u64() && !is_stop_boundary(observed_next, stop_time_ns)
+}
+
+fn normalize_start_time_ns(
+    observed_next: u64,
+    now_ns: UnixNanos,
+    stop_time_ns: Option<UnixNanos>,
+) -> UnixNanos {
+    if is_stop_boundary(observed_next, stop_time_ns) {
+        return UnixNanos::from(observed_next);
+    }
+
+    let now_raw = now_ns.as_u64();
+    let start_time_ns = if observed_next <= now_raw {
+        now_raw
+    } else {
+        observed_next
+    };
+
+    UnixNanos::from(floor_to_nearest_microsecond(start_time_ns))
+}
+
+fn timer_start_delay(next_time_ns: UnixNanos, now_ns: UnixNanos) -> Duration {
+    let delay = Duration::from_nanos(next_time_ns.saturating_sub(now_ns.as_u64()));
+
+    // Subtract the estimated startup overhead, saturating to zero for sub-overhead delays.
+    delay.saturating_sub(TIMER_STARTUP_OVERHEAD)
+}
 
 /// A live timer for use with a `LiveClock`.
 ///
@@ -66,6 +112,7 @@ pub struct LiveTimer {
     next_time_ns: Arc<AtomicU64>,
     callback: TimeEventCallback,
     task_handle: Option<JoinHandle<()>>,
+    canceled: bool,
     sender: Option<Arc<dyn TimeEventSender>>,
 }
 
@@ -75,7 +122,6 @@ impl LiveTimer {
     /// # Panics
     ///
     /// Panics if `name` is not a valid string.
-    #[allow(clippy::too_many_arguments)]
     #[must_use]
     pub fn new(
         name: Ustr,
@@ -94,7 +140,7 @@ impl LiveTimer {
             start_time_ns.as_u64() + interval_ns.get()
         };
 
-        log::debug!("Creating timer '{name}'");
+        log::trace!("Creating timer '{name}'");
 
         Self {
             name,
@@ -105,6 +151,7 @@ impl LiveTimer {
             next_time_ns: Arc::new(AtomicU64::new(next_time_ns)),
             callback,
             task_handle: None,
+            canceled: false,
             sender,
         }
     }
@@ -123,9 +170,11 @@ impl LiveTimer {
     /// A timer that has not been started is not expired.
     #[must_use]
     pub fn is_expired(&self) -> bool {
-        self.task_handle
-            .as_ref()
-            .is_some_and(tokio::task::JoinHandle::is_finished)
+        self.canceled
+            || self
+                .task_handle
+                .as_ref()
+                .is_some_and(tokio::task::JoinHandle::is_finished)
     }
 
     /// Starts the timer.
@@ -135,26 +184,20 @@ impl LiveTimer {
     ///
     /// # Panics
     ///
-    /// - Panics if a Rust callback is used. Rust callbacks use `Rc` internally which is not
-    ///   thread-safe. Use Python callbacks for live/async contexts, or use `TestClock` for
-    ///   Rust callbacks in single-threaded backtesting.
-    /// - Panics if Rust-based callback system is active and no time event sender has been set.
+    /// Panics if using a Rust callback (`Rust` or `RustLocal`) without a `TimeEventSender`.
     #[allow(unused_variables)]
     pub fn start(&mut self) {
-        // SAFETY: Rust callbacks use Rc which is not Send/Sync. They cannot be safely
-        // moved into async tasks. This check enforces the invariant documented in
-        // TimeEventCallback's unsafe Send/Sync implementations.
-        // In tests, we allow Rust callbacks since the test environment is controlled.
-        #[cfg(not(test))]
-        assert!(
-            !self.callback.is_rust(),
-            "LiveTimer cannot use Rust callbacks (they are not thread-safe). \
-             Use Python callbacks for live trading, or TestClock for backtesting."
-        );
-
         let event_name = self.name;
         let stop_time_ns = self.stop_time_ns;
         let interval_ns = self.interval_ns.get();
+
+        if self.callback.is_local() {
+            log::debug!(
+                "Timer '{event_name}' uses a RustLocal callback on a live Tokio timer; \
+                 callback registry dispatch is needed to avoid cloning Rc on worker threads"
+            );
+        }
+
         let callback = self.callback.clone();
 
         // Get current time
@@ -165,7 +208,7 @@ impl LiveTimer {
         let now_raw = now_ns.as_u64();
         let mut observed_next = self.next_time_ns.load(atomic::Ordering::SeqCst);
 
-        if observed_next <= now_raw {
+        if should_adjust_past_due_time(observed_next, now_ns, stop_time_ns) {
             loop {
                 match self.next_time_ns.compare_exchange(
                     observed_next,
@@ -186,7 +229,7 @@ impl LiveTimer {
                     }
                     Err(actual) => {
                         observed_next = actual;
-                        if observed_next > now_raw {
+                        if !should_adjust_past_due_time(observed_next, now_ns, stop_time_ns) {
                             break;
                         }
                     }
@@ -195,7 +238,7 @@ impl LiveTimer {
         }
 
         // Floor the next time to the nearest microsecond which is within the timers accuracy
-        let mut next_time_ns = UnixNanos::from(floor_to_nearest_microsecond(observed_next));
+        let mut next_time_ns = normalize_start_time_ns(observed_next, now_ns, stop_time_ns);
         let next_time_atomic = self.next_time_ns.clone();
         next_time_atomic.store(next_time_ns.as_u64(), atomic::Ordering::SeqCst);
 
@@ -205,115 +248,259 @@ impl LiveTimer {
         let handle = rt.spawn(async move {
             let clock = get_atomic_clock_realtime();
 
-            // 1-millisecond delay to account for the overhead of initializing a tokio timer
-            let overhead = Duration::from_millis(1);
-            let delay_ns = next_time_ns.saturating_sub(now_ns.as_u64());
-            let mut delay = Duration::from_nanos(delay_ns);
-
-            // Subtract the estimated startup overhead; saturating to zero for sub-ms delays
-            if delay > overhead {
-                delay -= overhead;
-            } else {
-                delay = Duration::from_nanos(0);
-            }
-
-            let start = Instant::now() + delay;
+            let start = Instant::now() + timer_start_delay(next_time_ns, now_ns);
 
             let mut timer = tokio::time::interval_at(start, Duration::from_nanos(interval_ns));
 
             loop {
-                // SAFETY: `timer.tick` is cancellation safe, if the cancel branch completes
+                // Never fire an event scheduled past the stop time. The event's
+                // `ts_event` is the scheduled `next_time_ns`, so the bound is
+                // enforced on the scheduled time (matching `TestTimer`), not on
+                // the wall-clock read used only for `ts_init`.
+                if !should_fire_scheduled_time(next_time_ns, stop_time_ns) {
+                    break; // Timer expired before this event
+                }
+
+                // `timer.tick` is cancellation safe, if the cancel branch completes
                 // first then no tick has been consumed (no event was ready).
                 timer.tick().await;
                 let now_ns = clock.get_time_ns();
 
                 let event = TimeEvent::new(event_name, UUID4::new(), next_time_ns, now_ns);
 
-                match callback {
+                if let Some(sender) = sender.as_ref() {
+                    // TODO: `RustLocal` still clones an `Rc` on the timer worker.
+                    // Move callbacks into an event-loop registry and send an id instead.
+                    let handler = TimeEventHandler::new(event, callback.clone());
+                    sender.send(handler);
+                } else {
                     #[cfg(feature = "python")]
-                    TimeEventCallback::Python(ref callback) => {
-                        call_python_with_time_event(event, callback);
+                    if matches!(&callback, TimeEventCallback::Python(_)) {
+                        callback.call(event);
+                    } else {
+                        panic!("timer event sender was unset for Rust callback system");
                     }
-                    TimeEventCallback::Rust(_) => {
-                        debug_assert!(
-                            sender.is_some(),
-                            "LiveTimer with Rust callback requires TimeEventSender"
-                        );
-                        let sender = sender
-                            .as_ref()
-                            .expect("timer event sender was unset for Rust callback system");
-                        let handler = TimeEventHandlerV2::new(event, callback.clone());
-                        sender.send(handler);
+
+                    #[cfg(not(feature = "python"))]
+                    {
+                        panic!("timer event sender was unset for Rust callback system");
                     }
                 }
+
+                // The event scheduled exactly at the stop time fires (inclusive
+                // boundary), then the timer expires.
+                let expires_after_fire = expires_after_scheduled_time(next_time_ns, stop_time_ns);
 
                 // Prepare next time interval
                 next_time_ns += interval_ns;
                 next_time_atomic.store(next_time_ns.as_u64(), atomic::Ordering::SeqCst);
 
-                // Check if expired
-                if let Some(stop_time_ns) = stop_time_ns
-                    && std::cmp::max(next_time_ns, now_ns) >= stop_time_ns
-                {
-                    break; // Timer expired
+                if expires_after_fire {
+                    break; // Timer expired at the stop boundary
                 }
             }
         });
 
         self.task_handle = Some(handle);
+        self.canceled = false;
     }
 
     /// Cancels the timer.
     ///
     /// The timer will not generate a final event.
     pub fn cancel(&mut self) {
-        log::debug!("Cancel timer '{}'", self.name);
-        if let Some(ref handle) = self.task_handle {
+        log::trace!("Cancel timer '{}'", self.name);
+
+        if let Some(handle) = self.task_handle.take() {
+            handle.abort();
+        }
+        self.canceled = true;
+    }
+}
+
+impl Timer for LiveTimer {
+    fn is_expired(&self) -> bool {
+        Self::is_expired(self)
+    }
+
+    fn cancel(&mut self) {
+        Self::cancel(self);
+    }
+}
+
+impl Drop for LiveTimer {
+    fn drop(&mut self) {
+        if let Some(handle) = self.task_handle.take() {
             handle.abort();
         }
     }
 }
 
-#[cfg(feature = "python")]
-fn call_python_with_time_event(event: TimeEvent, callback: &Py<PyAny>) {
-    use nautilus_core::python::IntoPyObjectNautilusExt;
-    use pyo3::types::PyCapsule;
-
-    Python::attach(|py| {
-        // Create a new PyCapsule that owns `event` and registers a destructor so
-        // the contained `TimeEvent` is properly freed once the capsule is
-        // garbage-collected by Python. Without the destructor the memory would
-        // leak because the capsule would not know how to drop the Rust value.
-
-        // Register a destructor that simply drops the `TimeEvent` once the
-        // capsule is freed on the Python side.
-        let capsule: Py<PyAny> = PyCapsule::new_with_destructor(py, event, None, |_, _| {})
-            .expect("Error creating `PyCapsule`")
-            .into_py_any_unwrap(py);
-
-        match callback.call1(py, (capsule,)) {
-            Ok(_) => {}
-            Err(e) => tracing::error!("Error on callback: {e:?}"),
-        }
-    });
-}
-
-////////////////////////////////////////////////////////////////////////////////
-// Tests
-////////////////////////////////////////////////////////////////////////////////
 #[cfg(test)]
 mod tests {
-    use std::{num::NonZeroU64, sync::Arc};
+    use std::num::NonZeroU64;
+    #[cfg(feature = "python")]
+    use std::{
+        sync::{Arc, Mutex, mpsc},
+        time::Duration as StdDuration,
+    };
 
-    use nautilus_core::{UnixNanos, time::get_atomic_clock_realtime};
+    use nautilus_core::UnixNanos;
+    #[cfg(feature = "python")]
+    use nautilus_core::time::get_atomic_clock_realtime;
+    #[cfg(feature = "python")]
+    use pyo3::{
+        Python,
+        types::{PyAnyMethods, PyList, PyListMethods},
+    };
     use rstest::*;
     use ustr::Ustr;
 
     use super::LiveTimer;
-    use crate::{
-        runner::TimeEventSender,
-        timer::{TimeEventCallback, TimeEventHandlerV2},
-    };
+    #[cfg(feature = "python")]
+    use crate::runner::TimeEventSender;
+    use crate::timer::TimeEventCallback;
+    #[cfg(feature = "python")]
+    use crate::timer::TimeEventHandler;
+
+    #[rstest]
+    fn test_live_timer_stop_bound_allows_unbounded_scheduled_time() {
+        assert!(super::should_fire_scheduled_time(
+            UnixNanos::from(100),
+            None
+        ));
+        assert!(!super::expires_after_scheduled_time(
+            UnixNanos::from(100),
+            None
+        ));
+    }
+
+    #[rstest]
+    fn test_live_timer_stop_bound_skips_time_past_stop() {
+        let next_time_ns = UnixNanos::from(110);
+        let stop_time_ns = Some(UnixNanos::from(100));
+
+        assert!(!super::should_fire_scheduled_time(
+            next_time_ns,
+            stop_time_ns
+        ));
+        assert!(!super::expires_after_scheduled_time(
+            next_time_ns,
+            stop_time_ns
+        ));
+    }
+
+    #[rstest]
+    fn test_live_timer_stop_bound_allows_time_before_stop_without_expiring() {
+        let next_time_ns = UnixNanos::from(90);
+        let stop_time_ns = Some(UnixNanos::from(100));
+
+        assert!(super::should_fire_scheduled_time(
+            next_time_ns,
+            stop_time_ns
+        ));
+        assert!(!super::expires_after_scheduled_time(
+            next_time_ns,
+            stop_time_ns
+        ));
+    }
+
+    #[rstest]
+    fn test_live_timer_stop_bound_fires_time_at_stop_then_expires() {
+        let next_time_ns = UnixNanos::from(100);
+        let stop_time_ns = Some(UnixNanos::from(100));
+
+        assert!(super::should_fire_scheduled_time(
+            next_time_ns,
+            stop_time_ns
+        ));
+        assert!(super::expires_after_scheduled_time(
+            next_time_ns,
+            stop_time_ns
+        ));
+    }
+
+    #[rstest]
+    fn test_live_timer_past_due_stop_boundary_is_not_adjusted_forward() {
+        let observed_next = 100;
+        let now = UnixNanos::from(110);
+        let stop_time_ns = Some(UnixNanos::from(observed_next));
+
+        assert!(!super::should_adjust_past_due_time(
+            observed_next,
+            now,
+            stop_time_ns
+        ));
+    }
+
+    #[rstest]
+    fn test_live_timer_past_due_time_before_stop_is_adjusted_forward() {
+        let observed_next = 90;
+        let now = UnixNanos::from(110);
+        let stop_time_ns = Some(UnixNanos::from(120));
+
+        assert!(super::should_adjust_past_due_time(
+            observed_next,
+            now,
+            stop_time_ns
+        ));
+    }
+
+    #[rstest]
+    fn test_live_timer_start_time_normalization_adjusts_past_due_time() {
+        let observed_next = 1_234_567;
+        let now = UnixNanos::from(2_345_678);
+
+        assert_eq!(
+            super::normalize_start_time_ns(observed_next, now, None),
+            UnixNanos::from(2_345_000)
+        );
+    }
+
+    #[rstest]
+    fn test_live_timer_start_time_normalization_keeps_future_time() {
+        let observed_next = 3_456_789;
+        let now = UnixNanos::from(2_345_678);
+
+        assert_eq!(
+            super::normalize_start_time_ns(observed_next, now, None),
+            UnixNanos::from(3_456_000)
+        );
+    }
+
+    #[rstest]
+    fn test_live_timer_start_time_normalization_keeps_stop_boundary_exact() {
+        let observed_next = 1_234_567;
+        let now = UnixNanos::from(2_345_678);
+        let stop_time_ns = Some(UnixNanos::from(observed_next));
+
+        assert_eq!(
+            super::normalize_start_time_ns(observed_next, now, stop_time_ns),
+            UnixNanos::from(observed_next)
+        );
+    }
+
+    #[rstest]
+    fn test_live_timer_start_delay_subtracts_startup_overhead() {
+        let next_time_ns = UnixNanos::from(12_000_000);
+        let now = UnixNanos::from(10_000_000);
+
+        assert_eq!(
+            super::timer_start_delay(next_time_ns, now),
+            tokio::time::Duration::from_millis(1)
+        );
+    }
+
+    #[rstest]
+    fn test_live_timer_start_delay_saturates_below_startup_overhead() {
+        let next_time_ns = UnixNanos::from(10_500_000);
+        let now = UnixNanos::from(10_000_000);
+
+        assert_eq!(
+            super::timer_start_delay(next_time_ns, now),
+            tokio::time::Duration::from_nanos(0)
+        );
+    }
 
     #[rstest]
     fn test_live_timer_fire_immediately_field() {
@@ -353,32 +540,56 @@ mod tests {
         assert_eq!(timer.next_time_ns(), UnixNanos::from(1100));
     }
 
+    #[cfg(feature = "python")]
     #[rstest]
-    fn test_live_timer_adjusts_past_due_start_time() {
+    fn test_live_timer_with_sender_defers_python_callback_to_handler() {
         #[derive(Debug)]
-        struct NoopSender;
-
-        impl TimeEventSender for NoopSender {
-            fn send(&self, _handler: TimeEventHandlerV2) {}
+        struct ChannelSender {
+            tx: Mutex<mpsc::Sender<TimeEventHandler>>,
         }
 
-        let sender = Arc::new(NoopSender);
-        let mut timer = LiveTimer::new(
-            Ustr::from("PAST_TIMER"),
-            NonZeroU64::new(1).unwrap(),
-            UnixNanos::from(0),
-            None,
-            TimeEventCallback::from(|_| {}),
-            true,
-            Some(sender),
-        );
+        impl TimeEventSender for ChannelSender {
+            fn send(&self, handler: TimeEventHandler) {
+                self.tx
+                    .lock()
+                    .expect("sender mutex should lock")
+                    .send(handler)
+                    .expect("handler should send");
+            }
+        }
 
-        let before = get_atomic_clock_realtime().get_time_ns();
+        Python::initialize();
 
-        timer.start();
+        Python::attach(|py| {
+            let py_list = PyList::empty(py);
+            let py_append = py_list
+                .getattr("append")
+                .expect("append should exist")
+                .unbind();
+            let callback = TimeEventCallback::from(py_append);
+            let (tx, rx) = mpsc::channel();
+            let sender = Arc::new(ChannelSender { tx: Mutex::new(tx) });
+            let now = get_atomic_clock_realtime().get_time_ns();
 
-        assert!(timer.next_time_ns() >= before);
+            let mut timer = LiveTimer::new(
+                Ustr::from("PY_TIMER"),
+                NonZeroU64::new(1_000_000).unwrap(),
+                now,
+                None,
+                callback,
+                true,
+                Some(sender),
+            );
 
-        timer.cancel();
+            timer.start();
+            let handler = rx
+                .recv_timeout(StdDuration::from_secs(1))
+                .expect("timer handler should arrive without acquiring the GIL on the worker");
+            timer.cancel();
+
+            assert_eq!(py_list.len(), 0);
+            handler.run();
+            assert_eq!(py_list.len(), 1);
+        });
     }
 }

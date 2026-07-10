@@ -1,5 +1,5 @@
 # -------------------------------------------------------------------------------------------------
-#  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+#  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 #  https://nautechsystems.io
 #
 #  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -44,6 +44,7 @@ def test_to_dict():
         "price_precision": 3,
         "size_precision": 2,
         "price_increment": "0.001",
+        "tick_scheme": None,
         "size_increment": "0.01",
         "margin_init": "0",
         "margin_maint": "0",

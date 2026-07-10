@@ -1,5 +1,5 @@
 # -------------------------------------------------------------------------------------------------
-#  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+#  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 #  https://nautechsystems.io
 #
 #  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -13,15 +13,28 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 
+from decimal import Decimal
+
 import pytest
 
 from nautilus_trader.backtest.models import FixedFeeModel
 from nautilus_trader.backtest.models import MakerTakerFeeModel
+from nautilus_trader.backtest.models import PerContractFeeModel
+from nautilus_trader.model.currencies import BTC
 from nautilus_trader.model.currencies import USD
+from nautilus_trader.model.enums import AssetClass
+from nautilus_trader.model.enums import OptionKind
 from nautilus_trader.model.enums import OrderSide
+from nautilus_trader.model.identifiers import InstrumentId
+from nautilus_trader.model.identifiers import Symbol
+from nautilus_trader.model.identifiers import Venue
+from nautilus_trader.model.identifiers import new_generic_spread_id
+from nautilus_trader.model.instruments import CryptoOption
 from nautilus_trader.model.instruments import Instrument
+from nautilus_trader.model.instruments import OptionSpread
 from nautilus_trader.model.objects import Money
 from nautilus_trader.model.objects import Price
+from nautilus_trader.model.objects import Quantity
 from nautilus_trader.test_kit.providers import TestInstrumentProvider
 from nautilus_trader.test_kit.stubs.events import TestEventStubs
 from nautilus_trader.test_kit.stubs.execution import TestExecStubs
@@ -101,6 +114,49 @@ def test_fixed_commission_multiple_fills(
     assert commission_next_fill == expected_next_fill
 
 
+def test_per_contract_commission_option_spread_charges_each_contract():
+    # Arrange
+    spread_id = new_generic_spread_id(
+        [
+            (InstrumentId.from_str("SPY C400.SMART"), 1),
+            (InstrumentId.from_str("SPY C410.SMART"), -2),
+        ],
+    )
+    instrument = OptionSpread(
+        instrument_id=spread_id,
+        raw_symbol=spread_id.symbol,
+        asset_class=AssetClass.EQUITY,
+        currency=USD,
+        price_precision=2,
+        price_increment=Price.from_str("0.01"),
+        multiplier=Quantity.from_int(100),
+        lot_size=Quantity.from_int(1),
+        underlying="SPY",
+        strategy_type="SPREAD",
+        activation_ns=0,
+        expiration_ns=0,
+        ts_event=0,
+        ts_init=0,
+    )
+    fee_model = PerContractFeeModel(Money(Decimal("1.25"), USD))
+    order = TestExecStubs.make_accepted_order(
+        instrument=instrument,
+        order_side=OrderSide.BUY,
+        quantity=Quantity.from_int(2),
+    )
+
+    # Act
+    commission = fee_model.get_commission(
+        order,
+        Quantity.from_int(2),
+        Price.from_str("1.00"),
+        instrument,
+    )
+
+    # Assert
+    assert commission == Money(Decimal("7.50"), USD)
+
+
 def test_instrument_percent_commission_maker(instrument):
     # Arrange
     fee_model = MakerTakerFeeModel()
@@ -143,3 +199,79 @@ def test_instrument_percent_commission_taker(instrument):
     # Assert
     assert isinstance(commission, Money)
     assert commission.as_decimal() == expected
+
+
+def test_maker_taker_fee_model_inverse_perpetual():
+    # Arrange
+    instrument = TestInstrumentProvider.xbtusd_bitmex()
+    assert instrument.is_inverse
+
+    fee_model = MakerTakerFeeModel()
+    order = TestExecStubs.make_filled_order(
+        instrument=instrument,
+        order_side=OrderSide.SELL,
+    )
+
+    # Act
+    commission = fee_model.get_commission(
+        order,
+        order.quantity,
+        order.price,
+        instrument,
+    )
+
+    # Assert
+    assert isinstance(commission, Money)
+    assert commission.currency == instrument.get_base_currency()
+
+
+def test_maker_taker_fee_model_inverse_crypto_option():
+    # Arrange
+    instrument = CryptoOption(
+        instrument_id=InstrumentId(
+            symbol=Symbol("BTC-20FEB26-78000-P"),
+            venue=Venue("DERIBIT"),
+        ),
+        raw_symbol=Symbol("BTC-20FEB26-78000-P"),
+        underlying=BTC,
+        quote_currency=USD,
+        settlement_currency=BTC,
+        is_inverse=True,
+        option_kind=OptionKind.PUT,
+        strike_price=Price.from_str("78000.00"),
+        activation_ns=1671696002000000000,
+        expiration_ns=1673596800000000000,
+        price_precision=4,
+        size_precision=1,
+        price_increment=Price.from_str("0.0001"),
+        size_increment=Quantity.from_str("0.1"),
+        maker_fee=Decimal("0.0003"),
+        taker_fee=Decimal("0.0003"),
+        margin_init=Decimal(0),
+        margin_maint=Decimal(0),
+        max_quantity=Quantity.from_str("9000"),
+        min_quantity=Quantity.from_str("0.1"),
+        min_notional=None,
+        ts_event=0,
+        ts_init=0,
+    )
+    assert instrument.is_inverse
+
+    fee_model = MakerTakerFeeModel()
+    order = TestExecStubs.make_filled_order(
+        instrument=instrument,
+        order_side=OrderSide.SELL,
+    )
+
+    # Act
+    commission = fee_model.get_commission(
+        order,
+        order.quantity,
+        order.price,
+        instrument,
+    )
+
+    # Assert
+    assert isinstance(commission, Money)
+    assert commission.currency == instrument.get_base_currency()
+    assert commission.currency == BTC

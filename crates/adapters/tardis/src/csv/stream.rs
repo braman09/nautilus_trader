@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -15,32 +15,36 @@
 
 use std::{io::Read, path::Path};
 
+use ahash::AHashMap;
 use csv::{Reader, StringRecord};
 use nautilus_core::UnixNanos;
 use nautilus_model::{
-    data::{DEPTH10_LEN, NULL_ORDER, OrderBookDelta, OrderBookDepth10, QuoteTick, TradeTick},
+    data::{DEPTH10_LEN, Data, NULL_ORDER, OrderBookDelta, OrderBookDepth10, QuoteTick, TradeTick},
     enums::{OrderSide, RecordFlag},
     identifiers::InstrumentId,
     types::Quantity,
 };
 #[cfg(feature = "python")]
 use nautilus_model::{
-    data::{Data, OrderBookDeltas, OrderBookDeltas_API},
+    data::{OrderBookDeltas, OrderBookDeltas_API},
     python::data::data_to_pycapsule,
 };
 #[cfg(feature = "python")]
 use pyo3::{Py, PyAny, Python};
 
 use crate::{
+    common::parse::{parse_instrument_id, parse_timestamp},
     csv::{
-        create_book_order, create_csv_reader, infer_precision, parse_delta_record,
-        parse_derivative_ticker_record, parse_quote_record, parse_trade_record,
+        create_book_order, create_csv_reader, infer_precision,
+        load::OptionsChainPrecision,
+        matches_underlying_filter, normalize_underlying_filters, parse_delta_record,
+        parse_derivative_ticker_record, parse_options_chain_record,
+        parse_options_chain_record_as_quote, parse_quote_record, parse_trade_record,
         record::{
-            TardisBookUpdateRecord, TardisOrderBookSnapshot5Record,
+            TardisBookUpdateRecord, TardisOptionsChainRecord, TardisOrderBookSnapshot5Record,
             TardisOrderBookSnapshot25Record, TardisQuoteRecord, TardisTradeRecord,
         },
     },
-    parse::{parse_instrument_id, parse_timestamp},
 };
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -88,7 +92,7 @@ impl DeltaStreamIterator {
                 let mut reader = create_csv_reader(&filepath)?;
                 let mut record = StringRecord::new();
                 let (detected_price, detected_size) =
-                    Self::detect_precision_from_sample(&mut reader, &mut record, 10_000)?;
+                    Self::detect_precision_from_sample(&mut reader, &mut record, 10_000);
                 (
                     price_precision.unwrap_or(detected_price),
                     size_precision.unwrap_or(detected_size),
@@ -117,7 +121,7 @@ impl DeltaStreamIterator {
         reader: &mut Reader<Box<dyn std::io::Read>>,
         record: &mut StringRecord,
         sample_size: usize,
-    ) -> anyhow::Result<(u8, u8)> {
+    ) -> (u8, u8) {
         let mut max_price_precision = 0u8;
         let mut max_size_precision = 0u8;
         let mut records_scanned = 0;
@@ -136,7 +140,7 @@ impl DeltaStreamIterator {
             }
         }
 
-        Ok((max_price_precision, max_size_precision))
+        (max_price_precision, max_size_precision)
     }
 }
 
@@ -178,8 +182,9 @@ impl Iterator for DeltaStreamIterator {
                         if self.buffer.is_empty() {
                             return None;
                         }
+
                         if let Some(last_delta) = self.buffer.last_mut() {
-                            last_delta.flags = RecordFlag::F_LAST.value();
+                            last_delta.flags = RecordFlag::F_LAST as u8;
                         }
                         return Some(Ok(self.buffer.clone()));
                     }
@@ -187,18 +192,24 @@ impl Iterator for DeltaStreamIterator {
                 }
             };
 
-            // Insert CLEAR on snapshot boundary to reset order book state
-            if data.is_snapshot && !self.last_is_snapshot {
+            let ts_event = parse_timestamp(data.timestamp);
+            let ts_init = parse_timestamp(data.local_timestamp);
+
+            // Insert CLEAR on snapshot boundary to reset order book state.
+            // Some venues emit every book event as a full snapshot, so a new
+            // snapshot timestamp must also reset the previous snapshot state.
+            let starts_new_snapshot =
+                data.is_snapshot && (!self.last_is_snapshot || self.last_ts_event != ts_event);
+
+            if starts_new_snapshot {
                 let clear_instrument_id = self
                     .instrument_id
                     .unwrap_or_else(|| parse_instrument_id(&data.exchange, data.symbol));
-                let ts_event = parse_timestamp(data.timestamp);
-                let ts_init = parse_timestamp(data.local_timestamp);
 
                 if self.last_ts_event != ts_event
                     && let Some(last_delta) = self.buffer.last_mut()
                 {
-                    last_delta.flags = RecordFlag::F_LAST.value();
+                    last_delta.flags = RecordFlag::F_LAST as u8;
                 }
                 self.last_ts_event = ts_event;
 
@@ -225,7 +236,7 @@ impl Iterator for DeltaStreamIterator {
             ) {
                 Ok(d) => d,
                 Err(e) => {
-                    tracing::warn!("Skipping invalid delta record: {e}");
+                    log::warn!("Skipping invalid delta record: {e}");
                     continue;
                 }
             };
@@ -233,7 +244,7 @@ impl Iterator for DeltaStreamIterator {
             if self.last_ts_event != delta.ts_event
                 && let Some(last_delta) = self.buffer.last_mut()
             {
-                last_delta.flags = RecordFlag::F_LAST.value();
+                last_delta.flags = RecordFlag::F_LAST as u8;
             }
 
             self.last_ts_event = delta.ts_event;
@@ -251,7 +262,7 @@ impl Iterator for DeltaStreamIterator {
                 && self.deltas_emitted >= limit
                 && let Some(last_delta) = self.buffer.last_mut()
             {
-                last_delta.flags = RecordFlag::F_LAST.value();
+                last_delta.flags = RecordFlag::F_LAST as u8;
             }
             Some(Ok(self.buffer.clone()))
         }
@@ -307,8 +318,9 @@ struct BatchedDeltasStreamIterator {
     price_precision: u8,
     size_precision: u8,
     last_ts_event: UnixNanos,
+    last_is_snapshot: bool,
     limit: Option<usize>,
-    records_processed: usize,
+    deltas_emitted: usize,
 }
 
 #[cfg(feature = "python")]
@@ -345,7 +357,7 @@ impl BatchedDeltasStreamIterator {
             } else {
                 // One or both precisions missing, detect from sample including first record
                 let (detected_price, detected_size) =
-                    Self::detect_precision_from_sample(&mut reader, &mut record, 10_000)?;
+                    Self::detect_precision_from_sample(&mut reader, &mut record, 10_000);
                 (
                     price_precision.unwrap_or(detected_price),
                     size_precision.unwrap_or(detected_size),
@@ -365,8 +377,9 @@ impl BatchedDeltasStreamIterator {
             price_precision: final_price_precision,
             size_precision: final_size_precision,
             last_ts_event: UnixNanos::default(),
+            last_is_snapshot: false,
             limit,
-            records_processed: 0,
+            deltas_emitted: 0,
         })
     }
 
@@ -374,7 +387,7 @@ impl BatchedDeltasStreamIterator {
         reader: &mut Reader<Box<dyn std::io::Read>>,
         record: &mut StringRecord,
         sample_size: usize,
-    ) -> anyhow::Result<(u8, u8)> {
+    ) -> (u8, u8) {
         let mut max_price_precision = 0u8;
         let mut max_size_precision = 0u8;
         let mut records_scanned = 0;
@@ -393,61 +406,83 @@ impl BatchedDeltasStreamIterator {
             }
         }
 
-        Ok((max_price_precision, max_size_precision))
+        (max_price_precision, max_size_precision)
     }
-}
 
-#[cfg(feature = "python")]
-impl Iterator for BatchedDeltasStreamIterator {
-    type Item = anyhow::Result<Vec<Py<PyAny>>>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if let Some(limit) = self.limit
-            && self.records_processed >= limit
-        {
-            return None;
-        }
-
-        self.buffer.clear();
+    fn fill_pending_batches(&mut self) -> Option<anyhow::Result<()>> {
+        self.pending_batches.clear();
         let mut batches_created = 0;
 
         while batches_created < self.chunk_size {
+            if let Some(limit) = self.limit
+                && self.deltas_emitted >= limit
+            {
+                break;
+            }
+
             match self.reader.read_record(&mut self.record) {
                 Ok(true) => {
-                    let delta = match self.record.deserialize::<TardisBookUpdateRecord>(None) {
-                        Ok(data) => match parse_delta_record(
-                            &data,
-                            self.price_precision,
-                            self.size_precision,
-                            Some(self.instrument_id),
-                        ) {
-                            Ok(d) => d,
-                            Err(e) => {
-                                tracing::warn!("Skipping invalid delta record: {e}");
-                                continue;
-                            }
-                        },
+                    let data = match self.record.deserialize::<TardisBookUpdateRecord>(None) {
+                        Ok(data) => data,
                         Err(e) => {
                             return Some(Err(anyhow::anyhow!("Failed to deserialize record: {e}")));
                         }
                     };
 
-                    if self.last_ts_event != delta.ts_event && !self.current_batch.is_empty() {
+                    let ts_event = parse_timestamp(data.timestamp);
+                    let ts_init = parse_timestamp(data.local_timestamp);
+
+                    // Parse before any state changes so invalid records
+                    // don't corrupt batch boundaries or snapshot tracking
+                    let delta = match parse_delta_record(
+                        &data,
+                        self.price_precision,
+                        self.size_precision,
+                        Some(self.instrument_id),
+                    ) {
+                        Ok(d) => d,
+                        Err(e) => {
+                            log::warn!("Skipping invalid delta record: {e}");
+                            continue;
+                        }
+                    };
+
+                    let starts_new_timestamp = self.last_ts_event != ts_event;
+
+                    if starts_new_timestamp && !self.current_batch.is_empty() {
                         // Set F_LAST on the last delta of the completed batch
                         if let Some(last_delta) = self.current_batch.last_mut() {
-                            last_delta.flags = RecordFlag::F_LAST.value();
+                            last_delta.flags = RecordFlag::F_LAST as u8;
                         }
                         self.pending_batches
                             .push(std::mem::take(&mut self.current_batch));
                         batches_created += 1;
                     }
 
-                    self.last_ts_event = delta.ts_event;
+                    // Insert CLEAR on snapshot boundary to reset order book state.
+                    // Some venues emit every book event as a full snapshot, so a new
+                    // snapshot timestamp must also reset the previous snapshot state.
+                    if data.is_snapshot && (!self.last_is_snapshot || starts_new_timestamp) {
+                        let clear_delta =
+                            OrderBookDelta::clear(self.instrument_id, 0, ts_event, ts_init);
+                        self.current_batch.push(clear_delta);
+                        self.deltas_emitted += 1;
+
+                        if let Some(limit) = self.limit
+                            && self.deltas_emitted >= limit
+                        {
+                            self.last_is_snapshot = data.is_snapshot;
+                            break;
+                        }
+                    }
+                    self.last_ts_event = ts_event;
+                    self.last_is_snapshot = data.is_snapshot;
+
                     self.current_batch.push(delta);
-                    self.records_processed += 1;
+                    self.deltas_emitted += 1;
 
                     if let Some(limit) = self.limit
-                        && self.records_processed >= limit
+                        && self.deltas_emitted >= limit
                     {
                         break;
                     }
@@ -463,10 +498,35 @@ impl Iterator for BatchedDeltasStreamIterator {
         if !self.current_batch.is_empty() && batches_created < self.chunk_size {
             // Ensure the last delta of the last batch has F_LAST set
             if let Some(last_delta) = self.current_batch.last_mut() {
-                last_delta.flags = RecordFlag::F_LAST.value();
+                last_delta.flags = RecordFlag::F_LAST as u8;
             }
             self.pending_batches
                 .push(std::mem::take(&mut self.current_batch));
+        }
+
+        if self.pending_batches.is_empty() {
+            None
+        } else {
+            Some(Ok(()))
+        }
+    }
+}
+
+#[cfg(feature = "python")]
+impl Iterator for BatchedDeltasStreamIterator {
+    type Item = anyhow::Result<Vec<Py<PyAny>>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(limit) = self.limit
+            && self.deltas_emitted >= limit
+        {
+            return None;
+        }
+
+        self.buffer.clear();
+
+        if let Some(Err(e)) = self.fill_pending_batches() {
+            return Some(Err(e));
         }
 
         if self.pending_batches.is_empty() {
@@ -534,7 +594,7 @@ impl QuoteStreamIterator {
     /// # Errors
     ///
     /// Returns an error if the file cannot be opened or read.
-    pub fn new<P: AsRef<Path>>(
+    pub(crate) fn new<P: AsRef<Path>>(
         filepath: P,
         chunk_size: usize,
         price_precision: Option<u8>,
@@ -551,7 +611,7 @@ impl QuoteStreamIterator {
                 let mut reader = create_csv_reader(&filepath)?;
                 let mut record = StringRecord::new();
                 let (detected_price, detected_size) =
-                    Self::detect_precision_from_sample(&mut reader, &mut record, 10_000)?;
+                    Self::detect_precision_from_sample(&mut reader, &mut record, 10_000);
                 (
                     price_precision.unwrap_or(detected_price),
                     size_precision.unwrap_or(detected_size),
@@ -577,7 +637,7 @@ impl QuoteStreamIterator {
         reader: &mut Reader<Box<dyn std::io::Read>>,
         record: &mut StringRecord,
         sample_size: usize,
-    ) -> anyhow::Result<(u8, u8)> {
+    ) -> (u8, u8) {
         let mut max_price_precision = 2u8;
         let mut max_size_precision = 0u8;
         let mut records_scanned = 0;
@@ -590,14 +650,17 @@ impl QuoteStreamIterator {
                             max_price_precision =
                                 max_price_precision.max(infer_precision(bid_price_val));
                         }
+
                         if let Some(ask_price_val) = data.ask_price {
                             max_price_precision =
                                 max_price_precision.max(infer_precision(ask_price_val));
                         }
+
                         if let Some(bid_amount_val) = data.bid_amount {
                             max_size_precision =
                                 max_size_precision.max(infer_precision(bid_amount_val));
                         }
+
                         if let Some(ask_amount_val) = data.ask_amount {
                             max_size_precision =
                                 max_size_precision.max(infer_precision(ask_amount_val));
@@ -610,7 +673,7 @@ impl QuoteStreamIterator {
             }
         }
 
-        Ok((max_price_precision, max_size_precision))
+        (max_price_precision, max_size_precision)
     }
 }
 
@@ -702,6 +765,218 @@ pub fn stream_quotes<P: AsRef<Path>>(
     )
 }
 
+struct OptionsChainStreamIterator {
+    reader: Reader<Box<dyn Read>>,
+    record: StringRecord,
+    buffer: Vec<Data>,
+    chunk_size: usize,
+    underlyings: Option<Vec<String>>,
+    price_precision: Option<u8>,
+    size_precision: Option<u8>,
+    precision_by_instrument: AHashMap<InstrumentId, OptionsChainPrecision>,
+    limit: Option<usize>,
+    records_processed: usize,
+}
+
+impl OptionsChainStreamIterator {
+    pub(crate) fn new<P: AsRef<Path>>(
+        filepath: P,
+        chunk_size: usize,
+        underlyings: Option<Vec<String>>,
+        price_precision: Option<u8>,
+        size_precision: Option<u8>,
+        limit: Option<usize>,
+    ) -> anyhow::Result<Self> {
+        let underlyings = normalize_underlying_filters(underlyings);
+        let mut precision_by_instrument = AHashMap::new();
+
+        if price_precision.is_none() || size_precision.is_none() {
+            let mut reader = create_csv_reader(&filepath)?;
+            let mut record = StringRecord::new();
+            Self::detect_precision_from_sample(
+                &mut reader,
+                &mut record,
+                underlyings.as_deref(),
+                price_precision,
+                size_precision,
+                &mut precision_by_instrument,
+                10_000,
+            );
+        }
+
+        let reader = create_csv_reader(filepath)?;
+
+        Ok(Self {
+            reader,
+            record: StringRecord::new(),
+            buffer: Vec::with_capacity(chunk_size * 2),
+            chunk_size,
+            underlyings,
+            price_precision,
+            size_precision,
+            precision_by_instrument,
+            limit,
+            records_processed: 0,
+        })
+    }
+
+    fn detect_precision_from_sample(
+        reader: &mut Reader<Box<dyn Read>>,
+        record: &mut StringRecord,
+        underlyings: Option<&[String]>,
+        price_precision: Option<u8>,
+        size_precision: Option<u8>,
+        precision_by_instrument: &mut AHashMap<InstrumentId, OptionsChainPrecision>,
+        sample_size: usize,
+    ) {
+        let mut records_scanned = 0;
+
+        while records_scanned < sample_size {
+            match reader.read_record(record) {
+                Ok(true) => {
+                    if let Some(underlyings) = underlyings {
+                        let Some(symbol) = record.get(1) else {
+                            records_scanned += 1;
+                            continue;
+                        };
+                        let symbol = symbol.to_uppercase();
+                        if !matches_underlying_filter(&symbol, Some(underlyings)) {
+                            records_scanned += 1;
+                            continue;
+                        }
+                    }
+
+                    if let Ok(data) = record.deserialize::<TardisOptionsChainRecord>(None) {
+                        let instrument_id = parse_instrument_id(&data.exchange, data.symbol);
+                        precision_by_instrument
+                            .entry(instrument_id)
+                            .or_insert_with(|| {
+                                OptionsChainPrecision::new(price_precision, size_precision)
+                            })
+                            .update(&data, price_precision, size_precision);
+                    }
+                    records_scanned += 1;
+                }
+                Ok(false) => break,
+                Err(_) => records_scanned += 1,
+            }
+        }
+    }
+}
+
+impl Iterator for OptionsChainStreamIterator {
+    type Item = anyhow::Result<Vec<Data>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(limit) = self.limit
+            && self.records_processed >= limit
+        {
+            return None;
+        }
+
+        self.buffer.clear();
+        let mut records_read = 0;
+
+        while records_read < self.chunk_size {
+            match self.reader.read_record(&mut self.record) {
+                Ok(true) => {
+                    if let Some(underlyings) = self.underlyings.as_deref() {
+                        let Some(symbol) = self.record.get(1) else {
+                            continue;
+                        };
+                        let symbol = symbol.to_uppercase();
+                        if !matches_underlying_filter(&symbol, Some(underlyings)) {
+                            continue;
+                        }
+                    }
+
+                    let data = match self.record.deserialize::<TardisOptionsChainRecord>(None) {
+                        Ok(data) => data,
+                        Err(e) => {
+                            return Some(Err(anyhow::anyhow!("Failed to deserialize record: {e}")));
+                        }
+                    };
+                    let instrument_id = parse_instrument_id(&data.exchange, data.symbol);
+                    let precision = self
+                        .precision_by_instrument
+                        .entry(instrument_id)
+                        .or_insert_with(|| {
+                            OptionsChainPrecision::new(self.price_precision, self.size_precision)
+                        });
+                    precision.update(&data, self.price_precision, self.size_precision);
+
+                    match parse_options_chain_record_as_quote(
+                        &data,
+                        precision.price,
+                        precision.size,
+                        instrument_id,
+                    ) {
+                        Ok(Some(quote)) => self.buffer.push(Data::Quote(quote)),
+                        Ok(None) => {}
+                        Err(e) => return Some(Err(e)),
+                    }
+                    self.buffer
+                        .push(Data::OptionGreeks(parse_options_chain_record(
+                            &data,
+                            instrument_id,
+                        )));
+
+                    records_read += 1;
+                    self.records_processed += 1;
+
+                    if let Some(limit) = self.limit
+                        && self.records_processed >= limit
+                    {
+                        break;
+                    }
+                }
+                Ok(false) => {
+                    if self.buffer.is_empty() {
+                        return None;
+                    }
+                    return Some(Ok(self.buffer.clone()));
+                }
+                Err(e) => return Some(Err(anyhow::anyhow!("Failed to read record: {e}"))),
+            }
+        }
+
+        if self.buffer.is_empty() {
+            None
+        } else {
+            Some(Ok(self.buffer.clone()))
+        }
+    }
+}
+
+/// Streams Tardis `options_chain` CSV rows as quote and option greeks data.
+///
+/// # Precision Inference Warning
+///
+/// When using streaming with precision inference, later rows can raise the inferred precision for
+/// their instrument after earlier chunks have already been emitted. Provide explicit precision
+/// parameters for deterministic precision behavior.
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be opened, read, or parsed as CSV.
+pub fn stream_options_chain<P: AsRef<Path>>(
+    filepath: P,
+    chunk_size: usize,
+    underlyings: Option<Vec<String>>,
+    price_precision: Option<u8>,
+    size_precision: Option<u8>,
+    limit: Option<usize>,
+) -> anyhow::Result<impl Iterator<Item = anyhow::Result<Vec<Data>>>> {
+    OptionsChainStreamIterator::new(
+        filepath,
+        chunk_size,
+        underlyings,
+        price_precision,
+        size_precision,
+        limit,
+    )
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 // Trade Streaming
 ////////////////////////////////////////////////////////////////////////////////
@@ -725,7 +1000,7 @@ impl TradeStreamIterator {
     /// # Errors
     ///
     /// Returns an error if the file cannot be opened or read.
-    pub fn new<P: AsRef<Path>>(
+    pub(crate) fn new<P: AsRef<Path>>(
         filepath: P,
         chunk_size: usize,
         price_precision: Option<u8>,
@@ -742,7 +1017,7 @@ impl TradeStreamIterator {
                 let mut reader = create_csv_reader(&filepath)?;
                 let mut record = StringRecord::new();
                 let (detected_price, detected_size) =
-                    Self::detect_precision_from_sample(&mut reader, &mut record, 10_000)?;
+                    Self::detect_precision_from_sample(&mut reader, &mut record, 10_000);
                 (
                     price_precision.unwrap_or(detected_price),
                     size_precision.unwrap_or(detected_size),
@@ -768,7 +1043,7 @@ impl TradeStreamIterator {
         reader: &mut Reader<Box<dyn std::io::Read>>,
         record: &mut StringRecord,
         sample_size: usize,
-    ) -> anyhow::Result<(u8, u8)> {
+    ) -> (u8, u8) {
         let mut max_price_precision = 2u8;
         let mut max_size_precision = 0u8;
         let mut records_scanned = 0;
@@ -787,7 +1062,7 @@ impl TradeStreamIterator {
             }
         }
 
-        Ok((max_price_precision, max_size_precision))
+        (max_price_precision, max_size_precision)
     }
 }
 
@@ -909,7 +1184,7 @@ impl Depth10StreamIterator {
     /// # Errors
     ///
     /// Returns an error if the file cannot be opened or read, or if `levels` is not 5 or 25.
-    pub fn new<P: AsRef<Path>>(
+    pub(crate) fn new<P: AsRef<Path>>(
         filepath: P,
         chunk_size: usize,
         levels: u8,
@@ -932,7 +1207,7 @@ impl Depth10StreamIterator {
                 let mut reader = create_csv_reader(&filepath)?;
                 let mut record = StringRecord::new();
                 let (detected_price, detected_size) =
-                    Self::detect_precision_from_sample(&mut reader, &mut record, 10_000)?;
+                    Self::detect_precision_from_sample(&mut reader, &mut record, 10_000);
                 (
                     price_precision.unwrap_or(detected_price),
                     size_precision.unwrap_or(detected_size),
@@ -955,7 +1230,7 @@ impl Depth10StreamIterator {
         })
     }
 
-    fn process_snapshot5(&mut self, data: TardisOrderBookSnapshot5Record) -> OrderBookDepth10 {
+    fn process_snapshot5(&self, data: &TardisOrderBookSnapshot5Record) -> OrderBookDepth10 {
         let instrument_id = self
             .instrument_id
             .unwrap_or_else(|| parse_instrument_id(&data.exchange, data.symbol));
@@ -1006,7 +1281,7 @@ impl Depth10StreamIterator {
             ask_counts[i] = ask_count;
         }
 
-        let flags = RecordFlag::F_SNAPSHOT.value();
+        let flags = RecordFlag::F_SNAPSHOT as u8;
         let sequence = 0;
         let ts_event = parse_timestamp(data.timestamp);
         let ts_init = parse_timestamp(data.local_timestamp);
@@ -1024,7 +1299,7 @@ impl Depth10StreamIterator {
         )
     }
 
-    fn process_snapshot25(&mut self, data: TardisOrderBookSnapshot25Record) -> OrderBookDepth10 {
+    fn process_snapshot25(&self, data: &TardisOrderBookSnapshot25Record) -> OrderBookDepth10 {
         let instrument_id = self
             .instrument_id
             .unwrap_or_else(|| parse_instrument_id(&data.exchange, data.symbol));
@@ -1085,7 +1360,7 @@ impl Depth10StreamIterator {
             ask_counts[i] = ask_count;
         }
 
-        let flags = RecordFlag::F_SNAPSHOT.value();
+        let flags = RecordFlag::F_SNAPSHOT as u8;
         let sequence = 0;
         let ts_event = parse_timestamp(data.timestamp);
         let ts_init = parse_timestamp(data.local_timestamp);
@@ -1107,7 +1382,7 @@ impl Depth10StreamIterator {
         reader: &mut Reader<Box<dyn std::io::Read>>,
         record: &mut StringRecord,
         sample_size: usize,
-    ) -> anyhow::Result<(u8, u8)> {
+    ) -> (u8, u8) {
         let mut max_price_precision = 2u8;
         let mut max_size_precision = 0u8;
         let mut records_scanned = 0;
@@ -1121,14 +1396,17 @@ impl Depth10StreamIterator {
                             max_price_precision =
                                 max_price_precision.max(infer_precision(bid_price));
                         }
+
                         if let Some(ask_price) = data.asks_0_price {
                             max_price_precision =
                                 max_price_precision.max(infer_precision(ask_price));
                         }
+
                         if let Some(bid_amount) = data.bids_0_amount {
                             max_size_precision =
                                 max_size_precision.max(infer_precision(bid_amount));
                         }
+
                         if let Some(ask_amount) = data.asks_0_amount {
                             max_size_precision =
                                 max_size_precision.max(infer_precision(ask_amount));
@@ -1141,14 +1419,17 @@ impl Depth10StreamIterator {
                             max_price_precision =
                                 max_price_precision.max(infer_precision(bid_price));
                         }
+
                         if let Some(ask_price) = data.asks_0_price {
                             max_price_precision =
                                 max_price_precision.max(infer_precision(ask_price));
                         }
+
                         if let Some(bid_amount) = data.bids_0_amount {
                             max_size_precision =
                                 max_size_precision.max(infer_precision(bid_amount));
                         }
+
                         if let Some(ask_amount) = data.asks_0_amount {
                             max_size_precision =
                                 max_size_precision.max(infer_precision(ask_amount));
@@ -1161,7 +1442,7 @@ impl Depth10StreamIterator {
             }
         }
 
-        Ok((max_price_precision, max_size_precision))
+        (max_price_precision, max_size_precision)
     }
 }
 
@@ -1190,11 +1471,11 @@ impl Iterator for Depth10StreamIterator {
                         5 => self
                             .record
                             .deserialize::<TardisOrderBookSnapshot5Record>(None)
-                            .map(|data| self.process_snapshot5(data)),
+                            .map(|data| self.process_snapshot5(&data)),
                         25 => self
                             .record
                             .deserialize::<TardisOrderBookSnapshot25Record>(None)
-                            .map(|data| self.process_snapshot25(data)),
+                            .map(|data| self.process_snapshot25(&data)),
                         _ => return Some(Err(anyhow::anyhow!("Invalid levels: {}", self.levels))),
                     };
 
@@ -1434,20 +1715,20 @@ pub fn stream_funding_rates<P: AsRef<Path>>(
     FundingRateStreamIterator::new(filepath, chunk_size, instrument_id, limit)
 }
 
-////////////////////////////////////////////////////////////////////////////////
-// Tests
-////////////////////////////////////////////////////////////////////////////////
 #[cfg(test)]
 mod tests {
     use nautilus_model::{
         enums::{AggressorSide, BookAction},
-        identifiers::TradeId,
+        identifiers::{InstrumentId, TradeId},
         types::Price,
     };
     use rstest::*;
 
     use super::*;
-    use crate::{csv::load::load_deltas, parse::parse_price, tests::get_test_data_path};
+    use crate::{
+        common::{parse::parse_price, testing::get_test_data_path},
+        csv::load::load_deltas,
+    };
 
     #[rstest]
     #[case(0.0, 0)]
@@ -1500,6 +1781,240 @@ binance-futures,BTCUSDT,1640995204000000,1640995204100000,false,ask,50000.1234,0
         std::fs::remove_file(&temp_file).ok();
     }
 
+    #[cfg(feature = "python")]
+    #[rstest]
+    pub fn test_stream_batched_deltas_clear_and_limit() {
+        let csv_data = "exchange,symbol,timestamp,local_timestamp,is_snapshot,side,price,amount
+binance,BTCUSDT,1640995200000000,1640995200100000,true,ask,50000.0,1.0
+binance,BTCUSDT,1640995201000000,1640995201100000,false,bid,49999.5,2.0
+binance,BTCUSDT,1640995202000000,1640995202100000,false,ask,50000.12,1.5
+binance,BTCUSDT,1640995203000000,1640995203100000,false,bid,49999.123,3.0
+binance,BTCUSDT,1640995204000000,1640995204100000,false,ask,50000.1234,0.5";
+
+        let temp_file = std::env::temp_dir().join("test_stream_batched_deltas.csv");
+        std::fs::write(&temp_file, csv_data).unwrap();
+
+        // limit=1 should return only the synthetic CLEAR delta
+        let mut iterator =
+            BatchedDeltasStreamIterator::new(&temp_file, 10, Some(4), Some(1), None, Some(1))
+                .unwrap();
+        iterator.fill_pending_batches().transpose().unwrap();
+        assert_eq!(iterator.pending_batches.len(), 1);
+        assert_eq!(iterator.pending_batches[0].len(), 1);
+        assert_eq!(iterator.pending_batches[0][0].action, BookAction::Clear);
+
+        // No limit should return all batches (first batch starts with CLEAR)
+        let mut iterator =
+            BatchedDeltasStreamIterator::new(&temp_file, 10, Some(4), Some(1), None, None).unwrap();
+        iterator.fill_pending_batches().transpose().unwrap();
+        assert_eq!(iterator.pending_batches.len(), 5);
+        assert_eq!(iterator.pending_batches[0].len(), 2);
+        assert_eq!(iterator.pending_batches[0][0].action, BookAction::Clear);
+        assert_ne!(iterator.pending_batches[0][1].action, BookAction::Clear);
+        let total_deltas: usize = iterator
+            .pending_batches
+            .iter()
+            .map(|batch| batch.len())
+            .sum();
+        assert_eq!(total_deltas, 6);
+
+        std::fs::remove_file(&temp_file).ok();
+    }
+
+    #[cfg(feature = "python")]
+    #[rstest]
+    pub fn test_stream_batched_deltas_with_mid_snapshot_inserts_clear() {
+        // CSV with:
+        // - Initial snapshot (is_snapshot=true) at start
+        // - Some deltas (is_snapshot=false)
+        // - Mid-day snapshot (is_snapshot=true) - should trigger CLEAR
+        // - Back to deltas (is_snapshot=false)
+        let csv_data = "exchange,symbol,timestamp,local_timestamp,is_snapshot,side,price,amount
+binance-futures,BTCUSDT,1640995200000000,1640995200100000,true,bid,50000.0,1.0
+binance-futures,BTCUSDT,1640995200000000,1640995200100000,true,ask,50001.0,2.0
+binance-futures,BTCUSDT,1640995201000000,1640995201100000,false,bid,49999.0,0.5
+binance-futures,BTCUSDT,1640995202000000,1640995202100000,false,ask,50002.0,1.5
+binance-futures,BTCUSDT,1640995300000000,1640995300100000,true,bid,50100.0,3.0
+binance-futures,BTCUSDT,1640995300000000,1640995300100000,true,ask,50101.0,4.0
+binance-futures,BTCUSDT,1640995301000000,1640995301100000,false,bid,50099.0,1.0";
+
+        let temp_file = std::env::temp_dir().join("test_stream_batched_mid_snapshot.csv");
+        std::fs::write(&temp_file, csv_data).unwrap();
+
+        let mut iterator =
+            BatchedDeltasStreamIterator::new(&temp_file, 100, Some(1), Some(1), None, None)
+                .unwrap();
+        iterator.fill_pending_batches().transpose().unwrap();
+
+        let all_deltas: Vec<_> = iterator.pending_batches.iter().flatten().collect();
+        let clear_count = all_deltas
+            .iter()
+            .filter(|d| d.action == BookAction::Clear)
+            .count();
+
+        // Should have 2 CLEAR deltas: initial snapshot + mid-day snapshot
+        assert_eq!(
+            clear_count, 2,
+            "Expected 2 CLEAR deltas (initial + mid-day snapshot), found {clear_count}"
+        );
+
+        // Verify CLEAR positions:
+        // 0=CLEAR, 1=Add, 2=Add, 3=Update, 4=Update, 5=CLEAR, 6=Add, 7=Add, 8=Update
+        assert_eq!(all_deltas[0].action, BookAction::Clear);
+        assert_eq!(all_deltas[5].action, BookAction::Clear);
+
+        // CLEAR deltas should NOT have F_LAST when followed by same-timestamp deltas
+        assert_eq!(
+            all_deltas[0].flags & RecordFlag::F_LAST as u8,
+            0,
+            "CLEAR at index 0 should not have F_LAST flag"
+        );
+        assert_eq!(
+            all_deltas[5].flags & RecordFlag::F_LAST as u8,
+            0,
+            "CLEAR at index 5 should not have F_LAST flag"
+        );
+
+        std::fs::remove_file(&temp_file).ok();
+    }
+
+    #[cfg(feature = "python")]
+    #[rstest]
+    pub fn test_stream_batched_deltas_with_consecutive_snapshots_inserts_clear() {
+        let csv_data = "exchange,symbol,timestamp,local_timestamp,is_snapshot,side,price,amount
+hyperliquid,BTC,1640995200000000,1640995200100000,true,bid,50000.0,1.0
+hyperliquid,BTC,1640995200000000,1640995200100000,true,ask,50001.0,2.0
+hyperliquid,BTC,1640995201000000,1640995201100000,true,bid,49990.0,3.0
+hyperliquid,BTC,1640995201000000,1640995201100000,true,ask,49991.0,4.0";
+
+        let temp_file = std::env::temp_dir().join("test_stream_batched_consecutive_snapshots.csv");
+        std::fs::write(&temp_file, csv_data).unwrap();
+
+        let mut iterator =
+            BatchedDeltasStreamIterator::new(&temp_file, 100, Some(1), Some(1), None, None)
+                .unwrap();
+        iterator.fill_pending_batches().transpose().unwrap();
+
+        let all_deltas: Vec<_> = iterator.pending_batches.iter().flatten().collect();
+        let clear_count = all_deltas
+            .iter()
+            .filter(|d| d.action == BookAction::Clear)
+            .count();
+
+        assert_eq!(clear_count, 2);
+        assert_eq!(all_deltas[0].action, BookAction::Clear);
+        assert_eq!(all_deltas[3].action, BookAction::Clear);
+        assert_eq!(
+            all_deltas[2].flags & RecordFlag::F_LAST as u8,
+            RecordFlag::F_LAST as u8
+        );
+        assert_eq!(all_deltas[3].flags & RecordFlag::F_LAST as u8, 0);
+
+        std::fs::remove_file(&temp_file).ok();
+    }
+
+    #[cfg(feature = "python")]
+    #[rstest]
+    pub fn test_stream_batched_deltas_limit_includes_clear() {
+        // Test that limit counts total emitted deltas (including CLEARs)
+        let csv_data = "exchange,symbol,timestamp,local_timestamp,is_snapshot,side,price,amount
+binance,BTCUSDT,1640995200000000,1640995200100000,true,bid,50000.0,1.0
+binance,BTCUSDT,1640995201000000,1640995201100000,false,bid,49999.0,0.5
+binance,BTCUSDT,1640995202000000,1640995202100000,false,ask,50002.0,1.5
+binance,BTCUSDT,1640995203000000,1640995203100000,false,bid,49998.0,0.5
+binance,BTCUSDT,1640995204000000,1640995204100000,false,ask,50003.0,1.0";
+
+        let temp_file = std::env::temp_dir().join("test_stream_batched_limit_includes_clear.csv");
+        std::fs::write(&temp_file, csv_data).unwrap();
+
+        let mut iterator =
+            BatchedDeltasStreamIterator::new(&temp_file, 100, Some(1), Some(1), None, Some(4))
+                .unwrap();
+        iterator.fill_pending_batches().transpose().unwrap();
+
+        let all_deltas: Vec<_> = iterator.pending_batches.iter().flatten().collect();
+
+        // limit=4 should get exactly 4 deltas: 1 CLEAR + 3 data deltas
+        assert_eq!(all_deltas.len(), 4);
+        assert_eq!(all_deltas[0].action, BookAction::Clear);
+        assert_eq!(all_deltas[1].action, BookAction::Add);
+        assert_eq!(all_deltas[2].action, BookAction::Update);
+        assert_eq!(all_deltas[3].action, BookAction::Update);
+
+        std::fs::remove_file(&temp_file).ok();
+    }
+
+    #[cfg(feature = "python")]
+    #[rstest]
+    pub fn test_stream_batched_deltas_limit_sets_f_last() {
+        // Test that F_LAST is set on the final delta when limit is reached
+        let csv_data = "exchange,symbol,timestamp,local_timestamp,is_snapshot,side,price,amount
+binance,BTCUSDT,1640995200000000,1640995200100000,true,bid,50000.0,1.0
+binance,BTCUSDT,1640995201000000,1640995201100000,false,ask,50001.0,2.0
+binance,BTCUSDT,1640995202000000,1640995202100000,false,bid,49999.0,0.5
+binance,BTCUSDT,1640995203000000,1640995203100000,false,ask,50002.0,1.5";
+
+        let temp_file = std::env::temp_dir().join("test_stream_batched_limit_f_last.csv");
+        std::fs::write(&temp_file, csv_data).unwrap();
+
+        // limit=3 should get 3 deltas with F_LAST on the last one
+        let mut iterator =
+            BatchedDeltasStreamIterator::new(&temp_file, 100, Some(1), Some(1), None, Some(3))
+                .unwrap();
+        iterator.fill_pending_batches().transpose().unwrap();
+
+        let all_deltas: Vec<_> = iterator.pending_batches.iter().flatten().collect();
+
+        assert_eq!(all_deltas.len(), 3);
+        assert_eq!(
+            all_deltas[2].flags & RecordFlag::F_LAST as u8,
+            RecordFlag::F_LAST as u8,
+            "Final delta should have F_LAST flag when limit is reached"
+        );
+
+        std::fs::remove_file(&temp_file).ok();
+    }
+
+    #[cfg(feature = "python")]
+    #[rstest]
+    pub fn test_stream_batched_deltas_snapshot_batch_flags() {
+        // Test that CLEAR is first in batch and only the last delta has F_LAST
+        let csv_data = "exchange,symbol,timestamp,local_timestamp,is_snapshot,side,price,amount
+binance,BTCUSDT,1640995200000000,1640995200100000,true,bid,50000.0,1.0
+binance,BTCUSDT,1640995200000000,1640995200100000,true,ask,50001.0,2.0
+binance,BTCUSDT,1640995201000000,1640995201100000,false,bid,49999.0,0.5";
+
+        let temp_file = std::env::temp_dir().join("test_stream_batched_snapshot_batch_flags.csv");
+        std::fs::write(&temp_file, csv_data).unwrap();
+
+        let mut iterator =
+            BatchedDeltasStreamIterator::new(&temp_file, 100, Some(1), Some(1), None, None)
+                .unwrap();
+        iterator.fill_pending_batches().transpose().unwrap();
+
+        assert_eq!(iterator.pending_batches.len(), 2);
+        let first_batch = &iterator.pending_batches[0];
+
+        // First batch contains CLEAR + 2 snapshot deltas
+        assert_eq!(first_batch.len(), 3);
+        assert_eq!(first_batch[0].action, BookAction::Clear);
+        assert_eq!(first_batch[0].flags & RecordFlag::F_LAST as u8, 0);
+        assert_eq!(first_batch[1].flags & RecordFlag::F_LAST as u8, 0);
+        assert_eq!(
+            first_batch[2].flags & RecordFlag::F_LAST as u8,
+            RecordFlag::F_LAST as u8
+        );
+
+        // Second batch should have F_LAST set (end of file)
+        assert_eq!(iterator.pending_batches[1].len(), 1);
+        assert_eq!(
+            iterator.pending_batches[1][0].flags & RecordFlag::F_LAST as u8,
+            RecordFlag::F_LAST as u8
+        );
+
+        std::fs::remove_file(&temp_file).ok();
+    }
+
     #[rstest]
     pub fn test_stream_quotes_chunked() {
         let csv_data =
@@ -1536,6 +2051,46 @@ binance,BTCUSDT,1640995204000000,1640995204100000,0.5,50000.1234,49999.1234,0.8"
         assert_eq!(total_quotes, 5);
 
         std::fs::remove_file(&temp_file).ok();
+    }
+
+    #[rstest]
+    pub fn test_stream_options_chain_filters_and_chunks() {
+        let filepath = get_test_data_path("options_chain.csv");
+        let stream = stream_options_chain(
+            filepath,
+            1,
+            Some(vec!["ETH-".to_string()]),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let chunks: Vec<_> = stream.collect();
+
+        assert_eq!(chunks.len(), 2);
+
+        let first_chunk = chunks[0].as_ref().unwrap();
+        assert_eq!(first_chunk.len(), 2);
+        let Data::Quote(quote) = &first_chunk[0] else {
+            panic!("Expected first data item to be Quote");
+        };
+        let Data::OptionGreeks(greeks) = &first_chunk[1] else {
+            panic!("Expected second data item to be OptionGreeks");
+        };
+
+        assert_eq!(
+            quote.instrument_id,
+            InstrumentId::from("ETH-9JUN20-250-P.DERIBIT")
+        );
+        assert_eq!(quote.bid_price, Price::from("0.12345"));
+        assert_eq!(quote.bid_size, Quantity::from("0.123456"));
+        assert_eq!(quote.bid_price.precision, 5);
+        assert_eq!(quote.bid_size.precision, 6);
+        assert_eq!(greeks.instrument_id, quote.instrument_id);
+
+        let second_chunk = chunks[1].as_ref().unwrap();
+        assert_eq!(second_chunk.len(), 1);
+        assert!(matches!(second_chunk[0], Data::OptionGreeks(_)));
     }
 
     #[rstest]
@@ -1660,10 +2215,12 @@ binance,BTCUSDT,1640995202000000,1640995202100000,50001.12,1.12,49999.12,1.62,50
         // Add bid and ask levels (we'll only populate first few for testing)
         let mut bid_headers = Vec::new();
         let mut ask_headers = Vec::new();
+
         for i in 0..25 {
             bid_headers.push(format!("bids[{i}].price"));
             bid_headers.push(format!("bids[{i}].amount"));
         }
+
         for i in 0..25 {
             ask_headers.push(format!("asks[{i}].price"));
             ask_headers.push(format!("asks[{i}].amount"));
@@ -1672,6 +2229,7 @@ binance,BTCUSDT,1640995202000000,1640995202100000,50001.12,1.12,49999.12,1.62,50
         for header in &bid_headers {
             header_parts.push(header);
         }
+
         for header in &ask_headers {
             header_parts.push(header);
         }
@@ -1996,7 +2554,7 @@ binance-futures,BTCUSDT,1640995301000000,1640995301100000,false,bid,50099.0,1.0"
         // Should have 2 CLEAR deltas: initial snapshot + mid-day snapshot
         assert_eq!(
             clear_count, 2,
-            "Expected 2 CLEAR deltas (initial + mid-day snapshot), got {clear_count}"
+            "Expected 2 CLEAR deltas (initial + mid-day snapshot), found {clear_count}"
         );
 
         // Verify CLEAR positions:
@@ -2006,15 +2564,79 @@ binance-futures,BTCUSDT,1640995301000000,1640995301100000,false,bid,50099.0,1.0"
 
         // CLEAR deltas should NOT have F_LAST when followed by same-timestamp deltas
         assert_eq!(
-            all_deltas[0].flags & RecordFlag::F_LAST.value(),
+            all_deltas[0].flags & RecordFlag::F_LAST as u8,
             0,
             "CLEAR at index 0 should not have F_LAST flag"
         );
         assert_eq!(
-            all_deltas[5].flags & RecordFlag::F_LAST.value(),
+            all_deltas[5].flags & RecordFlag::F_LAST as u8,
             0,
             "CLEAR at index 5 should not have F_LAST flag"
         );
+
+        std::fs::remove_file(&temp_file).ok();
+    }
+
+    #[rstest]
+    pub fn test_stream_deltas_with_consecutive_snapshots_inserts_clear() {
+        let csv_data = "exchange,symbol,timestamp,local_timestamp,is_snapshot,side,price,amount
+hyperliquid,BTC,1640995200000000,1640995200100000,true,bid,50000.0,1.0
+hyperliquid,BTC,1640995200000000,1640995200100000,true,ask,50001.0,2.0
+hyperliquid,BTC,1640995201000000,1640995201100000,true,bid,49990.0,3.0
+hyperliquid,BTC,1640995201000000,1640995201100000,true,ask,49991.0,4.0";
+
+        let temp_file = std::env::temp_dir().join("test_stream_deltas_consecutive_snapshots.csv");
+        std::fs::write(&temp_file, csv_data).unwrap();
+
+        let stream = stream_deltas(&temp_file, 100, Some(1), Some(1), None, None).unwrap();
+        let all_deltas: Vec<_> = stream.flat_map(|chunk| chunk.unwrap()).collect();
+        let clear_count = all_deltas
+            .iter()
+            .filter(|d| d.action == BookAction::Clear)
+            .count();
+
+        assert_eq!(clear_count, 2);
+        assert_eq!(all_deltas[0].action, BookAction::Clear);
+        assert_eq!(all_deltas[3].action, BookAction::Clear);
+        assert_eq!(
+            all_deltas[2].flags & RecordFlag::F_LAST as u8,
+            RecordFlag::F_LAST as u8
+        );
+        assert_eq!(all_deltas[3].flags & RecordFlag::F_LAST as u8, 0);
+
+        std::fs::remove_file(&temp_file).ok();
+    }
+
+    #[rstest]
+    pub fn test_stream_deltas_consecutive_snapshots_clear_across_chunk_boundary() {
+        let csv_data = "exchange,symbol,timestamp,local_timestamp,is_snapshot,side,price,amount
+hyperliquid,BTC,1640995200000000,1640995200100000,true,bid,50000.0,1.0
+hyperliquid,BTC,1640995200000000,1640995200100000,true,ask,50001.0,2.0
+hyperliquid,BTC,1640995201000000,1640995201100000,true,bid,49990.0,3.0
+hyperliquid,BTC,1640995201000000,1640995201100000,true,ask,49991.0,4.0";
+
+        let temp_file =
+            std::env::temp_dir().join("test_stream_deltas_consecutive_snapshots_chunked.csv");
+        std::fs::write(&temp_file, csv_data).unwrap();
+
+        // chunk_size 2 forces the second CLEAR to land on a chunk boundary, deferring its
+        // snapshot row via pending_record. The deferred row must not re-insert a CLEAR.
+        let stream = stream_deltas(&temp_file, 2, Some(1), Some(1), None, None).unwrap();
+        let all_deltas: Vec<_> = stream.flat_map(|chunk| chunk.unwrap()).collect();
+        let clear_count = all_deltas
+            .iter()
+            .filter(|d| d.action == BookAction::Clear)
+            .count();
+
+        assert_eq!(all_deltas.len(), 6);
+        assert_eq!(clear_count, 2);
+        assert_eq!(all_deltas[0].action, BookAction::Clear);
+        assert_eq!(all_deltas[3].action, BookAction::Clear);
+        assert_eq!(
+            all_deltas[2].flags & RecordFlag::F_LAST as u8,
+            RecordFlag::F_LAST as u8
+        );
+        assert_eq!(all_deltas[3].flags & RecordFlag::F_LAST as u8, 0);
 
         std::fs::remove_file(&temp_file).ok();
     }
@@ -2032,7 +2654,7 @@ binance-futures,BTCUSDT,1640995301000000,1640995301100000,false,bid,50099.0,1.0"
         // Should have 2 CLEAR deltas: initial snapshot + mid-day snapshot
         assert_eq!(
             clear_count, 2,
-            "Expected 2 CLEAR deltas (initial + mid-day snapshot), got {clear_count}"
+            "Expected 2 CLEAR deltas (initial + mid-day snapshot), found {clear_count}"
         );
 
         assert_eq!(deltas[0].action, BookAction::Clear);
@@ -2048,17 +2670,17 @@ binance-futures,BTCUSDT,1640995301000000,1640995301100000,false,bid,50099.0,1.0"
         // 0=CLEAR, 1=Add, 2=Add, 3=Update, 4=Update, 5=Delete, 6=CLEAR
         assert_eq!(
             second_clear_idx, 6,
-            "Second CLEAR should be at index 6, got {second_clear_idx}"
+            "Second CLEAR should be at index 6, found {second_clear_idx}"
         );
 
         // CLEAR deltas should NOT have F_LAST when followed by same-timestamp deltas
         assert_eq!(
-            deltas[0].flags & RecordFlag::F_LAST.value(),
+            deltas[0].flags & RecordFlag::F_LAST as u8,
             0,
             "CLEAR at index 0 should not have F_LAST flag"
         );
         assert_eq!(
-            deltas[6].flags & RecordFlag::F_LAST.value(),
+            deltas[6].flags & RecordFlag::F_LAST as u8,
             0,
             "CLEAR at index 6 should not have F_LAST flag"
         );
@@ -2165,8 +2787,8 @@ binance-futures,BTCUSDT,1640995203000000,1640995203100000,false,bid,49998.0,0.5"
 
         // Final delta should have F_LAST flag
         assert_eq!(
-            deltas[2].flags & RecordFlag::F_LAST.value(),
-            RecordFlag::F_LAST.value(),
+            deltas[2].flags & RecordFlag::F_LAST as u8,
+            RecordFlag::F_LAST as u8,
             "Final delta should have F_LAST flag when limit is reached"
         );
 
@@ -2192,7 +2814,7 @@ binance-futures,BTCUSDT,1640995200000000,1640995200100000,false,bid,49999.0,0.5"
 
         // First chunk's last delta should NOT have F_LAST (more data follows with same timestamp)
         assert_eq!(
-            chunk1[1].flags & RecordFlag::F_LAST.value(),
+            chunk1[1].flags & RecordFlag::F_LAST as u8,
             0,
             "Mid-stream chunk should not have F_LAST flag"
         );
@@ -2201,8 +2823,8 @@ binance-futures,BTCUSDT,1640995200000000,1640995200100000,false,bid,49999.0,0.5"
         let chunk2 = stream.next().unwrap().unwrap();
         assert_eq!(chunk2.len(), 1);
         assert_eq!(
-            chunk2[0].flags & RecordFlag::F_LAST.value(),
-            RecordFlag::F_LAST.value(),
+            chunk2[0].flags & RecordFlag::F_LAST as u8,
+            RecordFlag::F_LAST as u8,
             "Final chunk at EOF should have F_LAST flag"
         );
 

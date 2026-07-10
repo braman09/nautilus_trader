@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -13,7 +13,7 @@
 //  limitations under the License.
 // -------------------------------------------------------------------------------------------------
 
-use std::fmt::Display;
+use std::{fmt::Display, str::FromStr};
 
 use nautilus_core::{UUID4, UnixNanos};
 use rust_decimal::Decimal;
@@ -34,7 +34,11 @@ use crate::{
 #[serde(tag = "type")]
 #[cfg_attr(
     feature = "python",
-    pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.model")
+    pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.model", from_py_object)
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.model")
 )]
 pub struct OrderStatusReport {
     /// The account ID associated with the position.
@@ -79,6 +83,8 @@ pub struct OrderStatusReport {
     pub expire_time: Option<UnixNanos>,
     /// The order price (LIMIT).
     pub price: Option<Price>,
+    /// The order activation price (trailing stop).
+    pub activation_price: Option<Price>,
     /// The order trigger price (STOP).
     pub trigger_price: Option<Price>,
     /// The trigger type for the order.
@@ -105,7 +111,7 @@ pub struct OrderStatusReport {
 
 impl OrderStatusReport {
     /// Creates a new [`OrderStatusReport`] instance with required fields.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     #[must_use]
     pub fn new(
         account_id: AccountId,
@@ -145,6 +151,7 @@ impl OrderStatusReport {
             contingency_type: ContingencyType::default(),
             expire_time: None,
             price: None,
+            activation_price: None,
             trigger_price: None,
             trigger_type: None,
             limit_offset: None,
@@ -219,12 +226,18 @@ impl OrderStatusReport {
             );
         }
 
-        self.avg_px = Some(Decimal::from_f64_retain(avg_px).ok_or_else(|| {
-            anyhow::anyhow!(
-                "Failed to convert avg_px to Decimal: {avg_px} (possible overflow/underflow)"
-            )
-        })?);
+        self.avg_px =
+            Some(Decimal::from_str(&avg_px.to_string()).map_err(|e| {
+                anyhow::anyhow!("Failed to convert avg_px to Decimal: {avg_px} ({e})")
+            })?);
         Ok(self)
+    }
+
+    /// Sets the activation price.
+    #[must_use]
+    pub const fn with_activation_price(mut self, activation_price: Price) -> Self {
+        self.activation_price = Some(activation_price);
+        self
     }
 
     /// Sets the trigger price.
@@ -367,6 +380,7 @@ impl Display for OrderStatusReport {
                 contingency_type={}, \
                 expire_time={:?}, \
                 price={:?}, \
+                activation_price={:?}, \
                 trigger_price={:?}, \
                 trigger_type={:?}, \
                 limit_offset={:?}, \
@@ -400,6 +414,7 @@ impl Display for OrderStatusReport {
             self.contingency_type,
             self.expire_time,
             self.price,
+            self.activation_price,
             self.trigger_price,
             self.trigger_type,
             self.limit_offset,
@@ -415,14 +430,11 @@ impl Display for OrderStatusReport {
     }
 }
 
-////////////////////////////////////////////////////////////////////////////////
-// Tests
-////////////////////////////////////////////////////////////////////////////////
 #[cfg(test)]
 mod tests {
     use nautilus_core::UnixNanos;
     use rstest::*;
-    use rust_decimal::Decimal;
+    use rust_decimal_macros::dec;
 
     use super::*;
     use crate::{
@@ -525,7 +537,7 @@ mod tests {
     }
 
     #[rstest]
-    #[allow(clippy::panic_in_result_fn)]
+    #[expect(clippy::panic_in_result_fn)]
     fn test_order_status_report_builder_methods() -> anyhow::Result<()> {
         let report = test_order_status_report()
             .with_client_order_id(ClientOrderId::from("O-19700101-000000-001-001-2"))
@@ -536,8 +548,8 @@ mod tests {
             .with_avg_px(1.00001)?
             .with_trigger_price(Price::from("0.99000"))
             .with_trigger_type(TriggerType::Default)
-            .with_limit_offset(Decimal::from_f64_retain(0.0001).unwrap())
-            .with_trailing_offset(Decimal::from_f64_retain(0.0002).unwrap())
+            .with_limit_offset(dec!(0.0001))
+            .with_trailing_offset(dec!(0.0002))
             .with_trailing_offset_type(TrailingOffsetType::BasisPoints)
             .with_display_qty(Quantity::from("50"))
             .with_expire_time(UnixNanos::from(4_000_000_000))
@@ -558,20 +570,11 @@ mod tests {
             Some(ClientOrderId::from("O-PARENT"))
         );
         assert_eq!(report.price, Some(Price::from("1.00000")));
-        assert_eq!(
-            report.avg_px,
-            Some(Decimal::from_f64_retain(1.00001).unwrap())
-        );
+        assert_eq!(report.avg_px, Some(dec!(1.00001)));
         assert_eq!(report.trigger_price, Some(Price::from("0.99000")));
         assert_eq!(report.trigger_type, Some(TriggerType::Default));
-        assert_eq!(
-            report.limit_offset,
-            Some(Decimal::from_f64_retain(0.0001).unwrap())
-        );
-        assert_eq!(
-            report.trailing_offset,
-            Some(Decimal::from_f64_retain(0.0002).unwrap())
-        );
+        assert_eq!(report.limit_offset, Some(dec!(0.0001)));
+        assert_eq!(report.trailing_offset, Some(dec!(0.0002)));
         assert_eq!(report.trailing_offset_type, TrailingOffsetType::BasisPoints);
         assert_eq!(report.display_qty, Some(Quantity::from("50")));
         assert_eq!(report.expire_time, Some(UnixNanos::from(4_000_000_000)));
@@ -684,7 +687,7 @@ mod tests {
     }
 
     #[rstest]
-    #[allow(clippy::panic_in_result_fn)]
+    #[expect(clippy::panic_in_result_fn)]
     fn test_order_status_report_with_optional_fields() -> anyhow::Result<()> {
         let mut report = test_order_status_report();
 
@@ -702,10 +705,7 @@ mod tests {
             .with_reduce_only(true);
 
         assert_eq!(report.price, Some(Price::from("1.00000")));
-        assert_eq!(
-            report.avg_px,
-            Some(Decimal::from_f64_retain(1.00001).unwrap())
-        );
+        assert_eq!(report.avg_px, Some(dec!(1.00001)));
         assert!(report.post_only);
         assert!(report.reduce_only);
         Ok(())

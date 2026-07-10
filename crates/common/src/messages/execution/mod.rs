@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -21,54 +21,61 @@ pub mod query;
 pub mod report;
 pub mod submit;
 
-use nautilus_core::UnixNanos;
+use nautilus_core::{Params, UnixNanos};
 use nautilus_model::{
     identifiers::{ClientId, InstrumentId, StrategyId},
     reports::{ExecutionMassStatus, FillReport, OrderStatusReport, PositionStatusReport},
 };
 use strum::Display;
 
-// Re-exports
 pub use self::{
-    cancel::BatchCancelOrders, cancel::CancelAllOrders, cancel::CancelOrder, modify::ModifyOrder,
-    query::QueryAccount, query::QueryOrder, report::GenerateFillReports,
-    report::GenerateOrderStatusReport, report::GeneratePositionReports, submit::SubmitOrder,
-    submit::SubmitOrderList,
+    cancel::{BatchCancelOrders, CancelAllOrders, CancelOrder},
+    modify::{BatchModifyOrders, ModifyOrder},
+    query::{QueryAccount, QueryOrder},
+    report::{
+        GenerateExecutionMassStatus, GenerateExecutionMassStatusBuilder, GenerateFillReports,
+        GenerateFillReportsBuilder, GenerateOrderStatusReport, GenerateOrderStatusReportBuilder,
+        GenerateOrderStatusReports, GenerateOrderStatusReportsBuilder,
+        GeneratePositionStatusReports, GeneratePositionStatusReportsBuilder,
+    },
+    submit::{SubmitOrder, SubmitOrderList},
 };
 
 /// Execution report variants for reconciliation.
 #[derive(Clone, Debug, Display)]
 pub enum ExecutionReport {
-    OrderStatus(Box<OrderStatusReport>),
+    Order(Box<OrderStatusReport>),
     Fill(Box<FillReport>),
+    OrderWithFills(Box<OrderStatusReport>, Vec<FillReport>),
     Position(Box<PositionStatusReport>),
-    Mass(Box<ExecutionMassStatus>),
+    MassStatus(Box<ExecutionMassStatus>),
 }
 
-// TODO
-#[allow(clippy::large_enum_variant)]
+#[expect(clippy::large_enum_variant)]
 #[derive(Clone, Debug, Eq, PartialEq, Display)]
 pub enum TradingCommand {
     SubmitOrder(SubmitOrder),
     SubmitOrderList(SubmitOrderList),
     ModifyOrder(ModifyOrder),
+    ModifyOrders(BatchModifyOrders),
     CancelOrder(CancelOrder),
+    CancelOrders(BatchCancelOrders),
     CancelAllOrders(CancelAllOrders),
-    BatchCancelOrders(BatchCancelOrders),
     QueryOrder(QueryOrder),
     QueryAccount(QueryAccount),
 }
 
 impl TradingCommand {
     #[must_use]
-    pub const fn client_id(&self) -> ClientId {
+    pub const fn client_id(&self) -> Option<ClientId> {
         match self {
             Self::SubmitOrder(command) => command.client_id,
             Self::SubmitOrderList(command) => command.client_id,
             Self::ModifyOrder(command) => command.client_id,
+            Self::ModifyOrders(command) => command.client_id,
             Self::CancelOrder(command) => command.client_id,
+            Self::CancelOrders(command) => command.client_id,
             Self::CancelAllOrders(command) => command.client_id,
-            Self::BatchCancelOrders(command) => command.client_id,
             Self::QueryOrder(command) => command.client_id,
             Self::QueryAccount(command) => command.client_id,
         }
@@ -85,9 +92,10 @@ impl TradingCommand {
             Self::SubmitOrder(command) => command.instrument_id,
             Self::SubmitOrderList(command) => command.instrument_id,
             Self::ModifyOrder(command) => command.instrument_id,
+            Self::ModifyOrders(command) => command.instrument_id,
             Self::CancelOrder(command) => command.instrument_id,
+            Self::CancelOrders(command) => command.instrument_id,
             Self::CancelAllOrders(command) => command.instrument_id,
-            Self::BatchCancelOrders(command) => command.instrument_id,
             Self::QueryOrder(command) => command.instrument_id,
             Self::QueryAccount(_) => panic!("No instrument ID for command"),
         }
@@ -99,9 +107,10 @@ impl TradingCommand {
             Self::SubmitOrder(command) => command.ts_init,
             Self::SubmitOrderList(command) => command.ts_init,
             Self::ModifyOrder(command) => command.ts_init,
+            Self::ModifyOrders(command) => command.ts_init,
             Self::CancelOrder(command) => command.ts_init,
+            Self::CancelOrders(command) => command.ts_init,
             Self::CancelAllOrders(command) => command.ts_init,
-            Self::BatchCancelOrders(command) => command.ts_init,
             Self::QueryOrder(command) => command.ts_init,
             Self::QueryAccount(command) => command.ts_init,
         }
@@ -113,11 +122,27 @@ impl TradingCommand {
             Self::SubmitOrder(command) => Some(command.strategy_id),
             Self::SubmitOrderList(command) => Some(command.strategy_id),
             Self::ModifyOrder(command) => Some(command.strategy_id),
+            Self::ModifyOrders(command) => Some(command.strategy_id),
             Self::CancelOrder(command) => Some(command.strategy_id),
+            Self::CancelOrders(command) => Some(command.strategy_id),
             Self::CancelAllOrders(command) => Some(command.strategy_id),
-            Self::BatchCancelOrders(command) => Some(command.strategy_id),
             Self::QueryOrder(command) => Some(command.strategy_id),
             Self::QueryAccount(_) => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn params(&self) -> Option<&Params> {
+        match self {
+            Self::SubmitOrder(command) => command.params.as_ref(),
+            Self::SubmitOrderList(command) => command.params.as_ref(),
+            Self::ModifyOrder(command) => command.params.as_ref(),
+            Self::ModifyOrders(command) => command.params.as_ref(),
+            Self::CancelOrder(command) => command.params.as_ref(),
+            Self::CancelOrders(command) => command.params.as_ref(),
+            Self::CancelAllOrders(command) => command.params.as_ref(),
+            Self::QueryOrder(command) => command.params.as_ref(),
+            Self::QueryAccount(command) => command.params.as_ref(),
         }
     }
 }

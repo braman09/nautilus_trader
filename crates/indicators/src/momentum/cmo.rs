@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -27,6 +27,10 @@ use crate::{
 #[cfg_attr(
     feature = "python",
     pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.indicators", unsendable)
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.indicators")
 )]
 pub struct ChandeMomentumOscillator {
     pub period: usize,
@@ -59,7 +63,9 @@ impl Indicator for ChandeMomentumOscillator {
         self.initialized
     }
 
-    fn handle_quote(&mut self, _quote: &QuoteTick) {}
+    fn handle_quote(&mut self, _quote: &QuoteTick) -> anyhow::Result<()> {
+        Ok(())
+    }
 
     fn handle_trade(&mut self, _trade: &TradeTick) {}
 
@@ -103,6 +109,7 @@ impl ChandeMomentumOscillator {
 
     pub fn update_raw(&mut self, close: f64) {
         self.count += 1;
+
         if !self.has_inputs {
             self.previous_close = close;
             self.has_inputs = true;
@@ -123,6 +130,7 @@ impl ChandeMomentumOscillator {
         if !self.initialized && self.average_gain.initialized() && self.average_loss.initialized() {
             self.initialized = true;
         }
+
         if self.initialized {
             let divisor = self.average_gain.value() + self.average_loss.value();
             if divisor == 0.0 {
@@ -136,9 +144,6 @@ impl ChandeMomentumOscillator {
     }
 }
 
-////////////////////////////////////////////////////////////////////////////////
-// Tests
-////////////////////////////////////////////////////////////////////////////////
 #[cfg(test)]
 mod tests {
     use nautilus_model::data::{Bar, QuoteTick};
@@ -210,7 +215,7 @@ mod tests {
 
     #[rstest]
     fn test_handle_quote_tick(mut cmo_10: ChandeMomentumOscillator, stub_quote: QuoteTick) {
-        cmo_10.handle_quote(&stub_quote);
+        cmo_10.handle_quote(&stub_quote).unwrap();
         assert_eq!(cmo_10.count, 0);
         assert_eq!(cmo_10.value, 0.0);
     }

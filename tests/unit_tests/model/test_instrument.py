@@ -1,5 +1,5 @@
 # -------------------------------------------------------------------------------------------------
-#  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+#  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 #  https://nautechsystems.io
 #
 #  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -85,6 +85,23 @@ class TestInstrument:
     def test_symbol_returns_expected_symbol(self):
         # Arrange, Act, Assert
         assert BTCUSDT_BINANCE.symbol == BTCUSDT_BINANCE.id.symbol
+
+    @pytest.mark.parametrize(
+        ("instrument", "expected"),
+        [
+            (AUDUSD_SIM, False),
+            (BTCUSDT_BINANCE, False),
+            (AAPL_EQUITY, False),
+            (ES_FUTURE, False),
+            (AAPL_OPTION, True),
+            (TestInstrumentProvider.futures_spread(), True),
+            (TestInstrumentProvider.option_spread(), True),
+            (TestInstrumentProvider.commodity(), True),
+        ],
+    )
+    def test_allows_negative_price(self, instrument, expected):
+        # Arrange, Act, Assert
+        assert instrument.allows_negative_price() == expected
 
     def test_base_to_dict_returns_expected_dict(self):
         # Arrange, Act

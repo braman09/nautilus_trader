@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -17,13 +17,16 @@ use std::{ops::Deref, sync::Arc};
 
 use nautilus_model::defi::{
     dex::{Dex, SharedDex},
+    pool_analysis::PoolEventKind,
     rpc::RpcLog,
 };
 
 use crate::{
     events::{
-        burn::BurnEvent, collect::CollectEvent, flash::FlashEvent, initialize::InitializeEvent,
-        mint::MintEvent, pool_created::PoolCreatedEvent, swap::SwapEvent,
+        burn::BurnEvent, collect::CollectEvent, fee_protocol_collect::FeeProtocolCollectEvent,
+        fee_protocol_update::FeeProtocolUpdateEvent, flash::FlashEvent,
+        initialize::InitializeEvent, mint::MintEvent, pool_created::PoolCreatedEvent,
+        swap::SwapEvent,
     },
     hypersync::HypersyncLog,
 };
@@ -39,22 +42,28 @@ pub struct DexExtended {
         Option<fn(HypersyncLog) -> anyhow::Result<PoolCreatedEvent>>,
     /// Function to parse initialize events from HyperSync logs.
     pub parse_initialize_event_hypersync_fn:
-        Option<fn(SharedDex, HypersyncLog) -> anyhow::Result<InitializeEvent>>,
+        Option<fn(SharedDex, &HypersyncLog) -> anyhow::Result<InitializeEvent>>,
     /// Function to parse swap events from HyperSync logs.
     pub parse_swap_event_hypersync_fn:
-        Option<fn(SharedDex, HypersyncLog) -> anyhow::Result<SwapEvent>>,
+        Option<fn(SharedDex, &HypersyncLog) -> anyhow::Result<SwapEvent>>,
     /// Function to parse mint events from HyperSync logs.
     pub parse_mint_event_hypersync_fn:
-        Option<fn(SharedDex, HypersyncLog) -> anyhow::Result<MintEvent>>,
+        Option<fn(SharedDex, &HypersyncLog) -> anyhow::Result<MintEvent>>,
     /// Function to parse burn events from HyperSync logs.
     pub parse_burn_event_hypersync_fn:
-        Option<fn(SharedDex, HypersyncLog) -> anyhow::Result<BurnEvent>>,
+        Option<fn(SharedDex, &HypersyncLog) -> anyhow::Result<BurnEvent>>,
     /// Function to parse collect events from HyperSync logs.
     pub parse_collect_event_hypersync_fn:
-        Option<fn(SharedDex, HypersyncLog) -> anyhow::Result<CollectEvent>>,
+        Option<fn(SharedDex, &HypersyncLog) -> anyhow::Result<CollectEvent>>,
     /// Function to parse flash events from HyperSync logs.
     pub parse_flash_event_hypersync_fn:
-        Option<fn(SharedDex, HypersyncLog) -> anyhow::Result<FlashEvent>>,
+        Option<fn(SharedDex, &HypersyncLog) -> anyhow::Result<FlashEvent>>,
+    /// Function to parse `SetFeeProtocol` events from HyperSync logs.
+    pub parse_fee_protocol_update_event_hypersync_fn:
+        Option<fn(SharedDex, &HypersyncLog) -> anyhow::Result<FeeProtocolUpdateEvent>>,
+    /// Function to parse `CollectProtocol` events from HyperSync logs.
+    pub parse_fee_protocol_collect_event_hypersync_fn:
+        Option<fn(SharedDex, &HypersyncLog) -> anyhow::Result<FeeProtocolCollectEvent>>,
     // === RPC parsers (hex-decode, standard Ethereum format) ===
     /// Function to parse pool creation events from RPC logs.
     pub parse_pool_created_event_rpc_fn: Option<fn(&RpcLog) -> anyhow::Result<PoolCreatedEvent>>,
@@ -71,6 +80,12 @@ pub struct DexExtended {
     pub parse_collect_event_rpc_fn: Option<fn(SharedDex, &RpcLog) -> anyhow::Result<CollectEvent>>,
     /// Function to parse flash events from RPC logs.
     pub parse_flash_event_rpc_fn: Option<fn(SharedDex, &RpcLog) -> anyhow::Result<FlashEvent>>,
+    /// Function to parse `SetFeeProtocol` events from RPC logs.
+    pub parse_fee_protocol_update_event_rpc_fn:
+        Option<fn(SharedDex, &RpcLog) -> anyhow::Result<FeeProtocolUpdateEvent>>,
+    /// Function to parse `CollectProtocol` events from RPC logs.
+    pub parse_fee_protocol_collect_event_rpc_fn:
+        Option<fn(SharedDex, &RpcLog) -> anyhow::Result<FeeProtocolCollectEvent>>,
 }
 
 impl DexExtended {
@@ -87,6 +102,8 @@ impl DexExtended {
             parse_burn_event_hypersync_fn: None,
             parse_collect_event_hypersync_fn: None,
             parse_flash_event_hypersync_fn: None,
+            parse_fee_protocol_update_event_hypersync_fn: None,
+            parse_fee_protocol_collect_event_hypersync_fn: None,
             // RPC parsers
             parse_pool_created_event_rpc_fn: None,
             parse_initialize_event_rpc_fn: None,
@@ -95,10 +112,10 @@ impl DexExtended {
             parse_burn_event_rpc_fn: None,
             parse_collect_event_rpc_fn: None,
             parse_flash_event_rpc_fn: None,
+            parse_fee_protocol_update_event_rpc_fn: None,
+            parse_fee_protocol_collect_event_rpc_fn: None,
         }
     }
-
-    // ==================== HyperSync Parser Setters ====================
 
     /// Sets the function used to parse pool creation events from HyperSync logs.
     pub fn set_pool_created_event_hypersync_parsing(
@@ -111,7 +128,7 @@ impl DexExtended {
     /// Sets the function used to parse initialize events from HyperSync logs.
     pub fn set_initialize_event_hypersync_parsing(
         &mut self,
-        parse_fn: fn(SharedDex, HypersyncLog) -> anyhow::Result<InitializeEvent>,
+        parse_fn: fn(SharedDex, &HypersyncLog) -> anyhow::Result<InitializeEvent>,
     ) {
         self.parse_initialize_event_hypersync_fn = Some(parse_fn);
     }
@@ -119,7 +136,7 @@ impl DexExtended {
     /// Sets the function used to parse swap events from HyperSync logs.
     pub fn set_swap_event_hypersync_parsing(
         &mut self,
-        parse_fn: fn(SharedDex, HypersyncLog) -> anyhow::Result<SwapEvent>,
+        parse_fn: fn(SharedDex, &HypersyncLog) -> anyhow::Result<SwapEvent>,
     ) {
         self.parse_swap_event_hypersync_fn = Some(parse_fn);
     }
@@ -127,7 +144,7 @@ impl DexExtended {
     /// Sets the function used to parse mint events from HyperSync logs.
     pub fn set_mint_event_hypersync_parsing(
         &mut self,
-        parse_fn: fn(SharedDex, HypersyncLog) -> anyhow::Result<MintEvent>,
+        parse_fn: fn(SharedDex, &HypersyncLog) -> anyhow::Result<MintEvent>,
     ) {
         self.parse_mint_event_hypersync_fn = Some(parse_fn);
     }
@@ -135,7 +152,7 @@ impl DexExtended {
     /// Sets the function used to parse burn events from HyperSync logs.
     pub fn set_burn_event_hypersync_parsing(
         &mut self,
-        parse_fn: fn(SharedDex, HypersyncLog) -> anyhow::Result<BurnEvent>,
+        parse_fn: fn(SharedDex, &HypersyncLog) -> anyhow::Result<BurnEvent>,
     ) {
         self.parse_burn_event_hypersync_fn = Some(parse_fn);
     }
@@ -143,7 +160,7 @@ impl DexExtended {
     /// Sets the function used to parse collect events from HyperSync logs.
     pub fn set_collect_event_hypersync_parsing(
         &mut self,
-        parse_fn: fn(SharedDex, HypersyncLog) -> anyhow::Result<CollectEvent>,
+        parse_fn: fn(SharedDex, &HypersyncLog) -> anyhow::Result<CollectEvent>,
     ) {
         self.parse_collect_event_hypersync_fn = Some(parse_fn);
     }
@@ -151,12 +168,26 @@ impl DexExtended {
     /// Sets the function used to parse flash events from HyperSync logs.
     pub fn set_flash_event_hypersync_parsing(
         &mut self,
-        parse_fn: fn(SharedDex, HypersyncLog) -> anyhow::Result<FlashEvent>,
+        parse_fn: fn(SharedDex, &HypersyncLog) -> anyhow::Result<FlashEvent>,
     ) {
         self.parse_flash_event_hypersync_fn = Some(parse_fn);
     }
 
-    // ==================== RPC Parser Setters ====================
+    /// Sets the function used to parse `SetFeeProtocol` events from HyperSync logs.
+    pub fn set_fee_protocol_update_event_hypersync_parsing(
+        &mut self,
+        parse_fn: fn(SharedDex, &HypersyncLog) -> anyhow::Result<FeeProtocolUpdateEvent>,
+    ) {
+        self.parse_fee_protocol_update_event_hypersync_fn = Some(parse_fn);
+    }
+
+    /// Sets the function used to parse `CollectProtocol` events from HyperSync logs.
+    pub fn set_fee_protocol_collect_event_hypersync_parsing(
+        &mut self,
+        parse_fn: fn(SharedDex, &HypersyncLog) -> anyhow::Result<FeeProtocolCollectEvent>,
+    ) {
+        self.parse_fee_protocol_collect_event_hypersync_fn = Some(parse_fn);
+    }
 
     /// Sets the function used to parse pool creation events from RPC logs.
     pub fn set_pool_created_event_rpc_parsing(
@@ -214,7 +245,21 @@ impl DexExtended {
         self.parse_flash_event_rpc_fn = Some(parse_fn);
     }
 
-    // ==================== HyperSync Parser Dispatch Methods ====================
+    /// Sets the function used to parse `SetFeeProtocol` events from RPC logs.
+    pub fn set_fee_protocol_update_event_rpc_parsing(
+        &mut self,
+        parse_fn: fn(SharedDex, &RpcLog) -> anyhow::Result<FeeProtocolUpdateEvent>,
+    ) {
+        self.parse_fee_protocol_update_event_rpc_fn = Some(parse_fn);
+    }
+
+    /// Sets the function used to parse `CollectProtocol` events from RPC logs.
+    pub fn set_fee_protocol_collect_event_rpc_parsing(
+        &mut self,
+        parse_fn: fn(SharedDex, &RpcLog) -> anyhow::Result<FeeProtocolCollectEvent>,
+    ) {
+        self.parse_fee_protocol_collect_event_rpc_fn = Some(parse_fn);
+    }
 
     /// Parses a pool creation event from a HyperSync log.
     ///
@@ -241,7 +286,7 @@ impl DexExtended {
     /// # Errors
     ///
     /// Returns an error if the DEX does not have a HyperSync swap event parser defined or if parsing fails.
-    pub fn parse_swap_event_hypersync(&self, log: HypersyncLog) -> anyhow::Result<SwapEvent> {
+    pub fn parse_swap_event_hypersync(&self, log: &HypersyncLog) -> anyhow::Result<SwapEvent> {
         if let Some(parse_fn) = &self.parse_swap_event_hypersync_fn {
             parse_fn(self.dex.clone(), log)
         } else {
@@ -258,7 +303,7 @@ impl DexExtended {
     /// # Errors
     ///
     /// Returns an error if the DEX does not have a HyperSync mint event parser defined or if parsing fails.
-    pub fn parse_mint_event_hypersync(&self, log: HypersyncLog) -> anyhow::Result<MintEvent> {
+    pub fn parse_mint_event_hypersync(&self, log: &HypersyncLog) -> anyhow::Result<MintEvent> {
         if let Some(parse_fn) = &self.parse_mint_event_hypersync_fn {
             parse_fn(self.dex.clone(), log)
         } else {
@@ -275,7 +320,7 @@ impl DexExtended {
     /// # Errors
     ///
     /// Returns an error if the DEX does not have a HyperSync burn event parser defined or if parsing fails.
-    pub fn parse_burn_event_hypersync(&self, log: HypersyncLog) -> anyhow::Result<BurnEvent> {
+    pub fn parse_burn_event_hypersync(&self, log: &HypersyncLog) -> anyhow::Result<BurnEvent> {
         if let Some(parse_fn) = &self.parse_burn_event_hypersync_fn {
             parse_fn(self.dex.clone(), log)
         } else {
@@ -294,7 +339,7 @@ impl DexExtended {
     /// Returns an error if the DEX does not have a HyperSync initialize event parser defined or if parsing fails.
     pub fn parse_initialize_event_hypersync(
         &self,
-        log: HypersyncLog,
+        log: &HypersyncLog,
     ) -> anyhow::Result<InitializeEvent> {
         if let Some(parse_fn) = &self.parse_initialize_event_hypersync_fn {
             parse_fn(self.dex.clone(), log)
@@ -312,7 +357,10 @@ impl DexExtended {
     /// # Errors
     ///
     /// Returns an error if the DEX does not have a HyperSync collect event parser defined or if parsing fails.
-    pub fn parse_collect_event_hypersync(&self, log: HypersyncLog) -> anyhow::Result<CollectEvent> {
+    pub fn parse_collect_event_hypersync(
+        &self,
+        log: &HypersyncLog,
+    ) -> anyhow::Result<CollectEvent> {
         if let Some(parse_fn) = &self.parse_collect_event_hypersync_fn {
             parse_fn(self.dex.clone(), log)
         } else {
@@ -329,7 +377,7 @@ impl DexExtended {
     /// # Errors
     ///
     /// Returns an error if the DEX does not have a HyperSync flash event parser defined or if parsing fails.
-    pub fn parse_flash_event_hypersync(&self, log: HypersyncLog) -> anyhow::Result<FlashEvent> {
+    pub fn parse_flash_event_hypersync(&self, log: &HypersyncLog) -> anyhow::Result<FlashEvent> {
         if let Some(parse_fn) = &self.parse_flash_event_hypersync_fn {
             parse_fn(self.dex.clone(), log)
         } else {
@@ -341,7 +389,45 @@ impl DexExtended {
         }
     }
 
-    // ==================== RPC Parser Dispatch Methods ====================
+    /// Parses a `SetFeeProtocol` event from a HyperSync log.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the DEX does not have a HyperSync `SetFeeProtocol` event parser defined or if parsing fails.
+    pub fn parse_fee_protocol_update_event_hypersync(
+        &self,
+        log: &HypersyncLog,
+    ) -> anyhow::Result<FeeProtocolUpdateEvent> {
+        if let Some(parse_fn) = &self.parse_fee_protocol_update_event_hypersync_fn {
+            parse_fn(self.dex.clone(), log)
+        } else {
+            anyhow::bail!(
+                "HyperSync parsing of SetFeeProtocol event is not defined in this dex: {}:{}",
+                self.dex.chain,
+                self.dex.name
+            )
+        }
+    }
+
+    /// Parses a `CollectProtocol` event from a HyperSync log.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the DEX does not have a HyperSync `CollectProtocol` event parser defined or if parsing fails.
+    pub fn parse_fee_protocol_collect_event_hypersync(
+        &self,
+        log: &HypersyncLog,
+    ) -> anyhow::Result<FeeProtocolCollectEvent> {
+        if let Some(parse_fn) = &self.parse_fee_protocol_collect_event_hypersync_fn {
+            parse_fn(self.dex.clone(), log)
+        } else {
+            anyhow::bail!(
+                "HyperSync parsing of CollectProtocol event is not defined in this dex: {}:{}",
+                self.dex.chain,
+                self.dex.name
+            )
+        }
+    }
 
     /// Parses a pool creation event from an RPC log.
     ///
@@ -462,12 +548,105 @@ impl DexExtended {
         }
     }
 
-    // ==================== Utility Methods ====================
+    /// Parses a `SetFeeProtocol` event from an RPC log.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the DEX does not have an RPC `SetFeeProtocol` event parser defined or if parsing fails.
+    pub fn parse_fee_protocol_update_event_rpc(
+        &self,
+        log: &RpcLog,
+    ) -> anyhow::Result<FeeProtocolUpdateEvent> {
+        if let Some(parse_fn) = &self.parse_fee_protocol_update_event_rpc_fn {
+            parse_fn(self.dex.clone(), log)
+        } else {
+            anyhow::bail!(
+                "RPC parsing of SetFeeProtocol event is not defined in this dex: {}:{}",
+                self.dex.chain,
+                self.dex.name
+            )
+        }
+    }
+
+    /// Parses a `CollectProtocol` event from an RPC log.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the DEX does not have an RPC `CollectProtocol` event parser defined or if parsing fails.
+    pub fn parse_fee_protocol_collect_event_rpc(
+        &self,
+        log: &RpcLog,
+    ) -> anyhow::Result<FeeProtocolCollectEvent> {
+        if let Some(parse_fn) = &self.parse_fee_protocol_collect_event_rpc_fn {
+            parse_fn(self.dex.clone(), log)
+        } else {
+            anyhow::bail!(
+                "RPC parsing of CollectProtocol event is not defined in this dex: {}:{}",
+                self.dex.chain,
+                self.dex.name
+            )
+        }
+    }
 
     /// Checks if this DEX requires pool initialization events.
     #[must_use]
     pub fn needs_initialization(&self) -> bool {
         self.dex.initialize_event.is_some()
+    }
+
+    /// Returns `true` if this DEX can discover pools from HyperSync `PoolCreated` logs.
+    ///
+    /// `sync-dex` streams `PoolCreated` logs to populate the pool set, so a DEX without this
+    /// parser cannot be synced.
+    #[must_use]
+    pub fn supports_pool_discovery(&self) -> bool {
+        self.parse_pool_created_event_hypersync_fn.is_some()
+    }
+
+    /// Returns the pool-event families required to build snapshots that this DEX cannot parse
+    /// from HyperSync logs.
+    ///
+    /// `analyze-pool(s)` sync and profile a pool's swap, liquidity, and fee events and seed the
+    /// starting price from `Initialize`, so a registered DEX missing any of these parsers cannot
+    /// produce snapshots. An empty result means analysis can run.
+    #[must_use]
+    pub fn missing_pool_analysis_parsers(&self) -> Vec<PoolEventKind> {
+        [
+            (
+                PoolEventKind::Initialize,
+                self.parse_initialize_event_hypersync_fn.is_some(),
+            ),
+            (
+                PoolEventKind::Swap,
+                self.parse_swap_event_hypersync_fn.is_some(),
+            ),
+            (
+                PoolEventKind::Mint,
+                self.parse_mint_event_hypersync_fn.is_some(),
+            ),
+            (
+                PoolEventKind::Burn,
+                self.parse_burn_event_hypersync_fn.is_some(),
+            ),
+            (
+                PoolEventKind::Collect,
+                self.parse_collect_event_hypersync_fn.is_some(),
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(kind, present)| (!present).then_some(kind))
+        .collect()
+    }
+
+    /// Returns `true` if replay keeps this DEX's `fee_protocol` correct across replayed events.
+    ///
+    /// A snapshot-capable DEX that also parses `SetFeeProtocol` applies fee-protocol changes during
+    /// replay, so LP-versus-protocol fee splitting stays correct. A DEX without the parser still
+    /// produces usable snapshots but cannot track later `SetFeeProtocol` updates.
+    #[must_use]
+    pub fn supports_fee_protocol_replay(&self) -> bool {
+        self.missing_pool_analysis_parsers().is_empty()
+            && self.parse_fee_protocol_update_event_hypersync_fn.is_some()
     }
 }
 

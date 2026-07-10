@@ -1,5 +1,9 @@
-# Pin to specific digest for supply-chain security (python:3.13-slim as of 2025-11-29)
-FROM python@sha256:326df678c20c78d465db501563f3492d17c42a4afe33a1f2bf5406a1d56b0e86 AS base
+FROM public.ecr.aws/docker/library/rust:1.97.0-slim-bookworm@sha256:cfbb0e0ef7a73e736386bfa346f1cb0503c6d162969dc9426fb37834f3f64c25 AS rust-toolchain
+
+# Pin to specific digest for supply-chain security (python:3.13-slim as of 2026-04-30).
+# Keep the version tag: scripts/ci/check-docker-toolchain-pins.bash treats it as the
+# canonical Docker Python version and aligns the site-packages paths below to it.
+FROM public.ecr.aws/docker/library/python:3.13-slim@sha256:a0779d7c12fc20be6ec6b4ddc901a4fd7657b8a6bc9def9d3fde89ed5efe0a3d AS base
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=off \
@@ -7,26 +11,28 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_DEFAULT_TIMEOUT=100 \
     PYO3_PYTHON="/usr/local/bin/python3" \
     PYSETUP_PATH="/opt/pysetup" \
-    RUSTUP_TOOLCHAIN="stable" \
+    CARGO_HOME="/usr/local/cargo" \
+    RUSTUP_HOME="/usr/local/rustup" \
     BUILD_MODE="release" \
     CC="clang"
-ENV PATH="/root/.local/bin:/root/.cargo/bin:$PATH"
+ENV PATH="/root/.local/bin:/usr/local/cargo/bin:$PATH"
 WORKDIR $PYSETUP_PATH
 
 FROM base AS builder
 
 # Install build deps
 RUN apt-get update && \
-    apt-get install -y curl clang git make pkg-config capnproto libcapnp-dev && \
+    apt-get install -y curl clang lld git make pkg-config capnproto libcapnp-dev && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
 # Install Rust
-RUN curl https://sh.rustup.rs -sSf | bash -s -- -y
+COPY --from=rust-toolchain /usr/local/cargo /usr/local/cargo
+COPY --from=rust-toolchain /usr/local/rustup /usr/local/rustup
 
 # Install UV
-COPY uv-version ./
-RUN UV_VERSION=$(cat uv-version) && curl -LsSf https://astral.sh/uv/$UV_VERSION/install.sh | sh
+COPY --from=ghcr.io/astral-sh/uv:0.11.26@sha256:3d868e555f8f1dbc324afa005066cd11e1053fc4743b9808ca8025283e65efa5 \
+  /uv /uvx /root/.local/bin/
 
 # Install package requirements
 COPY uv.lock pyproject.toml build.py ./
@@ -36,6 +42,8 @@ RUN uv sync --no-install-package nautilus_trader
 COPY Cargo.toml ./
 COPY Cargo.lock ./
 COPY crates ./crates
+COPY patches ./patches
+COPY examples/tutorials ./examples/tutorials
 RUN cargo build --lib --release --all-features
 
 COPY nautilus_trader ./nautilus_trader

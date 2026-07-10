@@ -1,5 +1,5 @@
 # -------------------------------------------------------------------------------------------------
-#  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+#  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 #  https://nautechsystems.io
 #
 #  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -16,6 +16,7 @@
 import asyncio
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
+from unittest.mock import patch
 
 import pytest
 from ibapi.const import NO_VALID_ID
@@ -61,12 +62,46 @@ async def test_connect_fail(ib_client):
 
     await ib_client._connect()
 
-    ib_client._eclient.wrapper.error.assert_called_with(
-        NO_VALID_ID,
-        CONNECT_FAIL.code(),
-        CONNECT_FAIL.msg(),
-    )
+    # Check that error was called with correct parameters (allowing any timestamp)
+    ib_client._eclient.wrapper.error.assert_called()
+    call_args = ib_client._eclient.wrapper.error.call_args[0]
+    assert call_args[0] == NO_VALID_ID
+    assert isinstance(call_args[1], int)  # errorTime should be an integer timestamp
+    assert call_args[2] == CONNECT_FAIL.code()
+    assert call_args[3] == CONNECT_FAIL.msg()
     ib_client._handle_reconnect.assert_not_awaited()
+
+
+def test_initialize_connection_params_uses_configured_client_id(ib_client):
+    # Arrange
+    ib_client._configured_client_id = 0
+    ib_client._client_id = 8765
+
+    # Act
+    ib_client._initialize_connection_params()
+
+    # Assert
+    assert ib_client._client_id == 0
+    assert ib_client._eclient.clientId == 0
+
+
+def test_initialize_connection_params_randomizes_client_id_after_326(ib_client):
+    # Arrange
+    ib_client._configured_client_id = 4321
+    ib_client._client_id = 8765
+    ib_client._randomize_client_id_on_next_connect = True
+
+    # Act
+    with patch(
+        "nautilus_trader.adapters.interactive_brokers.client.connection.secrets.randbelow",
+        side_effect=[3321, 7765, 1357],
+    ):
+        ib_client._initialize_connection_params()
+
+    # Assert
+    assert ib_client._client_id == 2357
+    assert ib_client._eclient.clientId == 2357
+    assert ib_client._randomize_client_id_on_next_connect is False
 
 
 # Test for successful reconnection

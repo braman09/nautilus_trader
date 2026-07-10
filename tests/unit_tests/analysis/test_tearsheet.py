@@ -1,5 +1,5 @@
 # -------------------------------------------------------------------------------------------------
-#  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+#  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 #  https://nautechsystems.io
 #
 #  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -13,6 +13,8 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 
+from types import SimpleNamespace
+
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
@@ -20,16 +22,27 @@ import pytest
 
 from nautilus_trader.analysis.config import GridLayout
 from nautilus_trader.analysis.config import TearsheetConfig
+from nautilus_trader.analysis.config import TearsheetDistributionChart
+from nautilus_trader.analysis.config import TearsheetDrawdownChart
+from nautilus_trader.analysis.config import TearsheetEquityChart
+from nautilus_trader.analysis.config import TearsheetMonthlyReturnsChart
+from nautilus_trader.analysis.config import TearsheetRunInfoChart
+from nautilus_trader.analysis.config import TearsheetStatsTableChart
+from nautilus_trader.analysis.config import TearsheetYearlyReturnsChart
 from nautilus_trader.analysis.tearsheet import PLOTLY_AVAILABLE
+from nautilus_trader.analysis.tearsheet import _aggregate_period_returns
+from nautilus_trader.analysis.tearsheet import _calculate_account_returns
 from nautilus_trader.analysis.tearsheet import _create_stats_table
 from nautilus_trader.analysis.tearsheet import _create_tearsheet_figure
 from nautilus_trader.analysis.tearsheet import _normalize_theme_config
+from nautilus_trader.analysis.tearsheet import _resolve_tearsheet_returns
 from nautilus_trader.analysis.tearsheet import create_drawdown_chart
 from nautilus_trader.analysis.tearsheet import create_equity_curve
 from nautilus_trader.analysis.tearsheet import create_monthly_returns_heatmap
 from nautilus_trader.analysis.tearsheet import create_returns_distribution
 from nautilus_trader.analysis.tearsheet import create_tearsheet
 from nautilus_trader.analysis.tearsheet import create_tearsheet_from_stats
+from nautilus_trader.analysis.tearsheet import create_yearly_returns
 from nautilus_trader.analysis.tearsheet import get_chart
 from nautilus_trader.analysis.tearsheet import list_charts
 from nautilus_trader.analysis.tearsheet import register_chart
@@ -73,6 +86,151 @@ def sample_stats():
         "Win Rate": 0.55,
         "Total Return": 0.25,
     }
+
+
+@pytest.fixture
+def two_month_returns():
+    """
+    Two single-day returns of +10%, one in each of two consecutive months.
+
+    The running equity index ends each month at 1.10 then 1.21, so the compounded
+    monthly returns are [10%, 10%] while the simple (fixed-base) monthly returns are
+    [10%, 11%]. Both reconcile to a 21% total return.
+
+    """
+    index = pd.to_datetime(["2024-01-31", "2024-02-29"])
+    return pd.Series([0.10, 0.10], index=index)
+
+
+def test_aggregate_period_returns_compounding_uses_running_base(two_month_returns):
+    # Act
+    result = _aggregate_period_returns(two_month_returns, "ME", compounding=True)
+
+    # Assert
+    assert result.tolist() == pytest.approx([10.0, 10.0])
+
+
+def test_aggregate_period_returns_simple_uses_fixed_initial_base(two_month_returns):
+    # Act
+    result = _aggregate_period_returns(two_month_returns, "ME", compounding=False)
+
+    # Assert
+    assert result.tolist() == pytest.approx([10.0, 11.0])
+
+
+def test_aggregate_period_returns_simple_sums_to_total_return(two_month_returns):
+    # Arrange
+    total = ((1 + two_month_returns).prod() - 1) * 100  # 21%
+
+    # Act
+    simple = _aggregate_period_returns(two_month_returns, "ME", compounding=False)
+    compounded = _aggregate_period_returns(two_month_returns, "ME", compounding=True)
+
+    # Assert
+    assert simple.sum() == pytest.approx(total)
+    assert ((1 + compounded / 100).prod() - 1) * 100 == pytest.approx(total)
+
+
+def test_aggregate_period_returns_simple_is_order_independent():
+    # Arrange: same two returns as the sorted fixture, but rows out of date order
+    unsorted = pd.Series([0.10, 0.10], index=pd.to_datetime(["2024-02-29", "2024-01-31"]))
+
+    # Act
+    result = _aggregate_period_returns(unsorted, "ME", compounding=False)
+
+    # Assert: Jan == 10%, Feb == 11% regardless of input row order
+    assert result.tolist() == pytest.approx([10.0, 11.0])
+
+
+@pytest.mark.parametrize("compounding", [True, False])
+def test_aggregate_period_returns_empty_interior_period_is_zero(compounding):
+    # Arrange: Jan and Mar have returns, Feb has none (an empty interior month)
+    returns = pd.Series(
+        [0.10, 0.10],
+        index=pd.to_datetime(["2024-01-31", "2024-03-31"]),
+    )
+
+    # Act
+    result = _aggregate_period_returns(returns, "ME", compounding=compounding)
+
+    # Assert: the empty month carries no gain (no NaN) in both modes
+    assert list(result.index.month) == [1, 2, 3]
+    assert result.iloc[1] == pytest.approx(0.0)
+    assert not result.isna().any()
+
+
+def test_aggregate_period_returns_single_period_modes_match():
+    # Arrange
+    returns = pd.Series([0.10], index=pd.to_datetime(["2024-01-31"]))
+
+    # Act
+    compounded = _aggregate_period_returns(returns, "ME", compounding=True)
+    simple = _aggregate_period_returns(returns, "ME", compounding=False)
+
+    # Assert
+    assert compounded.tolist() == pytest.approx([10.0])
+    assert simple.tolist() == pytest.approx([10.0])
+
+
+def test_monthly_returns_chart_compounding_kwarg():
+    # Assert
+    assert TearsheetMonthlyReturnsChart().kwargs() == {"compounding": True}
+    assert TearsheetMonthlyReturnsChart(compounding=False).kwargs() == {"compounding": False}
+
+
+def test_yearly_returns_chart_compounding_kwarg():
+    # Assert
+    assert TearsheetYearlyReturnsChart().kwargs() == {"compounding": True}
+    assert TearsheetYearlyReturnsChart(compounding=False).kwargs() == {"compounding": False}
+
+
+def test_create_monthly_returns_heatmap_simple_default_title(two_month_returns):
+    # Act
+    compounded = create_monthly_returns_heatmap(two_month_returns)
+    simple = create_monthly_returns_heatmap(two_month_returns, compounding=False)
+
+    # Assert
+    assert compounded.layout.title.text == "Monthly Returns (%)"
+    assert simple.layout.title.text == "Monthly Returns (% of initial capital)"
+
+
+def test_create_yearly_returns_simple_default_title(two_month_returns):
+    # Act
+    compounded = create_yearly_returns(two_month_returns)
+    simple = create_yearly_returns(two_month_returns, compounding=False)
+
+    # Assert
+    assert compounded.layout.title.text == "Yearly Returns"
+    assert simple.layout.title.text == "Yearly Returns (% of initial capital)"
+
+
+def test_create_monthly_returns_heatmap_explicit_title_preserved(two_month_returns):
+    # Act
+    fig = create_monthly_returns_heatmap(two_month_returns, compounding=False, title="Custom")
+
+    # Assert
+    assert fig.layout.title.text == "Custom"
+
+
+def test_tearsheet_figure_routes_compounding_flag_to_renderer(two_month_returns):
+    # Arrange
+    config = TearsheetConfig(charts=[TearsheetMonthlyReturnsChart(compounding=False)])
+
+    # Act
+    fig = _create_tearsheet_figure(
+        stats_returns={},
+        stats_general={},
+        stats_pnls={},
+        returns=two_month_returns,
+        title="Routing",
+        config=config,
+    )
+
+    # Assert
+    heatmaps = [trace for trace in fig.data if trace.type == "heatmap"]
+    assert len(heatmaps) == 1
+    # Jan (fixed base) == 10%, Feb (fixed base) == 11%
+    assert heatmaps[0].z[0] == pytest.approx([10.0, 11.0])
 
 
 def test_create_equity_curve_with_valid_data(sample_returns, tmp_path):
@@ -204,6 +362,178 @@ def test_create_monthly_returns_heatmap_with_empty_returns():
 
     # Assert
     assert fig is not None
+
+
+def test_calculate_account_returns_uses_account_balance_changes(monkeypatch):
+    # Arrange
+    account_report = pd.DataFrame(
+        {
+            "currency": ["USD", "USD", "USD"],
+            "total": ["100000.00", "100899.00", "105000.00"],
+        },
+        index=pd.to_datetime(["2024-01-01", "2024-01-10", "2024-01-31"]),
+    )
+
+    monkeypatch.setattr(
+        "nautilus_trader.analysis.reporter.ReportProvider.generate_account_report",
+        lambda account: account_report,
+    )
+
+    mock_engine = SimpleNamespace(
+        kernel=SimpleNamespace(
+            cache=SimpleNamespace(accounts=lambda: [object()]),
+        ),
+    )
+
+    # Act
+    result = _calculate_account_returns(engine=mock_engine, currency=USD)
+
+    # Assert
+    assert result is not None
+    assert result.loc[pd.Timestamp("2024-01-10")] == pytest.approx(0.00899)
+    assert result.loc[pd.Timestamp("2024-01-11")] == pytest.approx(0.0)
+    assert ((1 + result).prod() - 1) == pytest.approx(0.05)
+
+
+def test_calculate_account_returns_filters_non_finite_values(monkeypatch):
+    # Arrange
+    account_report = pd.DataFrame(
+        {
+            "currency": ["USD", "USD", "USD"],
+            "total": ["0.00", "100000.00", "105000.00"],
+        },
+        index=pd.to_datetime(["2024-01-01", "2024-01-10", "2024-01-31"]),
+    )
+
+    monkeypatch.setattr(
+        "nautilus_trader.analysis.reporter.ReportProvider.generate_account_report",
+        lambda account: account_report,
+    )
+
+    mock_engine = SimpleNamespace(
+        kernel=SimpleNamespace(
+            cache=SimpleNamespace(accounts=lambda: [object()]),
+        ),
+    )
+
+    # Act
+    result = _calculate_account_returns(engine=mock_engine, currency=USD)
+
+    # Assert
+    assert result is not None
+    assert np.isfinite(result.to_numpy()).all()
+    assert result.loc[pd.Timestamp("2024-01-31")] == pytest.approx(0.05)
+
+
+def test_create_tearsheet_uses_account_returns_instead_of_analyzer_returns(monkeypatch):
+    # Arrange
+    analyzer_returns = pd.Series([0.001], index=pd.to_datetime(["2024-01-31"]))
+    account_returns = pd.Series([0.02], index=pd.to_datetime(["2024-01-31"]))
+    captured = {}
+
+    monkeypatch.setattr(
+        "nautilus_trader.analysis.tearsheet._calculate_account_returns",
+        lambda engine, currency=None: account_returns,
+    )
+
+    def fake_create_tearsheet_from_stats(*, returns, **kwargs):
+        captured["returns"] = returns
+        return "html"
+
+    monkeypatch.setattr(
+        "nautilus_trader.analysis.tearsheet.create_tearsheet_from_stats",
+        fake_create_tearsheet_from_stats,
+    )
+
+    class MockAnalyzer:
+        currencies = [USD]
+        _account_balances_starting = {}
+        _account_balances = {}
+
+        def get_performance_stats_returns(self):
+            return {}
+
+        def get_performance_stats_general(self):
+            return {}
+
+        def get_performance_stats_pnls(self, currency=None):
+            return {}
+
+        def returns(self):
+            return analyzer_returns
+
+        def portfolio_returns(self):
+            return pd.Series(dtype=float)
+
+    mock_engine = SimpleNamespace(
+        portfolio=SimpleNamespace(analyzer=MockAnalyzer()),
+        trader=SimpleNamespace(strategy_ids=list),
+        kernel=SimpleNamespace(
+            exec_engine=SimpleNamespace(event_count=0),
+            cache=SimpleNamespace(
+                orders_total_count=lambda: 0,
+                positions=list,
+                position_snapshots=list,
+            ),
+        ),
+        run_started=None,
+        run_finished=None,
+        backtest_start=None,
+        backtest_end=None,
+        run_id="BACKTEST-001",
+        iteration=0,
+    )
+
+    # Act
+    result = create_tearsheet(mock_engine, output_path=None, title="Test Tearsheet")
+
+    # Assert
+    assert result == "html"
+    pd.testing.assert_series_equal(captured["returns"], account_returns)
+
+
+def test_resolve_tearsheet_returns_falls_back_to_analyzer_returns(monkeypatch):
+    # Arrange
+    analyzer_returns = pd.Series([0.01], index=pd.to_datetime(["2024-01-31"]))
+
+    monkeypatch.setattr(
+        "nautilus_trader.analysis.tearsheet._calculate_account_returns",
+        lambda engine, currency=None: None,
+    )
+
+    # Act
+    result = _resolve_tearsheet_returns(
+        analyzer=SimpleNamespace(
+            returns=lambda: analyzer_returns,
+            portfolio_returns=lambda: pd.Series(dtype=float),
+        ),
+        engine=SimpleNamespace(),
+    )
+
+    # Assert
+    pd.testing.assert_series_equal(result, analyzer_returns)
+
+
+def test_resolve_tearsheet_returns_prefers_analyzer_portfolio_returns(monkeypatch):
+    # Arrange
+    portfolio_returns = pd.Series([0.02], index=pd.to_datetime(["2024-01-31"]))
+
+    monkeypatch.setattr(
+        "nautilus_trader.analysis.tearsheet._calculate_account_returns",
+        lambda engine, currency=None: pd.Series([0.01], index=pd.to_datetime(["2024-01-31"])),
+    )
+
+    # Act
+    result = _resolve_tearsheet_returns(
+        analyzer=SimpleNamespace(
+            returns=lambda: pd.Series([0.03], index=pd.to_datetime(["2024-01-31"])),
+            portfolio_returns=lambda: portfolio_returns,
+        ),
+        engine=SimpleNamespace(),
+    )
+
+    # Assert
+    pd.testing.assert_series_equal(result, portfolio_returns)
 
 
 def test_create_returns_distribution_with_valid_data(sample_returns, tmp_path):
@@ -397,7 +727,6 @@ def test_create_tearsheet_from_stats_saves_file(sample_returns, sample_stats, tm
     assert output_path.exists()
 
 
-
 def test_get_theme_with_valid_name():
     # Arrange
     # Act
@@ -539,7 +868,6 @@ def test_theme_normalization_handles_dark_backgrounds():
     assert normalized["colors"]["table_text"] == "#eeeeee"
 
 
-
 def test_register_chart_and_retrieve():
     # Arrange
     def custom_chart(returns, output_path=None, title="Custom", theme="plotly_white"):
@@ -587,7 +915,6 @@ def test_list_charts_returns_all_registered_charts():
     assert "yearly_returns" in charts
 
 
-
 def test_tearsheet_config_with_defaults():
     # Arrange
     # Act
@@ -605,14 +932,14 @@ def test_tearsheet_config_with_custom_values():
     # Arrange
     # Act
     config = TearsheetConfig(
-        charts=["equity", "drawdown"],
+        charts=[TearsheetEquityChart(), TearsheetDrawdownChart()],
         theme="nautilus_dark",
         height=2000,
         title="Custom Title",
     )
 
     # Assert
-    assert config.charts == ["equity", "drawdown"]
+    assert config.chart_names == ["equity", "drawdown"]
     assert config.theme == "nautilus_dark"
     assert config.height == 2000
     assert config.title == "Custom Title"
@@ -643,7 +970,12 @@ def test_tearsheet_config_with_grid_layout():
 
     # Act
     config = TearsheetConfig(
-        charts=["equity", "drawdown", "monthly_returns", "distribution"],
+        charts=[
+            TearsheetEquityChart(),
+            TearsheetDrawdownChart(),
+            TearsheetMonthlyReturnsChart(),
+            TearsheetDistributionChart(),
+        ],
         layout=layout,
     )
 
@@ -651,7 +983,6 @@ def test_tearsheet_config_with_grid_layout():
     assert config.layout is not None
     assert config.layout.rows == 2
     assert config.layout.cols == 2
-
 
 
 def test_single_currency_pnl_stats(sample_returns):
@@ -698,11 +1029,14 @@ def test_multi_currency_pnl_stats(sample_returns):
     assert isinstance(html, str)
 
 
-
 def test_run_info_filtered_when_no_metadata(sample_returns):
     # Arrange
     config = TearsheetConfig(
-        charts=["run_info", "stats_table", "equity"],  # Explicitly include run_info
+        charts=[
+            TearsheetRunInfoChart(),
+            TearsheetStatsTableChart(),
+            TearsheetEquityChart(),
+        ],  # Explicitly include run_info
     )
 
     # Act - pass no run_info or account_info
@@ -725,7 +1059,11 @@ def test_run_info_filtered_when_no_metadata(sample_returns):
 def test_run_info_kept_when_metadata_provided(sample_returns):
     # Arrange
     config = TearsheetConfig(
-        charts=["run_info", "stats_table", "equity"],
+        charts=[
+            TearsheetRunInfoChart(),
+            TearsheetStatsTableChart(),
+            TearsheetEquityChart(),
+        ],
     )
 
     run_info = {
@@ -753,7 +1091,11 @@ def test_run_info_kept_when_metadata_provided(sample_returns):
 def test_run_info_kept_when_account_info_provided(sample_returns):
     # Arrange
     config = TearsheetConfig(
-        charts=["run_info", "stats_table", "equity"],
+        charts=[
+            TearsheetRunInfoChart(),
+            TearsheetStatsTableChart(),
+            TearsheetEquityChart(),
+        ],
     )
 
     account_info = {
@@ -778,7 +1120,6 @@ def test_run_info_kept_when_account_info_provided(sample_returns):
     assert "Starting Balance" in html or "1,000,000 USD" in html
 
 
-
 def test_tearsheet_with_benchmark_overlay(sample_returns):
     # Arrange
     # Create benchmark returns
@@ -789,7 +1130,7 @@ def test_tearsheet_with_benchmark_overlay(sample_returns):
     )
 
     config = TearsheetConfig(
-        charts=["equity"],
+        charts=[TearsheetEquityChart()],
         include_benchmark=True,
         benchmark_name="S&P 500",
     )
@@ -821,7 +1162,12 @@ def test_tearsheet_with_custom_grid_layout(sample_returns):
     )
 
     config = TearsheetConfig(
-        charts=["stats_table", "equity", "drawdown", "distribution"],
+        charts=[
+            TearsheetStatsTableChart(),
+            TearsheetEquityChart(),
+            TearsheetDrawdownChart(),
+            TearsheetDistributionChart(),
+        ],
         layout=layout,
     )
 
@@ -874,7 +1220,7 @@ def test_tearsheet_with_all_themes(sample_returns):
     # Act & Assert
     for theme in themes:
         config = TearsheetConfig(
-            charts=["equity"],
+            charts=[TearsheetEquityChart()],
             theme=theme,
         )
 

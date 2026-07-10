@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -21,7 +21,7 @@ use std::{
     sync::Arc,
 };
 
-use nautilus_core::python::to_pyvalue_err;
+use nautilus_core::python::{IntoPyObjectNautilusExt, to_pyvalue_err};
 use pyo3::{basic::CompareOp, prelude::*};
 
 use crate::{
@@ -29,15 +29,42 @@ use crate::{
         Chain, Dex,
         chain::Blockchain,
         data::{
-            Block, PoolFeeCollect, PoolFlash, PoolLiquidityUpdate, PoolLiquidityUpdateType,
-            PoolSwap, Transaction,
+            Block, DefiData, PoolFeeCollect, PoolFeeProtocolCollect, PoolFeeProtocolUpdate,
+            PoolFlash, PoolLiquidityUpdate, PoolLiquidityUpdateType, PoolSwap, Transaction,
         },
     },
     identifiers::InstrumentId,
 };
 
 #[pymethods]
+#[pyo3_stub_gen::derive::gen_stub_pymethods]
 impl Block {
+    /// Represents an Ethereum-compatible blockchain block with essential metadata.
+    #[new]
+    #[expect(clippy::too_many_arguments)]
+    fn py_new(
+        chain: Blockchain,
+        hash: String,
+        parent_hash: String,
+        number: u64,
+        miner: String,
+        gas_limit: u64,
+        gas_used: u64,
+        timestamp: u64,
+    ) -> Self {
+        Self::new(
+            hash,
+            parent_hash,
+            number,
+            miner.into(),
+            gas_limit,
+            gas_used,
+            timestamp.into(),
+            Some(chain),
+        )
+    }
+
+    /// Returns the blockchain for this block.
     #[getter]
     #[pyo3(name = "chain")]
     fn py_chain(&self) -> Option<Blockchain> {
@@ -122,6 +149,18 @@ impl Block {
         self.timestamp.as_u64()
     }
 
+    #[getter]
+    #[pyo3(name = "ts_event")]
+    fn py_ts_event(&self) -> u64 {
+        self.timestamp.as_u64()
+    }
+
+    #[getter]
+    #[pyo3(name = "ts_init")]
+    fn py_ts_init(&self) -> u64 {
+        self.timestamp.as_u64()
+    }
+
     fn __str__(&self) -> String {
         self.to_string()
     }
@@ -138,9 +177,67 @@ impl Block {
 }
 
 #[pymethods]
+#[pyo3_stub_gen::derive::gen_stub_pymethods]
+impl DefiData {
+    /// Returns the block number associated with this DeFi data.
+    #[getter]
+    #[pyo3(name = "block_number")]
+    fn py_block_number(&self) -> u64 {
+        self.block_number()
+    }
+
+    /// Returns the transaction index associated with this DeFi data.
+    #[getter]
+    #[pyo3(name = "transaction_index")]
+    fn py_transaction_index(&self) -> u32 {
+        self.transaction_index()
+    }
+
+    /// Returns the log index associated with this DeFi data.
+    #[getter]
+    #[pyo3(name = "log_index")]
+    fn py_log_index(&self) -> u32 {
+        self.log_index()
+    }
+
+    /// Returns the event timestamp associated with this DeFi data.
+    #[getter]
+    #[pyo3(name = "timestamp")]
+    fn py_timestamp(&self) -> u64 {
+        self.timestamp().as_u64()
+    }
+
+    /// Returns the event timestamp associated with this DeFi data.
+    #[getter]
+    #[pyo3(name = "ts_event")]
+    fn py_ts_event(&self) -> u64 {
+        self.ts_event().as_u64()
+    }
+
+    /// Returns the initialization timestamp associated with this DeFi data.
+    #[getter]
+    #[pyo3(name = "ts_init")]
+    fn py_ts_init(&self) -> u64 {
+        self.ts_init().as_u64()
+    }
+
+    /// Returns the block position associated with this DeFi data.
+    #[pyo3(name = "block_position")]
+    fn py_block_position(&self) -> (u64, u32, u32) {
+        self.block_position()
+    }
+}
+
+#[pymethods]
+#[pyo3_stub_gen::derive::gen_stub_pymethods]
 impl PoolSwap {
+    /// Represents a token swap transaction on a decentralized exchange (DEX).
+    ///
+    /// This structure captures both the raw blockchain data from a swap event and
+    /// optionally includes computed market-oriented trade information. It serves as
+    /// the primary data structure for tracking and analyzing DEX swap activity.
     #[new]
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments, clippy::needless_pass_by_value)]
     fn py_new(
         chain: Chain,
         dex: Dex,
@@ -174,7 +271,8 @@ impl PoolSwap {
             transaction_hash,
             transaction_index,
             log_index,
-            Some(timestamp.into()),
+            timestamp.into(), // ts_event
+            timestamp.into(), // ts_init (single Python timestamp)
             sender,
             receiver,
             amount0,
@@ -201,24 +299,24 @@ impl PoolSwap {
         hasher.finish()
     }
 
-    fn __richcmp__(&self, other: &Self, op: CompareOp) -> bool {
+    fn __richcmp__(&self, other: &Self, op: CompareOp, py: Python<'_>) -> Py<PyAny> {
         match op {
-            CompareOp::Eq => self == other,
-            CompareOp::Ne => self != other,
-            _ => panic!("Unsupported comparison for PoolSwap"),
+            CompareOp::Eq => self.eq(other).into_py_any_unwrap(py),
+            CompareOp::Ne => self.ne(other).into_py_any_unwrap(py),
+            _ => py.NotImplemented(),
         }
     }
 
     #[getter]
     #[pyo3(name = "chain")]
-    fn py_chain(&self) -> PyResult<Chain> {
-        Ok(self.chain.as_ref().clone())
+    fn py_chain(&self) -> Chain {
+        self.chain.as_ref().clone()
     }
 
     #[getter]
     #[pyo3(name = "dex")]
-    fn py_dex(&self) -> PyResult<Dex> {
-        Ok(self.dex.as_ref().clone())
+    fn py_dex(&self) -> Dex {
+        self.dex.as_ref().clone()
     }
 
     #[getter]
@@ -264,22 +362,66 @@ impl PoolSwap {
     }
 
     #[getter]
+    #[pyo3(name = "recipient")]
+    fn py_recipient(&self) -> String {
+        self.recipient.to_string()
+    }
+
+    #[getter]
+    #[pyo3(name = "amount0")]
+    fn py_amount0(&self) -> String {
+        self.amount0.to_string()
+    }
+
+    #[getter]
+    #[pyo3(name = "amount1")]
+    fn py_amount1(&self) -> String {
+        self.amount1.to_string()
+    }
+
+    #[getter]
+    #[pyo3(name = "sqrt_price_x96")]
+    fn py_sqrt_price_x96(&self) -> String {
+        self.sqrt_price_x96.to_string()
+    }
+
+    #[getter]
+    #[pyo3(name = "liquidity")]
+    fn py_liquidity(&self) -> String {
+        self.liquidity.to_string()
+    }
+
+    #[getter]
+    #[pyo3(name = "tick")]
+    fn py_tick(&self) -> i32 {
+        self.tick
+    }
+
+    #[getter]
     #[pyo3(name = "timestamp")]
-    fn py_timestamp(&self) -> Option<u64> {
-        self.timestamp.map(|x| x.as_u64())
+    fn py_timestamp(&self) -> u64 {
+        self.ts_event.as_u64()
+    }
+
+    #[getter]
+    #[pyo3(name = "ts_event")]
+    fn py_ts_event(&self) -> u64 {
+        self.ts_event.as_u64()
     }
 
     #[getter]
     #[pyo3(name = "ts_init")]
-    fn py_ts_init(&self) -> Option<u64> {
-        self.ts_init.map(|x| x.as_u64())
+    fn py_ts_init(&self) -> u64 {
+        self.ts_init.as_u64()
     }
 }
 
 #[pymethods]
+#[pyo3_stub_gen::derive::gen_stub_pymethods]
 impl PoolLiquidityUpdate {
+    /// Represents a liquidity update event in a decentralized exchange (DEX) pool.
     #[new]
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments, clippy::needless_pass_by_value)]
     fn py_new(
         chain: Chain,
         dex: Dex,
@@ -325,7 +467,8 @@ impl PoolLiquidityUpdate {
             amount1,
             tick_lower,
             tick_upper,
-            Some(timestamp.into()),
+            timestamp.into(), // ts_event
+            timestamp.into(), // ts_init (single Python timestamp)
         ))
     }
 
@@ -345,24 +488,24 @@ impl PoolLiquidityUpdate {
         hasher.finish()
     }
 
-    fn __richcmp__(&self, other: &Self, op: pyo3::pyclass::CompareOp) -> bool {
+    fn __richcmp__(&self, other: &Self, op: CompareOp, py: Python<'_>) -> Py<PyAny> {
         match op {
-            CompareOp::Eq => self == other,
-            CompareOp::Ne => self != other,
-            _ => panic!("Unsupported comparison for PoolLiquidityUpdate"),
+            CompareOp::Eq => self.eq(other).into_py_any_unwrap(py),
+            CompareOp::Ne => self.ne(other).into_py_any_unwrap(py),
+            _ => py.NotImplemented(),
         }
     }
 
     #[getter]
     #[pyo3(name = "chain")]
-    fn py_chain(&self) -> PyResult<Chain> {
-        Ok(self.chain.as_ref().clone())
+    fn py_chain(&self) -> Chain {
+        self.chain.as_ref().clone()
     }
 
     #[getter]
     #[pyo3(name = "dex")]
-    fn py_dex(&self) -> PyResult<Dex> {
-        Ok(self.dex.as_ref().clone())
+    fn py_dex(&self) -> Dex {
+        self.dex.as_ref().clone()
     }
 
     #[getter]
@@ -451,21 +594,29 @@ impl PoolLiquidityUpdate {
 
     #[getter]
     #[pyo3(name = "timestamp")]
-    fn py_timestamp(&self) -> Option<u64> {
-        self.timestamp.map(|x| x.as_u64())
+    fn py_timestamp(&self) -> u64 {
+        self.ts_event.as_u64()
+    }
+
+    #[getter]
+    #[pyo3(name = "ts_event")]
+    fn py_ts_event(&self) -> u64 {
+        self.ts_event.as_u64()
     }
 
     #[getter]
     #[pyo3(name = "ts_init")]
-    fn py_ts_init(&self) -> Option<u64> {
-        self.ts_init.map(|x| x.as_u64())
+    fn py_ts_init(&self) -> u64 {
+        self.ts_init.as_u64()
     }
 }
 
 #[pymethods]
+#[pyo3_stub_gen::derive::gen_stub_pymethods]
 impl PoolFeeCollect {
+    /// Represents a fee collection event in a decentralized exchange (DEX) pool.
     #[new]
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments, clippy::needless_pass_by_value)]
     fn py_new(
         chain: Chain,
         dex: Dex,
@@ -500,7 +651,8 @@ impl PoolFeeCollect {
             amount1,
             tick_lower,
             tick_upper,
-            Some(timestamp.into()),
+            timestamp.into(), // ts_event
+            timestamp.into(), // ts_init (single Python timestamp)
         ))
     }
 
@@ -520,24 +672,24 @@ impl PoolFeeCollect {
         hasher.finish()
     }
 
-    fn __richcmp__(&self, other: &Self, op: CompareOp) -> bool {
+    fn __richcmp__(&self, other: &Self, op: CompareOp, py: Python<'_>) -> Py<PyAny> {
         match op {
-            CompareOp::Eq => self == other,
-            CompareOp::Ne => self != other,
-            _ => panic!("Unsupported comparison for PoolFeeCollect"),
+            CompareOp::Eq => self.eq(other).into_py_any_unwrap(py),
+            CompareOp::Ne => self.ne(other).into_py_any_unwrap(py),
+            _ => py.NotImplemented(),
         }
     }
 
     #[getter]
     #[pyo3(name = "chain")]
-    fn py_chain(&self) -> PyResult<Chain> {
-        Ok(self.chain.as_ref().clone())
+    fn py_chain(&self) -> Chain {
+        self.chain.as_ref().clone()
     }
 
     #[getter]
     #[pyo3(name = "dex")]
-    fn py_dex(&self) -> PyResult<Dex> {
-        Ok(self.dex.as_ref().clone())
+    fn py_dex(&self) -> Dex {
+        self.dex.as_ref().clone()
     }
 
     #[getter]
@@ -608,21 +760,339 @@ impl PoolFeeCollect {
 
     #[getter]
     #[pyo3(name = "timestamp")]
-    fn py_timestamp(&self) -> Option<u64> {
-        self.timestamp.map(|x| x.as_u64())
+    fn py_timestamp(&self) -> u64 {
+        self.ts_event.as_u64()
+    }
+
+    #[getter]
+    #[pyo3(name = "ts_event")]
+    fn py_ts_event(&self) -> u64 {
+        self.ts_event.as_u64()
     }
 
     #[getter]
     #[pyo3(name = "ts_init")]
-    fn py_ts_init(&self) -> Option<u64> {
-        self.ts_init.map(|x| x.as_u64())
+    fn py_ts_init(&self) -> u64 {
+        self.ts_init.as_u64()
     }
 }
 
 #[pymethods]
-impl PoolFlash {
+#[pyo3_stub_gen::derive::gen_stub_pymethods]
+impl PoolFeeProtocolUpdate {
+    /// Represents a protocol-fee configuration change in a Uniswap V3-style pool.
+    ///
+    /// Emitted by `SetFeeProtocol`, this carries the new protocol-fee values for each token. Uniswap
+    /// V3 uses 4-bit denominators, while PancakeSwap V3 uses `uint32` basis-point shares. Only the new
+    /// values are kept; the previous values in the event are not needed to rebuild state.
     #[new]
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments, clippy::needless_pass_by_value)]
+    fn py_new(
+        chain: Chain,
+        dex: Dex,
+        pool_identifier: String,
+        instrument_id: InstrumentId,
+        block: u64,
+        transaction_hash: String,
+        transaction_index: u32,
+        log_index: u32,
+        fee_protocol0_new: u32,
+        fee_protocol1_new: u32,
+        timestamp: u64,
+    ) -> PyResult<Self> {
+        let pool_identifier = pool_identifier.parse().map_err(to_pyvalue_err)?;
+        Ok(Self::new(
+            Arc::new(chain),
+            Arc::new(dex),
+            instrument_id,
+            pool_identifier,
+            block,
+            transaction_hash,
+            transaction_index,
+            log_index,
+            fee_protocol0_new,
+            fee_protocol1_new,
+            timestamp.into(), // ts_event
+            timestamp.into(), // ts_init (single Python timestamp)
+        ))
+    }
+
+    fn __str__(&self) -> String {
+        self.to_string()
+    }
+
+    fn __repr__(&self) -> String {
+        format!("{self:?}")
+    }
+
+    fn __hash__(&self) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        self.chain.chain_id.hash(&mut hasher);
+        self.transaction_hash.hash(&mut hasher);
+        self.log_index.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    fn __richcmp__(&self, other: &Self, op: CompareOp, py: Python<'_>) -> Py<PyAny> {
+        match op {
+            CompareOp::Eq => self.eq(other).into_py_any_unwrap(py),
+            CompareOp::Ne => self.ne(other).into_py_any_unwrap(py),
+            _ => py.NotImplemented(),
+        }
+    }
+
+    #[getter]
+    #[pyo3(name = "chain")]
+    fn py_chain(&self) -> Chain {
+        self.chain.as_ref().clone()
+    }
+
+    #[getter]
+    #[pyo3(name = "dex")]
+    fn py_dex(&self) -> Dex {
+        self.dex.as_ref().clone()
+    }
+
+    #[getter]
+    #[pyo3(name = "instrument_id")]
+    fn py_instrument_id(&self) -> InstrumentId {
+        self.instrument_id
+    }
+
+    #[getter]
+    #[pyo3(name = "pool_identifier")]
+    fn py_pool_identifier(&self) -> String {
+        self.pool_identifier.to_string()
+    }
+
+    #[getter]
+    #[pyo3(name = "block")]
+    fn py_block(&self) -> u64 {
+        self.block
+    }
+
+    #[getter]
+    #[pyo3(name = "transaction_hash")]
+    fn py_transaction_hash(&self) -> &str {
+        &self.transaction_hash
+    }
+
+    #[getter]
+    #[pyo3(name = "transaction_index")]
+    fn py_transaction_index(&self) -> u32 {
+        self.transaction_index
+    }
+
+    #[getter]
+    #[pyo3(name = "log_index")]
+    fn py_log_index(&self) -> u32 {
+        self.log_index
+    }
+
+    #[getter]
+    #[pyo3(name = "fee_protocol0_new")]
+    fn py_fee_protocol0_new(&self) -> u32 {
+        self.fee_protocol0_new
+    }
+
+    #[getter]
+    #[pyo3(name = "fee_protocol1_new")]
+    fn py_fee_protocol1_new(&self) -> u32 {
+        self.fee_protocol1_new
+    }
+
+    #[getter]
+    #[pyo3(name = "timestamp")]
+    fn py_timestamp(&self) -> u64 {
+        self.ts_event.as_u64()
+    }
+
+    #[getter]
+    #[pyo3(name = "ts_event")]
+    fn py_ts_event(&self) -> u64 {
+        self.ts_event.as_u64()
+    }
+
+    #[getter]
+    #[pyo3(name = "ts_init")]
+    fn py_ts_init(&self) -> u64 {
+        self.ts_init.as_u64()
+    }
+}
+
+#[pymethods]
+#[pyo3_stub_gen::derive::gen_stub_pymethods]
+impl PoolFeeProtocolCollect {
+    /// Represents a protocol-fee withdrawal from a Uniswap V3-style pool.
+    ///
+    /// Emitted by `CollectProtocol`, this carries the protocol-fee amounts withdrawn to the recipient.
+    /// The amounts decrement the pool's accrued protocol-fee balances, leaving the on-chain remainder
+    /// (Uniswap V3 keeps one wei in each slot to save gas).
+    #[new]
+    #[expect(clippy::too_many_arguments, clippy::needless_pass_by_value)]
+    fn py_new(
+        chain: Chain,
+        dex: Dex,
+        pool_identifier: String,
+        instrument_id: InstrumentId,
+        block: u64,
+        transaction_hash: String,
+        transaction_index: u32,
+        log_index: u32,
+        sender: String,
+        recipient: String,
+        amount0: String,
+        amount1: String,
+        timestamp: u64,
+    ) -> PyResult<Self> {
+        let sender = sender.parse().map_err(to_pyvalue_err)?;
+        let recipient = recipient.parse().map_err(to_pyvalue_err)?;
+        let amount0 = amount0.parse().map_err(to_pyvalue_err)?;
+        let amount1 = amount1.parse().map_err(to_pyvalue_err)?;
+        let pool_identifier = pool_identifier.parse().map_err(to_pyvalue_err)?;
+        Ok(Self::new(
+            Arc::new(chain),
+            Arc::new(dex),
+            instrument_id,
+            pool_identifier,
+            block,
+            transaction_hash,
+            transaction_index,
+            log_index,
+            sender,
+            recipient,
+            amount0,
+            amount1,
+            timestamp.into(), // ts_event
+            timestamp.into(), // ts_init (single Python timestamp)
+        ))
+    }
+
+    fn __str__(&self) -> String {
+        self.to_string()
+    }
+
+    fn __repr__(&self) -> String {
+        format!("{self:?}")
+    }
+
+    fn __hash__(&self) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        self.chain.chain_id.hash(&mut hasher);
+        self.transaction_hash.hash(&mut hasher);
+        self.log_index.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    fn __richcmp__(&self, other: &Self, op: CompareOp, py: Python<'_>) -> Py<PyAny> {
+        match op {
+            CompareOp::Eq => self.eq(other).into_py_any_unwrap(py),
+            CompareOp::Ne => self.ne(other).into_py_any_unwrap(py),
+            _ => py.NotImplemented(),
+        }
+    }
+
+    #[getter]
+    #[pyo3(name = "chain")]
+    fn py_chain(&self) -> Chain {
+        self.chain.as_ref().clone()
+    }
+
+    #[getter]
+    #[pyo3(name = "dex")]
+    fn py_dex(&self) -> Dex {
+        self.dex.as_ref().clone()
+    }
+
+    #[getter]
+    #[pyo3(name = "instrument_id")]
+    fn py_instrument_id(&self) -> InstrumentId {
+        self.instrument_id
+    }
+
+    #[getter]
+    #[pyo3(name = "pool_identifier")]
+    fn py_pool_identifier(&self) -> String {
+        self.pool_identifier.to_string()
+    }
+
+    #[getter]
+    #[pyo3(name = "block")]
+    fn py_block(&self) -> u64 {
+        self.block
+    }
+
+    #[getter]
+    #[pyo3(name = "transaction_hash")]
+    fn py_transaction_hash(&self) -> &str {
+        &self.transaction_hash
+    }
+
+    #[getter]
+    #[pyo3(name = "transaction_index")]
+    fn py_transaction_index(&self) -> u32 {
+        self.transaction_index
+    }
+
+    #[getter]
+    #[pyo3(name = "log_index")]
+    fn py_log_index(&self) -> u32 {
+        self.log_index
+    }
+
+    #[getter]
+    #[pyo3(name = "sender")]
+    fn py_sender(&self) -> String {
+        self.sender.to_string()
+    }
+
+    #[getter]
+    #[pyo3(name = "recipient")]
+    fn py_recipient(&self) -> String {
+        self.recipient.to_string()
+    }
+
+    #[getter]
+    #[pyo3(name = "amount0")]
+    fn py_amount0(&self) -> String {
+        self.amount0.to_string()
+    }
+
+    #[getter]
+    #[pyo3(name = "amount1")]
+    fn py_amount1(&self) -> String {
+        self.amount1.to_string()
+    }
+
+    #[getter]
+    #[pyo3(name = "timestamp")]
+    fn py_timestamp(&self) -> u64 {
+        self.ts_event.as_u64()
+    }
+
+    #[getter]
+    #[pyo3(name = "ts_event")]
+    fn py_ts_event(&self) -> u64 {
+        self.ts_event.as_u64()
+    }
+
+    #[getter]
+    #[pyo3(name = "ts_init")]
+    fn py_ts_init(&self) -> u64 {
+        self.ts_init.as_u64()
+    }
+}
+
+#[pymethods]
+#[pyo3_stub_gen::derive::gen_stub_pymethods]
+impl PoolFlash {
+    /// Represents a flash loan event from a Uniswap V3 pool.
+    ///
+    /// Flash loans allow users to borrow tokens without collateral as long as they are returned
+    /// within the same transaction. Fees are paid on the borrowed amount, which are added to
+    /// the pool's fee growth accumulators.
+    #[new]
+    #[expect(clippy::too_many_arguments, clippy::needless_pass_by_value)]
     fn py_new(
         chain: Chain,
         dex: Dex,
@@ -656,7 +1126,8 @@ impl PoolFlash {
             transaction_hash,
             transaction_index,
             log_index,
-            Some(timestamp.into()),
+            timestamp.into(), // ts_event
+            timestamp.into(), // ts_init (single Python timestamp)
             sender,
             recipient,
             amount0,
@@ -682,24 +1153,24 @@ impl PoolFlash {
         hasher.finish()
     }
 
-    fn __richcmp__(&self, other: &Self, op: CompareOp) -> bool {
+    fn __richcmp__(&self, other: &Self, op: CompareOp, py: Python<'_>) -> Py<PyAny> {
         match op {
-            CompareOp::Eq => self == other,
-            CompareOp::Ne => self != other,
-            _ => panic!("Unsupported comparison for PoolFlash"),
+            CompareOp::Eq => self.eq(other).into_py_any_unwrap(py),
+            CompareOp::Ne => self.ne(other).into_py_any_unwrap(py),
+            _ => py.NotImplemented(),
         }
     }
 
     #[getter]
     #[pyo3(name = "chain")]
-    fn py_chain(&self) -> PyResult<Chain> {
-        Ok(self.chain.as_ref().clone())
+    fn py_chain(&self) -> Chain {
+        self.chain.as_ref().clone()
     }
 
     #[getter]
     #[pyo3(name = "dex")]
-    fn py_dex(&self) -> PyResult<Dex> {
-        Ok(self.dex.as_ref().clone())
+    fn py_dex(&self) -> Dex {
+        self.dex.as_ref().clone()
     }
 
     #[getter]
@@ -776,15 +1247,29 @@ impl PoolFlash {
 
     #[getter]
     #[pyo3(name = "timestamp")]
-    fn py_timestamp(&self) -> Option<u64> {
-        self.ts_event.map(|x| x.as_u64())
+    fn py_timestamp(&self) -> u64 {
+        self.ts_event.as_u64()
+    }
+
+    #[getter]
+    #[pyo3(name = "ts_event")]
+    fn py_ts_event(&self) -> u64 {
+        self.ts_event.as_u64()
+    }
+
+    #[getter]
+    #[pyo3(name = "ts_init")]
+    fn py_ts_init(&self) -> u64 {
+        self.ts_init.as_u64()
     }
 }
 
 #[pymethods]
+#[pyo3_stub_gen::derive::gen_stub_pymethods]
 impl Transaction {
+    /// Represents a transaction on an EVM based blockchain.
     #[new]
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments, clippy::needless_pass_by_value)]
     fn py_new(
         chain: Chain,
         hash: String,
@@ -833,11 +1318,11 @@ impl Transaction {
         hasher.finish()
     }
 
-    fn __richcmp__(&self, other: &Self, op: CompareOp) -> bool {
+    fn __richcmp__(&self, other: &Self, op: CompareOp, py: Python<'_>) -> Py<PyAny> {
         match op {
-            CompareOp::Eq => self.hash == other.hash,
-            CompareOp::Ne => self.hash != other.hash,
-            _ => panic!("Unsupported comparison for Transaction"),
+            CompareOp::Eq => self.hash.eq(&other.hash).into_py_any_unwrap(py),
+            CompareOp::Ne => self.hash.ne(&other.hash).into_py_any_unwrap(py),
+            _ => py.NotImplemented(),
         }
     }
 

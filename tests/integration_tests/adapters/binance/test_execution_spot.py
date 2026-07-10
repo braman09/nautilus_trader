@@ -1,5 +1,5 @@
 # -------------------------------------------------------------------------------------------------
-#  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+#  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 #  https://nautechsystems.io
 #
 #  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -14,25 +14,34 @@
 # -------------------------------------------------------------------------------------------------
 
 import asyncio
+from unittest.mock import AsyncMock
 
 import pytest
 
 from nautilus_trader.adapters.binance.common.constants import BINANCE_VENUE
 from nautilus_trader.adapters.binance.common.enums import BinanceAccountType
+from nautilus_trader.adapters.binance.common.enums import BinanceEnvironment
+from nautilus_trader.adapters.binance.common.enums import BinanceErrorCode
 from nautilus_trader.adapters.binance.config import BinanceExecClientConfig
 from nautilus_trader.adapters.binance.http.client import BinanceHttpClient
+from nautilus_trader.adapters.binance.http.error import BinanceError
 from nautilus_trader.adapters.binance.spot.execution import BinanceSpotExecutionClient
 from nautilus_trader.adapters.binance.spot.providers import BinanceSpotInstrumentProvider
 from nautilus_trader.common.component import LiveClock
 from nautilus_trader.common.component import MessageBus
 from nautilus_trader.config import InstrumentProviderConfig
+from nautilus_trader.config import StrategyConfig
 from nautilus_trader.core.nautilus_pyo3 import HttpMethod
 from nautilus_trader.core.uuid import UUID4
 from nautilus_trader.data.engine import DataEngine
 from nautilus_trader.execution.engine import ExecutionEngine
+from nautilus_trader.execution.messages import CancelAllOrders
+from nautilus_trader.execution.messages import GenerateOrderStatusReport
 from nautilus_trader.execution.messages import SubmitOrder
 from nautilus_trader.model.enums import OrderSide
+from nautilus_trader.model.enums import OrderStatus
 from nautilus_trader.model.identifiers import AccountId
+from nautilus_trader.model.identifiers import VenueOrderId
 from nautilus_trader.model.objects import Price
 from nautilus_trader.model.objects import Quantity
 from nautilus_trader.portfolio.portfolio import Portfolio
@@ -40,6 +49,7 @@ from nautilus_trader.risk.engine import RiskEngine
 from nautilus_trader.test_kit.functions import eventually
 from nautilus_trader.test_kit.providers import TestInstrumentProvider
 from nautilus_trader.test_kit.stubs.component import TestComponentStubs
+from nautilus_trader.test_kit.stubs.events import TestEventStubs
 from nautilus_trader.test_kit.stubs.identifiers import TestIdStubs
 from nautilus_trader.trading.strategy import Strategy
 
@@ -105,6 +115,9 @@ class TestBinanceSpotExecutionClient:
             clock=self.clock,
         )
 
+        # Base64-encoded 32 zero bytes for Ed25519 private key (test only)
+        dummy_api_secret = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+
         self.exec_client = BinanceSpotExecutionClient(
             loop=self.loop,
             client=self.http_client,
@@ -115,6 +128,9 @@ class TestBinanceSpotExecutionClient:
             base_url_ws="",  # Not required for testing
             config=BinanceExecClientConfig(),
             account_type=BinanceAccountType.SPOT,
+            environment=BinanceEnvironment.LIVE,
+            api_key="SOME_BINANCE_API_KEY",
+            api_secret=dummy_api_secret,
         )
 
         self.exec_engine.register_client(self.exec_client)
@@ -381,3 +397,374 @@ class TestBinanceSpotExecutionClient:
 
         # Assert
         await eventually(lambda: mock_query_order.called)
+
+    @pytest.mark.asyncio
+    async def test_generate_order_status_report_returns_none_for_no_such_order(self, mocker):
+        # Arrange
+        order = self.strategy.order_factory.limit(
+            instrument_id=ETHUSDT_BINANCE.id,
+            order_side=OrderSide.BUY,
+            quantity=Quantity.from_int(10),
+            price=Price.from_str("10050.80"),
+        )
+        venue_order_id = VenueOrderId("12345")
+        self.cache.add_order(order, None)
+
+        order.apply(TestEventStubs.order_submitted(order, account_id=self.account_id))
+        order.apply(
+            TestEventStubs.order_accepted(
+                order,
+                account_id=self.account_id,
+                venue_order_id=venue_order_id,
+            ),
+        )
+        order.apply(
+            TestEventStubs.order_filled(
+                order,
+                instrument=ETHUSDT_BINANCE,
+                strategy_id=order.strategy_id,
+                account_id=self.account_id,
+                venue_order_id=venue_order_id,
+                last_px=Price.from_str("10050.80"),
+            ),
+        )
+        self.cache.update_order(order)
+        self.exec_client._generate_order_status_retries[order.client_order_id] = 1
+
+        error = BinanceError(
+            status=400,
+            message={
+                "code": BinanceErrorCode.NO_SUCH_ORDER.value,
+                "msg": "Order does not exist.",
+            },
+            headers={},
+        )
+        mocker.patch.object(
+            self.exec_client._http_account,
+            "query_order",
+            new_callable=AsyncMock,
+            side_effect=error,
+        )
+        mock_generate_rejected = mocker.patch.object(self.exec_client, "generate_order_rejected")
+
+        command = GenerateOrderStatusReport(
+            instrument_id=ETHUSDT_BINANCE.id,
+            client_order_id=order.client_order_id,
+            venue_order_id=venue_order_id,
+            command_id=UUID4(),
+            ts_init=0,
+        )
+
+        # Act
+        report = await self.exec_client.generate_order_status_report(command)
+
+        # Assert
+        assert report is None
+        assert order.status == OrderStatus.FILLED
+        assert order.client_order_id not in self.exec_client._generate_order_status_retries
+        mock_generate_rejected.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_generate_order_status_report_does_not_reject_open_no_such_order(self, mocker):
+        # Arrange
+        order = self.strategy.order_factory.limit(
+            instrument_id=ETHUSDT_BINANCE.id,
+            order_side=OrderSide.BUY,
+            quantity=Quantity.from_int(10),
+            price=Price.from_str("10050.80"),
+        )
+        venue_order_id = VenueOrderId("12345")
+        self.cache.add_order(order, None)
+
+        order.apply(TestEventStubs.order_submitted(order, account_id=self.account_id))
+        order.apply(
+            TestEventStubs.order_accepted(
+                order,
+                account_id=self.account_id,
+                venue_order_id=venue_order_id,
+            ),
+        )
+        self.cache.update_order(order)
+        self.exec_client._generate_order_status_retries[order.client_order_id] = (
+            self.exec_client._max_retries - 1
+        )
+
+        error = BinanceError(
+            status=400,
+            message={
+                "code": BinanceErrorCode.NO_SUCH_ORDER.value,
+                "msg": "Order does not exist.",
+            },
+            headers={},
+        )
+        mocker.patch.object(
+            self.exec_client._http_account,
+            "query_order",
+            new_callable=AsyncMock,
+            side_effect=error,
+        )
+        mock_generate_rejected = mocker.patch.object(self.exec_client, "generate_order_rejected")
+
+        command = GenerateOrderStatusReport(
+            instrument_id=ETHUSDT_BINANCE.id,
+            client_order_id=order.client_order_id,
+            venue_order_id=venue_order_id,
+            command_id=UUID4(),
+            ts_init=0,
+        )
+
+        # Act
+        report = await self.exec_client.generate_order_status_report(command)
+
+        # Assert
+        assert report is None
+        assert order.status == OrderStatus.ACCEPTED
+        assert order.client_order_id not in self.exec_client._generate_order_status_retries
+        mock_generate_rejected.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_cancel_all_orders_with_open_orders_uses_batch_cancel(self, mocker):
+        """
+        Test that _cancel_all_orders uses batch cancel when strategy owns all orders.
+        """
+        # Arrange
+        mock_cancel_orders_batch = mocker.patch.object(
+            self.exec_client,
+            "_cancel_orders_batch",
+            new_callable=AsyncMock,
+        )
+
+        limit_order = self.strategy.order_factory.limit(
+            instrument_id=ETHUSDT_BINANCE.id,
+            order_side=OrderSide.BUY,
+            quantity=Quantity.from_int(10),
+            price=Price.from_str("3000.00"),
+        )
+        self.cache.add_order(limit_order, None)
+        limit_order.apply(TestEventStubs.order_submitted(limit_order))
+        self.cache.update_order(limit_order)
+        limit_order.apply(TestEventStubs.order_accepted(limit_order))
+        self.cache.update_order(limit_order)
+
+        command = CancelAllOrders(
+            trader_id=self.trader_id,
+            strategy_id=self.strategy.id,
+            instrument_id=ETHUSDT_BINANCE.id,
+            order_side=OrderSide.NO_ORDER_SIDE,
+            command_id=UUID4(),
+            ts_init=0,
+        )
+
+        # Act
+        await self.exec_client._cancel_all_orders(command)
+
+        # Assert
+        mock_cancel_orders_batch.assert_called_once()
+        assert limit_order in mock_cancel_orders_batch.call_args[0][1]
+
+    @pytest.mark.asyncio
+    async def test_cancel_all_orders_with_submitted_orders_uses_batch_cancel(self, mocker):
+        """
+        Test that _cancel_all_orders includes SUBMITTED (inflight) orders for spot.
+        """
+        # Arrange
+        mock_cancel_orders_batch = mocker.patch.object(
+            self.exec_client,
+            "_cancel_orders_batch",
+            new_callable=AsyncMock,
+        )
+
+        limit_order = self.strategy.order_factory.limit(
+            instrument_id=ETHUSDT_BINANCE.id,
+            order_side=OrderSide.BUY,
+            quantity=Quantity.from_int(10),
+            price=Price.from_str("3000.00"),
+        )
+        self.cache.add_order(limit_order, None)
+        limit_order.apply(TestEventStubs.order_submitted(limit_order))
+        self.cache.update_order(limit_order)
+
+        command = CancelAllOrders(
+            trader_id=self.trader_id,
+            strategy_id=self.strategy.id,
+            instrument_id=ETHUSDT_BINANCE.id,
+            order_side=OrderSide.NO_ORDER_SIDE,
+            command_id=UUID4(),
+            ts_init=0,
+        )
+
+        # Act
+        await self.exec_client._cancel_all_orders(command)
+
+        # Assert
+        mock_cancel_orders_batch.assert_called_once()
+        assert limit_order in mock_cancel_orders_batch.call_args[0][1]
+
+    @pytest.mark.asyncio
+    async def test_cancel_all_orders_multi_strategy_uses_individual_cancel(self, mocker):
+        """
+        Test that _cancel_all_orders falls back to individual cancels when multiple
+        strategies have orders for the same instrument.
+        """
+        # Arrange
+        mock_cancel_orders_for_strategy = mocker.patch.object(
+            self.exec_client,
+            "_cancel_orders_for_strategy",
+            new_callable=AsyncMock,
+        )
+        mock_cancel_orders_batch = mocker.patch.object(
+            self.exec_client,
+            "_cancel_orders_batch",
+            new_callable=AsyncMock,
+        )
+
+        strategy_order = self.strategy.order_factory.limit(
+            instrument_id=ETHUSDT_BINANCE.id,
+            order_side=OrderSide.BUY,
+            quantity=Quantity.from_int(10),
+            price=Price.from_str("3000.00"),
+        )
+        self.cache.add_order(strategy_order, None)
+        strategy_order.apply(TestEventStubs.order_submitted(strategy_order))
+        self.cache.update_order(strategy_order)
+        strategy_order.apply(TestEventStubs.order_accepted(strategy_order))
+        self.cache.update_order(strategy_order)
+
+        other_strategy = Strategy(config=StrategyConfig(strategy_id="other"))
+        other_strategy.register(
+            trader_id=self.trader_id,
+            portfolio=self.portfolio,
+            msgbus=self.msgbus,
+            cache=self.cache,
+            clock=self.clock,
+        )
+        other_order = other_strategy.order_factory.limit(
+            instrument_id=ETHUSDT_BINANCE.id,
+            order_side=OrderSide.SELL,
+            quantity=Quantity.from_int(5),
+            price=Price.from_str("3100.00"),
+        )
+        self.cache.add_order(other_order, None)
+        other_order.apply(TestEventStubs.order_submitted(other_order))
+        self.cache.update_order(other_order)
+        other_order.apply(TestEventStubs.order_accepted(other_order))
+        self.cache.update_order(other_order)
+
+        command = CancelAllOrders(
+            trader_id=self.trader_id,
+            strategy_id=self.strategy.id,
+            instrument_id=ETHUSDT_BINANCE.id,
+            order_side=OrderSide.NO_ORDER_SIDE,
+            command_id=UUID4(),
+            ts_init=0,
+        )
+
+        # Act
+        await self.exec_client._cancel_all_orders(command)
+
+        # Assert - should use individual cancel, not batch
+        mock_cancel_orders_for_strategy.assert_called_once()
+        mock_cancel_orders_batch.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_cancel_orders_batch_failure_emits_cancel_rejected(self, mocker):
+        """
+        Test that batch cancel failure emits OrderCancelRejected for each order.
+        """
+        # Arrange
+        mock_generate_cancel_rejected = mocker.patch.object(
+            self.exec_client,
+            "generate_order_cancel_rejected",
+        )
+
+        limit_order = self.strategy.order_factory.limit(
+            instrument_id=ETHUSDT_BINANCE.id,
+            order_side=OrderSide.BUY,
+            quantity=Quantity.from_int(10),
+            price=Price.from_str("3000.00"),
+        )
+        self.cache.add_order(limit_order, None)
+        limit_order.apply(TestEventStubs.order_submitted(limit_order))
+        self.cache.update_order(limit_order)
+        limit_order.apply(TestEventStubs.order_accepted(limit_order))
+        self.cache.update_order(limit_order)
+
+        mock_retry_manager = mocker.MagicMock()
+        mock_retry_manager.result = False
+        mock_retry_manager.message = "Rate limit exceeded"
+        mock_retry_manager.run = AsyncMock()
+
+        mocker.patch.object(
+            self.exec_client._retry_manager_pool,
+            "acquire",
+            new_callable=AsyncMock,
+            return_value=mock_retry_manager,
+        )
+        mocker.patch.object(
+            self.exec_client._retry_manager_pool,
+            "release",
+            new_callable=AsyncMock,
+        )
+
+        # Act
+        await self.exec_client._cancel_orders_batch(
+            ETHUSDT_BINANCE.id,
+            [limit_order],
+        )
+
+        # Assert
+        mock_generate_cancel_rejected.assert_called_once()
+        call_args = mock_generate_cancel_rejected.call_args
+        assert call_args[0][0] == limit_order.strategy_id
+        assert call_args[0][1] == limit_order.instrument_id
+        assert call_args[0][2] == limit_order.client_order_id
+        assert call_args[0][4] == "Rate limit exceeded"
+
+    @pytest.mark.asyncio
+    async def test_cancel_orders_batch_unknown_order_does_not_emit_rejected(self, mocker):
+        """
+        Test that 'Unknown order sent' error does not emit OrderCancelRejected.
+        """
+        # Arrange
+        mock_generate_cancel_rejected = mocker.patch.object(
+            self.exec_client,
+            "generate_order_cancel_rejected",
+        )
+
+        limit_order = self.strategy.order_factory.limit(
+            instrument_id=ETHUSDT_BINANCE.id,
+            order_side=OrderSide.BUY,
+            quantity=Quantity.from_int(10),
+            price=Price.from_str("3000.00"),
+        )
+        self.cache.add_order(limit_order, None)
+        limit_order.apply(TestEventStubs.order_submitted(limit_order))
+        self.cache.update_order(limit_order)
+        limit_order.apply(TestEventStubs.order_accepted(limit_order))
+        self.cache.update_order(limit_order)
+
+        mock_retry_manager = mocker.MagicMock()
+        mock_retry_manager.result = False
+        mock_retry_manager.message = "Unknown order sent"
+        mock_retry_manager.run = AsyncMock()
+
+        mocker.patch.object(
+            self.exec_client._retry_manager_pool,
+            "acquire",
+            new_callable=AsyncMock,
+            return_value=mock_retry_manager,
+        )
+        mocker.patch.object(
+            self.exec_client._retry_manager_pool,
+            "release",
+            new_callable=AsyncMock,
+        )
+
+        # Act
+        await self.exec_client._cancel_orders_batch(
+            ETHUSDT_BINANCE.id,
+            [limit_order],
+        )
+
+        # Assert
+        mock_generate_cancel_rejected.assert_not_called()

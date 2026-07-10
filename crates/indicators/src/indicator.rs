@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -48,8 +48,13 @@ pub trait Indicator {
         panic!("`handle_book_mbo` {IMPL_ERR} `{}`", self.name());
     }
 
-    fn handle_quote(&mut self, quote: &QuoteTick) {
-        panic!("`handle_quote_tick` {IMPL_ERR} `{}`", self.name());
+    /// Updates the indicator with the given quote tick.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the configured price type cannot be extracted from the quote.
+    fn handle_quote(&mut self, quote: &QuoteTick) -> anyhow::Result<()> {
+        anyhow::bail!("`handle_quote_tick` {IMPL_ERR} `{}`", self.name());
     }
 
     fn handle_trade(&mut self, trade: &TradeTick) {

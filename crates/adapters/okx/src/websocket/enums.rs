@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -150,6 +150,8 @@ pub enum OKXWsChannel {
     OptionSummary,
     #[serde(rename = "funding-rate")]
     FundingRate,
+    #[serde(rename = "event-contract-markets")]
+    EventContractMarkets,
     #[serde(rename = "index-tickers")]
     IndexTickers,
     #[serde(rename = "status")]
@@ -163,12 +165,20 @@ pub enum OKXWsChannel {
     // BalanceAndPosition,
     #[serde(rename = "orders")]
     Orders,
+    #[serde(rename = "sprd-orders")]
+    SprdOrders,
+    #[serde(rename = "sprd-bbo-tbt")]
+    SprdBboTbt,
+    #[serde(rename = "sprd-books5")]
+    SprdBooks5,
+    #[serde(rename = "sprd-public-trades")]
+    SprdPublicTrades,
     #[serde(rename = "fills")]
     Fills,
     #[serde(rename = "orders-algo")]
     OrdersAlgo,
-    // #[display(fmt = "algo-advance")]
-    // AlgoAdvance,
+    #[serde(rename = "algo-advance")]
+    AlgoAdvance,
     // #[display(fmt = "liquidation-warning")]
     // LiquidationWarning,
     // #[display(fmt = "account-greeks")]
@@ -277,4 +287,16 @@ pub enum OKXWsChannel {
     MarkPriceCandle1Month,
     #[serde(rename = "mark-price-candle3M")]
     MarkPriceCandle3Month,
+}
+
+impl OKXWsChannel {
+    /// Returns `true` for OKX Nitro spread channels, which key on `sprdId`
+    /// rather than `instId` and are served on the business WebSocket.
+    #[must_use]
+    pub const fn is_spread(&self) -> bool {
+        matches!(
+            self,
+            Self::SprdOrders | Self::SprdBboTbt | Self::SprdBooks5 | Self::SprdPublicTrades
+        )
+    }
 }

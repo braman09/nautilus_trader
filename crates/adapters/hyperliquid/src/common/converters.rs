@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -18,37 +18,116 @@
 //! This module provides conversion functions between Nautilus core order types
 //! and Hyperliquid-specific order type representations.
 
-use nautilus_model::enums::{OrderType, TimeInForce};
+use anyhow::Context;
+use nautilus_model::{
+    enums::{OrderType, TimeInForce},
+    identifiers::{InstrumentId, Symbol},
+};
 use rust_decimal::Decimal;
 
-use super::enums::{
-    HyperliquidConditionalOrderType, HyperliquidOrderType, HyperliquidTimeInForce, HyperliquidTpSl,
+use super::{
+    consts::HYPERLIQUID_VENUE,
+    enums::{
+        HyperliquidConditionalOrderType, HyperliquidOrderType, HyperliquidTimeInForce,
+        HyperliquidTpSl,
+    },
+    parse::{format_outcome_nautilus_symbol, parse_outcome_nautilus_symbol, parse_outcome_symbol},
+    types::HyperliquidAssetId,
 };
+
+/// Converts an outcome (HIP-4) asset ID to its spot coin representation.
+///
+/// # Errors
+///
+/// Returns an error if `asset_id` is not a valid outcome asset ID.
+pub fn outcome_asset_id_to_coin(asset_id: HyperliquidAssetId) -> anyhow::Result<String> {
+    let encoding = outcome_encoding(asset_id)?;
+    Ok(format!("#{encoding}"))
+}
+
+/// Converts an outcome (HIP-4) asset ID to its token name representation.
+///
+/// # Errors
+///
+/// Returns an error if `asset_id` is not a valid outcome asset ID.
+pub fn outcome_asset_id_to_token(asset_id: HyperliquidAssetId) -> anyhow::Result<String> {
+    let encoding = outcome_encoding(asset_id)?;
+    Ok(format!("+{encoding}"))
+}
+
+/// Converts an outcome (HIP-4) asset ID to its canonical Nautilus instrument ID.
+///
+/// The instrument ID uses the form `{outcome_index}-{YES|NO}-OUTCOME.HYPERLIQUID`,
+/// symmetric with `-PERP` / `-SPOT`, so the human reading the ID can see which
+/// question and side they're trading. The venue wire forms (`#<encoding>` /
+/// `+<encoding>`) are preserved on the instrument's `raw_symbol` and base
+/// alias, not on the Nautilus symbol.
+///
+/// # Errors
+///
+/// Returns an error if `asset_id` is not a valid outcome asset ID.
+pub fn outcome_asset_id_to_instrument_id(
+    asset_id: HyperliquidAssetId,
+) -> anyhow::Result<InstrumentId> {
+    let encoding = outcome_encoding(asset_id)?;
+    let outcome_index = encoding / 10;
+    let side = u8::try_from(encoding % 10).unwrap_or(0);
+    let symbol = format_outcome_nautilus_symbol(outcome_index, side);
+    Ok(InstrumentId::new(Symbol::new(symbol), *HYPERLIQUID_VENUE))
+}
+
+/// Parses an outcome (HIP-4) asset ID from a Nautilus instrument ID.
+///
+/// Accepts the Nautilus symbol form (`{N}-{YES|NO}-OUTCOME.HYPERLIQUID`) and,
+/// for compatibility with venue-wire-derived ids, also the
+/// `#<encoding>.HYPERLIQUID` and `+<encoding>.HYPERLIQUID` forms.
+///
+/// # Errors
+///
+/// Returns an error if the symbol matches none of the supported forms.
+pub fn outcome_asset_id_from_instrument_id(
+    instrument_id: InstrumentId,
+) -> anyhow::Result<HyperliquidAssetId> {
+    let symbol = instrument_id.symbol.as_str();
+
+    if let Some((outcome_index, side)) = parse_outcome_nautilus_symbol(symbol) {
+        return Ok(HyperliquidAssetId::outcome(outcome_index, side));
+    }
+
+    parse_outcome_symbol(symbol)
+}
+
+fn outcome_encoding(asset_id: HyperliquidAssetId) -> anyhow::Result<u32> {
+    asset_id
+        .outcome_encoding()
+        .with_context(|| format!("Invalid Hyperliquid outcome asset ID: {asset_id}"))
+}
 
 /// Converts a Nautilus `OrderType` to a Hyperliquid order type configuration.
 ///
-/// # Panics
+/// # Errors
 ///
-/// Panics if a conditional order is specified without a trigger price.
+/// Returns an error if the order type is unsupported, a required trigger price
+/// is missing, or the time in force is not supported.
 pub fn nautilus_order_type_to_hyperliquid(
     order_type: OrderType,
     time_in_force: Option<TimeInForce>,
     trigger_price: Option<Decimal>,
-) -> HyperliquidOrderType {
-    match order_type {
+) -> anyhow::Result<HyperliquidOrderType> {
+    let result = match order_type {
         // Regular limit order
         OrderType::Limit => {
-            let tif = time_in_force.map_or(
-                HyperliquidTimeInForce::Gtc,
-                nautilus_time_in_force_to_hyperliquid,
-            );
+            let tif = match time_in_force {
+                Some(t) => nautilus_time_in_force_to_hyperliquid(t)?,
+                None => HyperliquidTimeInForce::Gtc,
+            };
             HyperliquidOrderType::Limit { tif }
         }
 
         // Stop market order (stop loss)
         OrderType::StopMarket => {
             let trigger_px = trigger_price
-                .expect("Trigger price required for StopMarket order")
+                .context("Trigger price required for StopMarket order")?
                 .to_string();
             HyperliquidOrderType::Trigger {
                 is_market: true,
@@ -60,7 +139,7 @@ pub fn nautilus_order_type_to_hyperliquid(
         // Stop limit order (stop loss with limit)
         OrderType::StopLimit => {
             let trigger_px = trigger_price
-                .expect("Trigger price required for StopLimit order")
+                .context("Trigger price required for StopLimit order")?
                 .to_string();
             HyperliquidOrderType::Trigger {
                 is_market: false,
@@ -72,7 +151,7 @@ pub fn nautilus_order_type_to_hyperliquid(
         // Market if touched (take profit market)
         OrderType::MarketIfTouched => {
             let trigger_px = trigger_price
-                .expect("Trigger price required for MarketIfTouched order")
+                .context("Trigger price required for MarketIfTouched order")?
                 .to_string();
             HyperliquidOrderType::Trigger {
                 is_market: true,
@@ -84,7 +163,7 @@ pub fn nautilus_order_type_to_hyperliquid(
         // Limit if touched (take profit limit)
         OrderType::LimitIfTouched => {
             let trigger_px = trigger_price
-                .expect("Trigger price required for LimitIfTouched order")
+                .context("Trigger price required for LimitIfTouched order")?
                 .to_string();
             HyperliquidOrderType::Trigger {
                 is_market: false,
@@ -96,7 +175,7 @@ pub fn nautilus_order_type_to_hyperliquid(
         // Trailing stop market (requires special handling)
         OrderType::TrailingStopMarket => {
             let trigger_px = trigger_price
-                .expect("Trigger price required for TrailingStopMarket order")
+                .context("Trigger price required for TrailingStopMarket order")?
                 .to_string();
             HyperliquidOrderType::Trigger {
                 is_market: true,
@@ -108,7 +187,7 @@ pub fn nautilus_order_type_to_hyperliquid(
         // Trailing stop limit (requires special handling)
         OrderType::TrailingStopLimit => {
             let trigger_px = trigger_price
-                .expect("Trigger price required for TrailingStopLimit order")
+                .context("Trigger price required for TrailingStopLimit order")?
                 .to_string();
             HyperliquidOrderType::Trigger {
                 is_market: false,
@@ -117,14 +196,10 @@ pub fn nautilus_order_type_to_hyperliquid(
             }
         }
 
-        // Market orders are handled elsewhere (not represented in HyperliquidOrderType)
-        OrderType::Market => {
-            panic!("Market orders should be handled separately via immediate execution")
-        }
+        _ => anyhow::bail!("Unsupported order type: {order_type:?}"),
+    };
 
-        // Unsupported order types
-        _ => panic!("Unsupported order type: {order_type:?}"),
-    }
+    Ok(result)
 }
 
 /// Converts a Hyperliquid order type to a Nautilus `OrderType`.
@@ -161,15 +236,31 @@ pub fn nautilus_to_hyperliquid_conditional(
 }
 
 /// Converts a Nautilus `TimeInForce` to a Hyperliquid time in force.
-pub fn nautilus_time_in_force_to_hyperliquid(tif: TimeInForce) -> HyperliquidTimeInForce {
+///
+/// # Errors
+///
+/// Returns an error if the time in force is not supported (e.g. FOK).
+pub fn nautilus_time_in_force_to_hyperliquid(
+    tif: TimeInForce,
+) -> anyhow::Result<HyperliquidTimeInForce> {
     match tif {
-        TimeInForce::Gtc => HyperliquidTimeInForce::Gtc,
-        TimeInForce::Ioc => HyperliquidTimeInForce::Ioc,
-        TimeInForce::Fok => HyperliquidTimeInForce::Ioc, // FOK maps to IOC in Hyperliquid
-        TimeInForce::Gtd => HyperliquidTimeInForce::Gtc, // GTD maps to GTC
-        TimeInForce::Day => HyperliquidTimeInForce::Gtc, // DAY maps to GTC
-        TimeInForce::AtTheOpen => HyperliquidTimeInForce::Gtc, // ATO maps to GTC
-        TimeInForce::AtTheClose => HyperliquidTimeInForce::Gtc, // ATC maps to GTC
+        TimeInForce::Gtc => Ok(HyperliquidTimeInForce::Gtc),
+        TimeInForce::Ioc => Ok(HyperliquidTimeInForce::Ioc),
+        TimeInForce::Fok => {
+            anyhow::bail!("FOK time in force is not supported by Hyperliquid")
+        }
+        TimeInForce::Gtd => {
+            anyhow::bail!("GTD time in force is not supported by Hyperliquid")
+        }
+        TimeInForce::Day => {
+            anyhow::bail!("DAY time in force is not supported by Hyperliquid")
+        }
+        TimeInForce::AtTheOpen => {
+            anyhow::bail!("AT_THE_OPEN time in force is not supported by Hyperliquid")
+        }
+        TimeInForce::AtTheClose => {
+            anyhow::bail!("AT_THE_CLOSE time in force is not supported by Hyperliquid")
+        }
     }
 }
 
@@ -211,10 +302,6 @@ pub fn determine_tpsl_type(order_type: OrderType, is_buy: bool) -> HyperliquidTp
     }
 }
 
-////////////////////////////////////////////////////////////////////////////////
-// Tests
-////////////////////////////////////////////////////////////////////////////////
-
 #[cfg(test)]
 mod tests {
     use rstest::rstest;
@@ -222,9 +309,70 @@ mod tests {
     use super::*;
 
     #[rstest]
+    fn test_outcome_asset_id_to_wire_symbols() {
+        let asset_id = HyperliquidAssetId::outcome(1, 0);
+
+        assert_eq!(outcome_asset_id_to_coin(asset_id).unwrap(), "#10");
+        assert_eq!(outcome_asset_id_to_token(asset_id).unwrap(), "+10");
+    }
+
+    #[rstest]
+    fn test_outcome_asset_id_to_wire_symbols_rejects_non_outcome() {
+        let err = outcome_asset_id_to_coin(HyperliquidAssetId::spot(7)).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Invalid Hyperliquid outcome asset ID"),
+            "unexpected error: {err}",
+        );
+    }
+
+    #[rstest]
+    fn test_outcome_asset_id_instrument_id_roundtrip() {
+        let asset_id = HyperliquidAssetId::outcome(3, 1);
+        let instrument_id = outcome_asset_id_to_instrument_id(asset_id).unwrap();
+
+        assert_eq!(
+            instrument_id,
+            InstrumentId::from("3-NO-OUTCOME.HYPERLIQUID")
+        );
+        assert_eq!(
+            outcome_asset_id_from_instrument_id(instrument_id).unwrap(),
+            asset_id,
+        );
+    }
+
+    #[rstest]
+    fn test_outcome_asset_id_to_instrument_id_yes_side() {
+        let asset_id = HyperliquidAssetId::outcome(25, 0);
+        let instrument_id = outcome_asset_id_to_instrument_id(asset_id).unwrap();
+
+        assert_eq!(
+            instrument_id,
+            InstrumentId::from("25-YES-OUTCOME.HYPERLIQUID")
+        );
+    }
+
+    #[rstest]
+    #[case("#10.HYPERLIQUID", 1, 0)]
+    #[case("+10.HYPERLIQUID", 1, 0)]
+    #[case("1-YES-OUTCOME.HYPERLIQUID", 1, 0)]
+    #[case("1-NO-OUTCOME.HYPERLIQUID", 1, 1)]
+    fn test_outcome_asset_id_from_instrument_id_accepts_all_forms(
+        #[case] symbol: &str,
+        #[case] outcome_index: u32,
+        #[case] side: u8,
+    ) {
+        let instrument_id = InstrumentId::from(symbol);
+        let asset_id = outcome_asset_id_from_instrument_id(instrument_id).unwrap();
+
+        assert_eq!(asset_id, HyperliquidAssetId::outcome(outcome_index, side));
+    }
+
+    #[rstest]
     fn test_nautilus_to_hyperliquid_limit_order() {
         let result =
-            nautilus_order_type_to_hyperliquid(OrderType::Limit, Some(TimeInForce::Gtc), None);
+            nautilus_order_type_to_hyperliquid(OrderType::Limit, Some(TimeInForce::Gtc), None)
+                .unwrap();
 
         match result {
             HyperliquidOrderType::Limit { tif } => {
@@ -240,7 +388,8 @@ mod tests {
             OrderType::StopMarket,
             None,
             Some(Decimal::new(49000, 0)),
-        );
+        )
+        .unwrap();
 
         match result {
             HyperliquidOrderType::Trigger {
@@ -262,7 +411,8 @@ mod tests {
             OrderType::StopLimit,
             None,
             Some(Decimal::new(49000, 0)),
-        );
+        )
+        .unwrap();
 
         match result {
             HyperliquidOrderType::Trigger {
@@ -284,7 +434,8 @@ mod tests {
             OrderType::MarketIfTouched,
             None,
             Some(Decimal::new(51000, 0)),
-        );
+        )
+        .unwrap();
 
         match result {
             HyperliquidOrderType::Trigger {
@@ -306,7 +457,8 @@ mod tests {
             OrderType::LimitIfTouched,
             None,
             Some(Decimal::new(51000, 0)),
-        );
+        )
+        .unwrap();
 
         match result {
             HyperliquidOrderType::Trigger {
@@ -389,15 +541,11 @@ mod tests {
     fn test_time_in_force_conversions() {
         // Test Nautilus to Hyperliquid
         assert_eq!(
-            nautilus_time_in_force_to_hyperliquid(TimeInForce::Gtc),
+            nautilus_time_in_force_to_hyperliquid(TimeInForce::Gtc).unwrap(),
             HyperliquidTimeInForce::Gtc
         );
         assert_eq!(
-            nautilus_time_in_force_to_hyperliquid(TimeInForce::Ioc),
-            HyperliquidTimeInForce::Ioc
-        );
-        assert_eq!(
-            nautilus_time_in_force_to_hyperliquid(TimeInForce::Fok),
+            nautilus_time_in_force_to_hyperliquid(TimeInForce::Ioc).unwrap(),
             HyperliquidTimeInForce::Ioc
         );
 
@@ -413,6 +561,23 @@ mod tests {
         assert_eq!(
             hyperliquid_time_in_force_to_nautilus(HyperliquidTimeInForce::Alo),
             TimeInForce::Gtc
+        );
+    }
+
+    #[rstest]
+    #[case(TimeInForce::Fok, "FOK")]
+    #[case(TimeInForce::Gtd, "GTD")]
+    #[case(TimeInForce::Day, "DAY")]
+    #[case(TimeInForce::AtTheOpen, "AT_THE_OPEN")]
+    #[case(TimeInForce::AtTheClose, "AT_THE_CLOSE")]
+    fn test_unsupported_time_in_force_returns_error(#[case] tif: TimeInForce, #[case] name: &str) {
+        let result = nautilus_time_in_force_to_hyperliquid(tif);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains(&format!("{name} time in force is not supported"))
         );
     }
 

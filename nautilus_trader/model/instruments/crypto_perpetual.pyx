@@ -1,5 +1,5 @@
 # -------------------------------------------------------------------------------------------------
-#  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+#  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 #  https://nautechsystems.io
 #
 #  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -23,6 +23,7 @@ from nautilus_trader.core.rust.model cimport InstrumentClass
 from nautilus_trader.model.identifiers cimport InstrumentId
 from nautilus_trader.model.identifiers cimport Symbol
 from nautilus_trader.model.instruments.base cimport Instrument
+from nautilus_trader.model.instruments.base cimport settlement_currency_differs_for_quanto
 from nautilus_trader.model.objects cimport Currency
 from nautilus_trader.model.objects cimport Money
 from nautilus_trader.model.objects cimport Price
@@ -183,7 +184,11 @@ cdef class CryptoPerpetual(Instrument):
 
         self.base_currency = base_currency
         self.settlement_currency = settlement_currency
-        if settlement_currency != base_currency and settlement_currency != quote_currency:
+        if settlement_currency_differs_for_quanto(
+            settlement_currency,
+            quote_currency,
+            base_currency,
+        ):
             self.is_quanto = True
         else:
             self.is_quanto = False
@@ -235,6 +240,8 @@ cdef class CryptoPerpetual(Instrument):
         Quantity quantity,
         Price price,
         bint use_quote_for_inverse=False,
+        Currency target_currency=None,
+        Price conversion_price=None,
     ):
         """
         Calculate the notional value.
@@ -254,6 +261,10 @@ cdef class CryptoPerpetual(Instrument):
             notional value in quote currency and returns it directly without calculation.
             This is useful when quantity already represents a USD value that doesn't need
             conversion (e.g., for display purposes). Has no effect on linear or quanto instruments.
+        target_currency : Currency, optional
+            The target currency for conversion.
+        conversion_price : Price, optional
+            The conversion price to the target currency.
 
         Returns
         -------
@@ -263,25 +274,31 @@ cdef class CryptoPerpetual(Instrument):
         Condition.not_none(quantity, "quantity")
         Condition.not_none(price, "price")
 
+        cdef Money notional
         if self.is_inverse:
             if use_quote_for_inverse:
                 # Quantity is notional in quote currency
-                return Money(quantity, self.quote_currency)
-
-            return Money(
-                quantity.as_f64_c() * float(self.multiplier) * (1.0 / price.as_f64_c()),
-                self.base_currency,
-            )
+                notional = Money(quantity, self.quote_currency)
+            else:
+                notional = Money(
+                    quantity.as_f64_c() * float(self.multiplier) * (1.0 / price.as_f64_c()),
+                    self.base_currency,
+                )
         elif self.is_quanto:
-            return Money(
+            notional = Money(
                 quantity.as_f64_c() * float(self.multiplier) * price.as_f64_c(),
                 self.settlement_currency,
             )
         else:
-            return Money(
+            notional = Money(
                 quantity.as_f64_c() * float(self.multiplier) * price.as_f64_c(),
                 self.quote_currency,
             )
+
+        if target_currency is not None and conversion_price is not None:
+            return Money(notional.as_f64_c() * conversion_price.as_f64_c(), target_currency)
+
+        return notional
 
     @staticmethod
     cdef CryptoPerpetual from_dict_c(dict values):
@@ -292,6 +309,7 @@ cdef class CryptoPerpetual(Instrument):
         cdef str min_n = values["min_notional"]
         cdef str max_p = values["max_price"]
         cdef str min_p = values["min_price"]
+        cdef str lot_size = values.get("lot_size")
         return CryptoPerpetual(
             instrument_id=InstrumentId.from_str_c(values["id"]),
             raw_symbol=Symbol(values["raw_symbol"]),
@@ -304,6 +322,7 @@ cdef class CryptoPerpetual(Instrument):
             price_increment=Price.from_str_c(values["price_increment"]),
             size_increment=Quantity.from_str_c(values["size_increment"]),
             multiplier=Quantity.from_str_c(values["multiplier"]),
+            lot_size=Quantity.from_str_c(lot_size) if lot_size is not None else None,
             max_quantity=Quantity.from_str_c(max_q) if max_q is not None else None,
             min_quantity=Quantity.from_str_c(min_q) if min_q is not None else None,
             max_notional=Money.from_str_c(max_n) if max_n is not None else None,
@@ -336,7 +355,7 @@ cdef class CryptoPerpetual(Instrument):
             "size_precision": obj.size_precision,
             "size_increment": str(obj.size_increment),
             "multiplier": str(obj.multiplier),
-            "lot_size": str(obj.lot_size),
+            "lot_size": str(obj.lot_size) if obj.lot_size is not None else None,
             "max_quantity": str(obj.max_quantity) if obj.max_quantity is not None else None,
             "min_quantity": str(obj.min_quantity) if obj.min_quantity is not None else None,
             "max_notional": str(obj.max_notional) if obj.max_notional is not None else None,

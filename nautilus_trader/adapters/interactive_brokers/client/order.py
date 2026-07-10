@@ -1,5 +1,5 @@
 # -------------------------------------------------------------------------------------------------
-#  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+#  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 #  https://nautechsystems.io
 #
 #  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -16,7 +16,7 @@
 import functools
 from decimal import Decimal
 
-from ibapi.commission_report import CommissionReport
+from ibapi.commission_and_fees_report import CommissionAndFeesReport
 from ibapi.contract import Contract
 from ibapi.execution import Execution
 from ibapi.execution import ExecutionFilter
@@ -26,8 +26,11 @@ from ibapi.order_state import OrderState as IBOrderState
 
 from nautilus_trader.adapters.interactive_brokers.client.common import AccountOrderRef
 from nautilus_trader.adapters.interactive_brokers.client.common import BaseMixin
+from nautilus_trader.adapters.interactive_brokers.client.common import get_venue_order_id
 from nautilus_trader.adapters.interactive_brokers.common import IBContract
 from nautilus_trader.common.enums import LogColor
+from nautilus_trader.model.identifiers import ClientOrderId
+from nautilus_trader.model.identifiers import VenueOrderId
 
 
 class InteractiveBrokersClientOrderMixin(BaseMixin):
@@ -54,7 +57,9 @@ class InteractiveBrokersClientOrderMixin(BaseMixin):
             details, and order specifics.
 
         """
-        self._order_id_to_order_ref[order.orderId] = AccountOrderRef(
+        # For orders we place, orderId is valid (permId not yet assigned)
+        venue_order_id = VenueOrderId(str(order.orderId))
+        self._order_id_to_order_ref[venue_order_id] = AccountOrderRef(
             account_id=order.account,
             order_id=order.orderRef.rsplit(":", 1)[0],
         )
@@ -101,7 +106,7 @@ class InteractiveBrokersClientOrderMixin(BaseMixin):
         )
         self._eclient.reqGlobalCancel()
 
-    async def get_open_orders(self, account_id: str) -> list[IBOrder]:
+    async def get_open_orders(self, account_id: str) -> list[IBOrder] | None:
         """
         Retrieve a list of open orders for a specific account. Once the request is
         completed, openOrderEnd() will be called.
@@ -119,8 +124,10 @@ class InteractiveBrokersClientOrderMixin(BaseMixin):
 
         Returns
         -------
-        list[IBOrder]
-            List of open orders filtered by the specified account_id.
+        list[IBOrder] or None
+            None if the request failed (socket error / timeout) — callers must not
+            treat None as "confirmed zero open orders".  An empty list means IB
+            explicitly confirmed no open orders.
 
         """
         self._log.debug(f"Requesting open orders for {account_id}")
@@ -144,20 +151,23 @@ class InteractiveBrokersClientOrderMixin(BaseMixin):
 
             request.handle()
 
-        all_orders: list[IBOrder] | None = await self._await_request(request, 30)
+        all_orders: list[IBOrder] | None = await self._await_request(
+            request,
+            self._request_timeout_secs,
+        )
 
-        if all_orders:
-            orders: list[IBOrder] = [order for order in all_orders if order.account == account_id]
-        else:
-            orders = []
+        if all_orders is None:
+            return None  # request failed — caller must not infer "no open orders"
+        if not all_orders:
+            return []
 
-        return orders
+        return [order for order in all_orders if order.account == account_id]
 
     async def get_executions(
         self,
         account_id: str,
         execution_filter: ExecutionFilter | None = None,
-    ) -> list[dict]:
+    ) -> list[dict] | None:
         """
         Retrieve execution reports for a specific account.
 
@@ -170,8 +180,10 @@ class InteractiveBrokersClientOrderMixin(BaseMixin):
 
         Returns
         -------
-        list[dict]
-            List of execution details with associated contracts and commission reports.
+        list[dict] or None
+            None if the request failed (socket error / timeout) — callers must not
+            treat None as "confirmed zero executions".  An empty list means IB
+            explicitly confirmed no executions matched the filter.
             Each dict contains 'execution', 'contract', and 'commission_report' keys.
 
         """
@@ -202,20 +214,22 @@ class InteractiveBrokersClientOrderMixin(BaseMixin):
             request.handle()
 
         # Wait for execution details to be collected
-        execution_details: list[dict] | None = await self._await_request(request, 30)
+        execution_details: list[dict] | None = await self._await_request(
+            request,
+            self._request_timeout_secs,
+        )
 
-        if execution_details:
-            # Filter by account if needed (in case filter didn't work perfectly)
-            filtered_executions = [
-                exec_detail
-                for exec_detail in execution_details
-                if exec_detail.get("execution")
-                and exec_detail["execution"].acctNumber == account_id
-            ]
-        else:
-            filtered_executions = []
+        if execution_details is None:
+            return None  # request failed — caller must not infer "no executions"
+        if not execution_details:
+            return []
 
-        return filtered_executions
+        # Filter by account if needed (in case filter didn't work perfectly)
+        return [
+            exec_detail
+            for exec_detail in execution_details
+            if exec_detail.get("execution") and exec_detail["execution"].acctNumber == account_id
+        ]
 
     def next_order_id(self) -> int:
         """
@@ -242,10 +256,19 @@ class InteractiveBrokersClientOrderMixin(BaseMixin):
 
         """
         self._next_valid_order_id = max(self._next_valid_order_id, order_id, 101)
+        self._log.debug(
+            f"Next valid order id set: {self._next_valid_order_id}, accounts: {self.accounts()}",
+        )
 
-        if self.accounts() and not self._is_ib_connected.is_set():
+        # Set connection flag once we have next valid order id AND accounts
+        if (
+            self._next_valid_order_id >= 0
+            and self.accounts()
+            and not self._is_ib_connected.is_set()
+        ):
             self._log.debug("`_is_ib_connected` set by `nextValidId`", LogColor.BLUE)
             self._is_ib_connected.set()
+            self._had_ib_connection = True
 
     async def process_open_order(
         self,
@@ -261,25 +284,23 @@ class InteractiveBrokersClientOrderMixin(BaseMixin):
         order.contract = IBContract(**contract.__dict__)
         order.order_state = order_state
         order.orderRef = order.orderRef.rsplit(":", 1)[0]
+        venue_order_id = get_venue_order_id(order.orderId, order.permId)
+        self._set_order_id_ref(
+            venue_order_id=venue_order_id,
+            account_id=order.account,
+            order_id=order.orderRef,
+        )
+
+        if order.permId != 0 and order.orderId != 0:
+            self._set_order_id_ref(
+                venue_order_id=VenueOrderId(str(order.orderId)),
+                account_id=order.account,
+                order_id=order.orderRef,
+            )
 
         # Handle response to on-demand request
         if request := self._requests.get(name="OpenOrders"):
             request.result.append(order)
-
-            # Validate and add reverse mapping, if not exists
-            if order_ref := self._order_id_to_order_ref.get(order.orderId):
-                if not (
-                    order_ref.account_id == order.account and order_ref.order_id == order.orderRef
-                ):
-                    self._log.warning(
-                        f"Discrepancy found in order, expected {order_ref}, "
-                        f"was (account={order.account}, order_id={order.orderRef}",
-                    )
-            else:
-                self._order_id_to_order_ref[order.orderId] = AccountOrderRef(
-                    account_id=order.account,
-                    order_id=order.orderRef,
-                )
             return
 
         # Handle event based response
@@ -320,19 +341,39 @@ class InteractiveBrokersClientOrderMixin(BaseMixin):
         Note: Often there are duplicate orderStatus messages.
 
         """
-        order_ref = self._order_id_to_order_ref.get(order_id, None)
+        venue_order_id = get_venue_order_id(order_id, perm_id)
+        order_ref = self._order_id_to_order_ref.get(venue_order_id, None)
+
+        if order_ref is None and perm_id != 0 and order_id != 0:
+            raw_venue_order_id = VenueOrderId(str(order_id))
+            order_ref = self._order_id_to_order_ref.get(raw_venue_order_id, None)
+            if order_ref is not None:
+                self._set_order_id_ref(
+                    venue_order_id=venue_order_id,
+                    account_id=order_ref.account_id,
+                    order_id=order_ref.order_id,
+                )
+
+        if order_ref is None:
+            order_ref = self._resolve_order_ref_from_cache(venue_order_id)
 
         if order_ref:
             name = f"orderStatus-{order_ref.account_id}"
 
             if handler := self._event_subscriptions.get(name, None):
                 handler(
-                    order_ref=self._order_id_to_order_ref[order_id].order_id,
+                    venue_order_id=venue_order_id,
+                    order_ref=order_ref.order_id,
                     order_status=status,
                     avg_fill_price=avg_fill_price,
                     filled=filled,
                     remaining=remaining,
+                    why_held=why_held,
                 )
+        else:
+            self._log.warning(
+                f"OrderStatus callback for {venue_order_id} has no order reference mapping",
+            )
 
     async def process_exec_details(
         self,
@@ -353,6 +394,14 @@ class InteractiveBrokersClientOrderMixin(BaseMixin):
         cache["order_ref"] = execution.orderRef.rsplit(":", 1)[0]
         cache["req_id"] = req_id
 
+        if cache["order_ref"]:
+            venue_order_id = get_venue_order_id(execution.orderId, execution.permId)
+            self._set_order_id_ref(
+                venue_order_id=venue_order_id,
+                account_id=execution.acctNumber,
+                order_id=cache["order_ref"],
+            )
+
         # Check if this is for a get_executions request
         execution_request_name = f"Executions-{execution.acctNumber}"
 
@@ -368,7 +417,7 @@ class InteractiveBrokersClientOrderMixin(BaseMixin):
                 "commission_report": cache["commission_report"],
             }
             request.result.append(execution_detail)
-                # Don't remove from cache yet, wait for execDetailsEnd
+            # Don't remove from cache yet, wait for execDetailsEnd
 
         # Handle event-based response for live executions
         name = f"execDetails-{execution.acctNumber}"
@@ -389,10 +438,10 @@ class InteractiveBrokersClientOrderMixin(BaseMixin):
     async def process_commission_report(
         self,
         *,
-        commission_report: CommissionReport,
+        commission_report: CommissionAndFeesReport,
     ) -> None:
         """
-        Provide the CommissionReport of an Execution.
+        Provide the CommissionAndFeesReport of an Execution.
         """
         if not (cache := self._exec_id_details.get(commission_report.execId, None)):
             self._exec_id_details[commission_report.execId] = {}
@@ -436,3 +485,56 @@ class InteractiveBrokersClientOrderMixin(BaseMixin):
         # End the request if it exists
         if self._requests.get(req_id=req_id):
             self._end_request(req_id)
+
+    def _set_order_id_ref(
+        self,
+        venue_order_id: VenueOrderId,
+        account_id: str,
+        order_id: str,
+    ) -> None:
+        if order_ref := self._order_id_to_order_ref.get(venue_order_id):
+            if not (order_ref.account_id == account_id and order_ref.order_id == order_id):
+                self._log.warning(
+                    f"Discrepancy found in order, expected {order_ref}, "
+                    f"was (account={account_id}, order_id={order_id})",
+                )
+        else:
+            self._order_id_to_order_ref[venue_order_id] = AccountOrderRef(
+                account_id=account_id,
+                order_id=order_id,
+            )
+
+    def _resolve_order_ref_from_cache(
+        self,
+        venue_order_id: VenueOrderId,
+    ) -> AccountOrderRef | None:
+        client_order_id: ClientOrderId | None = self._cache.client_order_id(venue_order_id)
+        if client_order_id is None:
+            return None
+
+        account_id = self._resolve_order_status_account_id()
+        if account_id is None:
+            self._log.warning(
+                f"Cannot route orderStatus for {venue_order_id}; account ID is ambiguous",
+            )
+            return None
+
+        order_ref = AccountOrderRef(account_id=account_id, order_id=client_order_id.value)
+        self._order_id_to_order_ref[venue_order_id] = order_ref
+        return order_ref
+
+    def _resolve_order_status_account_id(self) -> str | None:
+        accounts = self.accounts()
+        if len(accounts) == 1:
+            return next(iter(accounts))
+
+        subscribed_account_ids = {
+            name.removeprefix("orderStatus-")
+            for name in self._event_subscriptions
+            if name.startswith("orderStatus-")
+        }
+
+        if len(subscribed_account_ids) == 1:
+            return next(iter(subscribed_account_ids))
+
+        return None

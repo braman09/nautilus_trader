@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -16,7 +16,7 @@
 use std::fmt::{Debug, Display};
 
 use arraydeque::{ArrayDeque, Wrapping};
-use nautilus_model::data::Bar;
+use nautilus_model::data::{Bar, QuoteTick, TradeTick};
 
 use crate::{
     average::{MovingAverageFactory, MovingAverageType},
@@ -33,6 +33,10 @@ type SignalBuf = ArrayDeque<f64, { MAX_SIGNAL + 1 }, Wrapping>;
 #[cfg_attr(
     feature = "python",
     pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.indicators", unsendable)
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.indicators")
 )]
 pub struct ArcherMovingAveragesTrends {
     pub fast_period: usize,
@@ -76,6 +80,12 @@ impl Indicator for ArcherMovingAveragesTrends {
         self.initialized
     }
 
+    fn handle_quote(&mut self, _quote: &QuoteTick) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn handle_trade(&mut self, _trade: &TradeTick) {}
+
     fn handle_bar(&mut self, bar: &Bar) {
         self.update_raw(bar.close.into());
     }
@@ -110,15 +120,15 @@ impl ArcherMovingAveragesTrends {
     ) -> Self {
         assert!(
             fast_period > 0,
-            "fast_period must be positive (got {fast_period})"
+            "fast_period must be positive (received {fast_period})"
         );
         assert!(
             slow_period > 0,
-            "slow_period must be positive (got {slow_period})"
+            "slow_period must be positive (received {slow_period})"
         );
         assert!(
             signal_period > 0,
-            "signal_period must be positive (got {signal_period})"
+            "signal_period must be positive (received {signal_period})"
         );
         assert!(
             slow_period > fast_period,
@@ -186,9 +196,6 @@ impl ArcherMovingAveragesTrends {
     }
 }
 
-////////////////////////////////////////////////////////////////////////////////
-// Tests
-////////////////////////////////////////////////////////////////////////////////
 #[cfg(test)]
 mod tests {
     use rstest::rstest;

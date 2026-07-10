@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -12,6 +12,8 @@
 //  See the License for the specific language governing permissions and
 //  limitations under the License.
 // -------------------------------------------------------------------------------------------------
+
+#![warn(clippy::clone_on_ref_ptr)]
 
 use std::{cell::RefCell, rc::Rc};
 
@@ -38,18 +40,95 @@ use crate::{
 #[pyo3::pyclass(
     module = "nautilus_trader.core.nautilus_pyo3.common",
     name = "Clock",
-    unsendable
+    unsendable,
+    from_py_object
 )]
+#[pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.common")]
 #[derive(Debug, Clone)]
 pub struct PyClock(Rc<RefCell<dyn Clock>>);
 
 #[pymethods]
+#[pyo3_stub_gen::derive::gen_stub_pymethods]
 impl PyClock {
+    #[staticmethod]
+    #[pyo3(name = "new_test")]
+    fn py_new_test() -> Self {
+        Self(Rc::new(RefCell::new(TestClock::default())))
+    }
+
+    /// Returns the current UNIX timestamp in nanoseconds (ns).
+    #[pyo3(name = "timestamp_ns")]
+    fn py_timestamp_ns(&self) -> u64 {
+        self.0.borrow().timestamp_ns().as_u64()
+    }
+
+    /// Returns the current UNIX timestamp in microseconds (μs).
+    #[pyo3(name = "timestamp_us")]
+    fn py_timestamp_us(&self) -> u64 {
+        self.0.borrow().timestamp_us()
+    }
+
+    /// Returns the current UNIX timestamp in milliseconds (ms).
+    #[pyo3(name = "timestamp_ms")]
+    fn py_timestamp_ms(&self) -> u64 {
+        self.0.borrow().timestamp_ms()
+    }
+
+    /// Returns the current UNIX timestamp in seconds.
+    #[pyo3(name = "timestamp")]
+    fn py_timestamp(&self) -> f64 {
+        self.0.borrow().timestamp()
+    }
+
+    /// Returns the current date and time as a timezone-aware `DateTime<UTC>`.
+    #[pyo3(name = "utc_now")]
+    fn py_utc_now(&self) -> DateTime<Utc> {
+        self.0.borrow().utc_now()
+    }
+
+    #[pyo3(name = "set_time")]
+    fn py_set_time(&mut self, to_time_ns: u64) -> PyResult<()> {
+        let mut clock = self.0.borrow_mut();
+        let Some(test_clock) = clock.as_any_mut().downcast_mut::<TestClock>() else {
+            return Err(to_pyvalue_err("set_time is only supported by test clocks"));
+        };
+
+        test_clock.set_time(to_time_ns.into());
+        Ok(())
+    }
+
+    /// Returns the names of active timers in the clock.
+    #[pyo3(name = "timer_names")]
+    fn py_timer_names(&self) -> Vec<String> {
+        self.0
+            .borrow()
+            .timer_names()
+            .into_iter()
+            .map(String::from)
+            .collect()
+    }
+
+    /// Returns the count of active timers in the clock.
+    #[pyo3(name = "timer_count")]
+    fn py_timer_count(&self) -> usize {
+        self.0.borrow().timer_count()
+    }
+
     #[pyo3(name = "register_default_handler")]
     fn py_register_default_handler(&mut self, callback: Py<PyAny>) {
         self.0
             .borrow_mut()
             .register_default_handler(TimeEventCallback::from(callback));
+    }
+
+    #[pyo3(name = "cancel_default_handler")]
+    fn py_cancel_default_handler(&mut self) {
+        self.0.borrow_mut().cancel_default_handler();
+    }
+
+    #[pyo3(name = "cancel_callbacks")]
+    fn py_cancel_callbacks(&mut self) {
+        self.0.borrow_mut().cancel_callbacks();
     }
 
     #[pyo3(
@@ -96,7 +175,7 @@ impl PyClock {
             .map_err(to_pyvalue_err)
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     #[pyo3(
         name = "set_timer",
         signature = (name, interval, start_time=None, stop_time=None, callback=None, allow_past=None, fire_immediately=None)
@@ -113,11 +192,10 @@ impl PyClock {
     ) -> PyResult<()> {
         let interval_ns_i64 = interval
             .num_nanoseconds()
-            .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("Interval too large"))?;
+            .ok_or_else(|| to_pyvalue_err("Interval too large"))?;
+
         if interval_ns_i64 <= 0 {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "Interval must be positive",
-            ));
+            return Err(to_pyvalue_err("Interval must be positive"));
         }
         let interval_ns = interval_ns_i64 as u64;
 
@@ -135,7 +213,7 @@ impl PyClock {
             .map_err(to_pyvalue_err)
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     #[pyo3(
         name = "set_timer_ns",
         signature = (name, interval_ns, start_time_ns=None, stop_time_ns=None, callback=None, allow_past=None, fire_immediately=None)
@@ -187,6 +265,12 @@ impl PyClock {
         Self(rc)
     }
 
+    /// Gets the inner `Rc<RefCell<dyn Clock>>` for use in Rust code.
+    #[must_use]
+    pub fn clock_rc(&self) -> Rc<RefCell<dyn Clock>> {
+        Rc::clone(&self.0)
+    }
+
     /// Creates a clock backed by [`TestClock`].
     #[must_use]
     pub fn new_test() -> Self {
@@ -212,9 +296,6 @@ impl PyClock {
     }
 }
 
-////////////////////////////////////////////////////////////////////////////////
-// Tests
-////////////////////////////////////////////////////////////////////////////////
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -228,7 +309,7 @@ mod tests {
         clock::{Clock, TestClock},
         python::clock::PyClock,
         runner::{TimeEventSender, set_time_event_sender},
-        timer::{TimeEventCallback, TimeEventHandlerV2},
+        timer::{TimeEventCallback, TimeEventHandler},
     };
 
     fn ensure_sender() {
@@ -242,7 +323,7 @@ mod tests {
     struct DummySender;
 
     impl TimeEventSender for DummySender {
-        fn send(&self, _handler: TimeEventHandlerV2) {}
+        fn send(&self, _handler: TimeEventHandler) {}
     }
 
     #[fixture]
@@ -250,7 +331,7 @@ mod tests {
         TestClock::new()
     }
 
-    pub fn test_callback() -> TimeEventCallback {
+    pub(super) fn test_callback() -> TimeEventCallback {
         Python::initialize();
         Python::attach(|py| {
             let py_list = PyList::empty(py);
@@ -260,7 +341,7 @@ mod tests {
         })
     }
 
-    pub fn test_py_callback() -> Py<PyAny> {
+    pub(super) fn test_py_callback() -> Py<PyAny> {
         Python::initialize();
         Python::attach(|py| {
             let py_list = PyList::empty(py);
@@ -284,6 +365,18 @@ mod tests {
             py_clock
                 .py_set_time_alert("ALERT1", dt, None, None)
                 .expect("set_time_alert failed");
+        });
+    }
+
+    #[rstest]
+    fn test_test_clock_py_set_time() {
+        Python::initialize();
+        Python::attach(|_py| {
+            let mut py_clock = PyClock::new_test();
+
+            py_clock.py_set_time(1_700_000_000_000_000_000).unwrap();
+
+            assert_eq!(py_clock.py_timestamp_ns(), 1_700_000_000_000_000_000);
         });
     }
 
@@ -479,6 +572,21 @@ mod tests {
             py_clock
                 .py_set_time_alert("ALERT1", dt, None, None)
                 .expect("live set_time_alert failed");
+        });
+    }
+
+    #[rstest]
+    fn test_live_clock_py_set_time_returns_error() {
+        Python::initialize();
+        Python::attach(|_py| {
+            let mut py_clock = PyClock::new_live();
+
+            let result = py_clock.py_set_time(1_700_000_000_000_000_000);
+
+            assert_eq!(
+                result.unwrap_err().to_string(),
+                "ValueError: set_time is only supported by test clocks",
+            );
         });
     }
 

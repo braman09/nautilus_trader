@@ -1,5 +1,5 @@
 # -------------------------------------------------------------------------------------------------
-#  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+#  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 #  https://nautechsystems.io
 #
 #  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -131,10 +131,13 @@ class VolatilityMarketMaker(Strategy):
             self.config.bar_type,
             client_id=self.client_id,
             start=self.clock.utc_now() - pd.Timedelta(days=1),
+            callback=lambda _: self.subscribe_bars(
+                self.config.bar_type,
+                client_id=self.client_id,
+            ),
         )
 
         # Subscribe to live data
-        self.subscribe_bars(self.config.bar_type, client_id=self.client_id)
         self.subscribe_quote_ticks(self.config.instrument_id, client_id=self.client_id)
         self.subscribe_trade_ticks(self.config.instrument_id, client_id=self.client_id)
 

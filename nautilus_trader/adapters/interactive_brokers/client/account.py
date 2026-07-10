@@ -1,5 +1,5 @@
 # -------------------------------------------------------------------------------------------------
-#  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+#  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 #  https://nautechsystems.io
 #
 #  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -146,7 +146,10 @@ class InteractiveBrokersClientAccountMixin(BaseMixin):
 
         Returns
         -------
-        list[Position] | ``None``
+        list[Position] or None
+            Returns ``None`` when the request fails due to a connection error or timeout,
+            indicating the result is unknown.  An empty list means IB explicitly confirmed
+            no open positions.  Callers **must not** treat ``None`` as confirmed-zero.
 
         """
         self._log.debug(f"Requesting open positions for {account_id}")
@@ -160,15 +163,18 @@ class InteractiveBrokersClientAccountMixin(BaseMixin):
             )
 
             if not request:
-                return None
+                return []
 
             request.handle()
-            all_positions = await self._await_request(request, 30)
+            all_positions = await self._await_request(request, self._request_timeout_secs)
         else:
-            all_positions = await self._await_request(request, 30)
+            all_positions = await self._await_request(request, self._request_timeout_secs)
+
+        if all_positions is None:
+            return None  # request failed — caller must not infer "no positions"
 
         if not all_positions:
-            return None
+            return []
 
         positions = []
 
@@ -203,11 +209,16 @@ class InteractiveBrokersClientAccountMixin(BaseMixin):
 
         """
         self._account_ids = {a for a in accounts_list.split(",") if a}
-        self._log.debug(f"Managed accounts set: {self._account_ids}")
+        self._log.debug(
+            f"Managed accounts set: {self._account_ids}, next_valid_order_id: {self._next_valid_order_id}",
+        )
 
+        # Set connection flag if we have next valid order id
+        # Accounts may be empty in some cases, but nextValidId is required
         if self._next_valid_order_id >= 0 and not self._is_ib_connected.is_set():
             self._log.debug("`_is_ib_connected` set by `managedAccounts`", LogColor.BLUE)
             self._is_ib_connected.set()
+            self._had_ib_connection = True
 
     async def process_position(
         self,

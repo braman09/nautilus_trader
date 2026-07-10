@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -17,19 +17,15 @@
 #![allow(dead_code)]
 
 use indexmap::IndexMap;
-use nautilus_core::{UUID4, UnixNanos};
+use nautilus_core::{UUID4, UnixNanos, correctness::FAILED};
 use rust_decimal::Decimal;
 use ustr::Ustr;
 
 use crate::{
-    enums::{
-        ContingencyType, LiquiditySide, OrderSide, OrderType, TimeInForce, TrailingOffsetType,
-        TriggerType,
-    },
-    events::{OrderEventAny, OrderSubmitted},
+    enums::{ContingencyType, OrderSide, OrderType, TimeInForce, TrailingOffsetType, TriggerType},
+    events::{OrderEventAny, order::spec::OrderSubmittedSpec},
     identifiers::{
-        AccountId, ClientOrderId, ExecAlgorithmId, InstrumentId, OrderListId, StrategyId, TradeId,
-        TraderId,
+        AccountId, ClientOrderId, ExecAlgorithmId, InstrumentId, OrderListId, StrategyId, TraderId,
     },
     orders::{
         Order, OrderAny, limit::LimitOrder, limit_if_touched::LimitIfTouchedOrder,
@@ -38,7 +34,8 @@ use crate::{
         stop_market::StopMarketOrder, trailing_stop_limit::TrailingStopLimitOrder,
         trailing_stop_market::TrailingStopMarketOrder,
     },
-    types::{Currency, Price, Quantity},
+    stubs::TestDefault,
+    types::{Price, Quantity},
 };
 
 #[derive(Debug)]
@@ -48,11 +45,10 @@ pub struct OrderTestBuilder {
     strategy_id: Option<StrategyId>,
     instrument_id: Option<InstrumentId>,
     client_order_id: Option<ClientOrderId>,
-    trade_id: Option<TradeId>,
-    currency: Option<Currency>,
     side: Option<OrderSide>,
     quantity: Option<Quantity>,
     price: Option<Price>,
+    activation_price: Option<Price>,
     trigger_price: Option<Price>,
     trigger_type: Option<TriggerType>,
     limit_offset: Option<Decimal>,
@@ -63,9 +59,7 @@ pub struct OrderTestBuilder {
     reduce_only: Option<bool>,
     post_only: Option<bool>,
     quote_quantity: Option<bool>,
-    reconciliation: Option<bool>,
     display_qty: Option<Quantity>,
-    liquidity_side: Option<LiquiditySide>,
     emulation_trigger: Option<TriggerType>,
     trigger_instrument_id: Option<InstrumentId>,
     order_list_id: Option<OrderListId>,
@@ -83,6 +77,7 @@ pub struct OrderTestBuilder {
 
 impl OrderTestBuilder {
     /// Creates a new [`OrderTestBuilder`] instance.
+    #[must_use]
     pub fn new(kind: OrderType) -> Self {
         Self {
             kind,
@@ -90,11 +85,10 @@ impl OrderTestBuilder {
             strategy_id: None,
             instrument_id: None,
             client_order_id: None,
-            trade_id: None,
-            currency: None,
             side: None,
             quantity: None,
             price: None,
+            activation_price: None,
             trigger_price: None,
             trigger_type: None,
             limit_offset: None,
@@ -106,9 +100,7 @@ impl OrderTestBuilder {
             reduce_only: None,
             post_only: None,
             quote_quantity: None,
-            reconciliation: None,
             display_qty: None,
-            liquidity_side: None,
             emulation_trigger: None,
             trigger_instrument_id: None,
             linked_order_ids: None,
@@ -134,14 +126,13 @@ impl OrderTestBuilder {
         self
     }
 
-    /// ----------- TraderId ----------
     pub fn trader_id(&mut self, trader_id: TraderId) -> &mut Self {
         self.trader_id = Some(trader_id);
         self
     }
 
     fn get_trader_id(&self) -> TraderId {
-        self.trader_id.unwrap_or_default()
+        self.trader_id.unwrap_or_else(TraderId::test_default)
     }
 
     // ----------- StrategyId ----------
@@ -151,7 +142,7 @@ impl OrderTestBuilder {
     }
 
     fn get_strategy_id(&self) -> StrategyId {
-        self.strategy_id.unwrap_or_default()
+        self.strategy_id.unwrap_or_else(StrategyId::test_default)
     }
 
     // ----------- InstrumentId ----------
@@ -171,27 +162,8 @@ impl OrderTestBuilder {
     }
 
     fn get_client_order_id(&self) -> ClientOrderId {
-        self.client_order_id.unwrap_or_default()
-    }
-
-    // ----------- TradeId ----------
-    pub fn trade_id(&mut self, trade_id: TradeId) -> &mut Self {
-        self.trade_id = Some(trade_id);
-        self
-    }
-
-    fn get_trade_id(&self) -> TradeId {
-        self.trade_id.unwrap_or_default()
-    }
-
-    // ----------- Currency ----------
-    pub fn currency(&mut self, currency: Currency) -> &mut Self {
-        self.currency = Some(currency);
-        self
-    }
-
-    fn get_currency(&self) -> Currency {
-        self.currency.unwrap_or(Currency::from("USDT"))
+        self.client_order_id
+            .unwrap_or_else(ClientOrderId::test_default)
     }
 
     // ----------- OrderSide ----------
@@ -232,6 +204,16 @@ impl OrderTestBuilder {
 
     fn get_trigger_price(&self) -> Price {
         self.trigger_price.expect("Trigger price not set")
+    }
+
+    // ----------- ActivationPrice ----------
+    pub fn activation_price(&mut self, activation_price: Price) -> &mut Self {
+        self.activation_price = Some(activation_price);
+        self
+    }
+
+    fn get_activation_price(&self) -> Option<Price> {
+        self.activation_price
     }
 
     // ----------- TriggerType ----------
@@ -303,16 +285,6 @@ impl OrderTestBuilder {
 
     fn get_display_qty(&self) -> Option<Quantity> {
         self.display_qty
-    }
-
-    // ----------- LiquiditySide ----------
-    pub fn liquidity_side(&mut self, liquidity_side: LiquiditySide) -> &mut Self {
-        self.liquidity_side = Some(liquidity_side);
-        self
-    }
-
-    fn get_liquidity_side(&self) -> LiquiditySide {
-        self.liquidity_side.unwrap_or(LiquiditySide::Maker)
     }
 
     // ----------- EmulationTrigger ----------
@@ -458,16 +430,6 @@ impl OrderTestBuilder {
         self.quote_quantity.unwrap_or(false)
     }
 
-    // ----------- Reconciliation ----------
-    pub fn reconciliation(&mut self, reconciliation: bool) -> &mut Self {
-        self.reconciliation = Some(reconciliation);
-        self
-    }
-
-    fn get_reconciliation(&self) -> bool {
-        self.reconciliation.unwrap_or(false)
-    }
-
     // ----------- ContingencyType ----------
     pub fn contingency_type(&mut self, contingency_type: ContingencyType) -> &mut Self {
         self.contingency_type = Some(contingency_type);
@@ -475,10 +437,7 @@ impl OrderTestBuilder {
     }
 
     fn get_contingency_type(&self) -> Option<ContingencyType> {
-        Some(
-            self.contingency_type
-                .unwrap_or(ContingencyType::NoContingency),
-        )
+        self.contingency_type
     }
 
     /// Builds the order, consuming the provided parameters.
@@ -487,6 +446,7 @@ impl OrderTestBuilder {
     ///
     /// Panics if required fields (instrument ID, quantity, price, offsets, etc.) are not set,
     /// or if internal calls to `.expect(...)` or `.unwrap()` fail during order construction.
+    #[must_use]
     pub fn build(&self) -> OrderAny {
         let mut order = match self.kind {
             OrderType::Market => OrderAny::Market(MarketOrder::new(
@@ -672,15 +632,18 @@ impl OrderTestBuilder {
                 self.get_init_id(),
                 self.get_ts_init(),
             )),
-            OrderType::TrailingStopMarket => {
-                OrderAny::TrailingStopMarket(TrailingStopMarketOrder::new(
+            OrderType::TrailingStopMarket => OrderAny::TrailingStopMarket(
+                // `new_checked` (not `new`) so the trigger may be left unset for the
+                // activate-at-market path where it materializes on the first trail update.
+                TrailingStopMarketOrder::new_checked(
                     self.get_trader_id(),
                     self.get_strategy_id(),
                     self.get_instrument_id(),
                     self.get_client_order_id(),
                     self.get_side(),
                     self.get_quantity(),
-                    self.get_trigger_price(),
+                    self.get_activation_price(),
+                    self.trigger_price,
                     self.get_trigger_type(),
                     self.get_trailing_offset(),
                     self.get_trailing_offset_type(),
@@ -701,18 +664,20 @@ impl OrderTestBuilder {
                     self.get_tags(),
                     self.get_init_id(),
                     self.get_ts_init(),
-                ))
-            }
-            OrderType::TrailingStopLimit => {
-                OrderAny::TrailingStopLimit(TrailingStopLimitOrder::new(
+                )
+                .unwrap_or_else(|e| panic!("{FAILED}: {e}")),
+            ),
+            OrderType::TrailingStopLimit => OrderAny::TrailingStopLimit(
+                TrailingStopLimitOrder::new_checked(
                     self.get_trader_id(),
                     self.get_strategy_id(),
                     self.get_instrument_id(),
                     self.get_client_order_id(),
                     self.get_side(),
                     self.get_quantity(),
-                    self.get_price(),
-                    self.get_trigger_price(),
+                    self.get_activation_price(),
+                    self.price,
+                    self.trigger_price,
                     self.get_trigger_type(),
                     self.get_limit_offset(),
                     self.get_trailing_offset(),
@@ -735,24 +700,69 @@ impl OrderTestBuilder {
                     self.get_tags(),
                     self.get_init_id(),
                     self.get_ts_init(),
-                ))
-            }
+                )
+                .unwrap_or_else(|e| panic!("{FAILED}: {e}")),
+            ),
         };
 
         if self.submitted {
-            let submit_event = OrderSubmitted::new(
-                order.trader_id(),
-                order.strategy_id(),
-                order.instrument_id(),
-                order.client_order_id(),
-                AccountId::from("ACCOUNT-001"),
-                UUID4::new(),
-                UnixNanos::default(),
-                UnixNanos::default(),
-            );
+            let submit_event = OrderSubmittedSpec::builder()
+                .trader_id(order.trader_id())
+                .strategy_id(order.strategy_id())
+                .instrument_id(order.instrument_id())
+                .client_order_id(order.client_order_id())
+                .account_id(AccountId::from("ACCOUNT-001"))
+                .build();
             order.apply(OrderEventAny::Submitted(submit_event)).unwrap();
         }
 
         order
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rstest::rstest;
+
+    use super::*;
+    use crate::orders::Order;
+
+    #[rstest]
+    fn normalizes_an_absent_contingency_type() {
+        let order = OrderTestBuilder::new(OrderType::Limit)
+            .instrument_id(InstrumentId::test_default())
+            .quantity(Quantity::from(1))
+            .price(Price::from("1"))
+            .build();
+
+        assert_eq!(
+            order.contingency_type(),
+            Some(ContingencyType::NoContingency)
+        );
+        assert!(order.is_contingency());
+    }
+
+    #[rstest]
+    fn preserves_a_configured_contingency_type() {
+        let order = OrderTestBuilder::new(OrderType::Limit)
+            .instrument_id(InstrumentId::test_default())
+            .quantity(Quantity::from(1))
+            .price(Price::from("1"))
+            .contingency_type(ContingencyType::Oto)
+            .build();
+
+        assert_eq!(order.contingency_type(), Some(ContingencyType::Oto));
+        assert!(order.is_contingency());
+    }
+
+    #[rstest]
+    fn submits_to_the_account_issuer() {
+        let order = OrderTestBuilder::new(OrderType::Market)
+            .instrument_id(InstrumentId::test_default())
+            .quantity(Quantity::from(1))
+            .submit(true)
+            .build();
+
+        assert_eq!(order.account_id(), Some(AccountId::from("ACCOUNT-001")));
     }
 }

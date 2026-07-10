@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -31,6 +31,10 @@ const MAX_PERIOD: usize = 1_024;
     feature = "python",
     pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.indicators")
 )]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.indicators")
+)]
 pub struct SimpleMovingAverage {
     pub period: usize,
     pub price_type: PriceType,
@@ -60,8 +64,9 @@ impl Indicator for SimpleMovingAverage {
         self.initialized
     }
 
-    fn handle_quote(&mut self, quote: &QuoteTick) {
-        self.process_raw(quote.extract_price(self.price_type).into());
+    fn handle_quote(&mut self, quote: &QuoteTick) -> anyhow::Result<()> {
+        self.process_raw(quote.extract_price(self.price_type)?.into());
+        Ok(())
     }
 
     fn handle_trade(&mut self, trade: &TradeTick) {
@@ -137,9 +142,6 @@ impl SimpleMovingAverage {
     }
 }
 
-////////////////////////////////////////////////////////////////////////////////
-// Tests
-////////////////////////////////////////////////////////////////////////////////
 #[cfg(test)]
 mod tests {
     use arraydeque::{ArrayDeque, Wrapping};
@@ -147,11 +149,12 @@ mod tests {
         data::{QuoteTick, TradeTick},
         enums::PriceType,
     };
+    use proptest::prelude::*;
     use rstest::rstest;
 
     use super::MAX_PERIOD;
     use crate::{
-        average::sma::SimpleMovingAverage,
+        average::{sma::SimpleMovingAverage, wma::WeightedMovingAverage},
         indicator::{Indicator, MovingAverage},
         stubs::*,
     };
@@ -194,7 +197,7 @@ mod tests {
     #[rstest]
     fn sma_handle_single_quote(indicator_sma_10: SimpleMovingAverage, stub_quote: QuoteTick) {
         let mut sma = indicator_sma_10;
-        sma.handle_quote(&stub_quote);
+        sma.handle_quote(&stub_quote).unwrap();
         assert_eq!(sma.count, 1);
         assert_eq!(sma.value, 1501.0);
     }
@@ -205,8 +208,8 @@ mod tests {
         let q1 = stub_quote("1500.0", "1502.0");
         let q2 = stub_quote("1502.0", "1504.0");
 
-        sma.handle_quote(&q1);
-        sma.handle_quote(&q2);
+        sma.handle_quote(&q1).unwrap();
+        sma.handle_quote(&q2).unwrap();
         assert_eq!(sma.count, 2);
         assert_eq!(sma.value, 1502.0);
     }
@@ -292,6 +295,34 @@ mod tests {
                 expect_avg[i],
                 sma.value()
             );
+        }
+    }
+
+    proptest! {
+        #[rstest]
+        fn prop_sma_matches_windowed_reference(
+            period in 1usize..=32,
+            inputs in prop::collection::vec(0i64..=1_000_000i64, 1..=96),
+        ) {
+            let mut sma = SimpleMovingAverage::new(period, None);
+            let mut equal_weight_wma = WeightedMovingAverage::new(period, vec![1.0; period], None);
+
+            for (index, input) in inputs.iter().enumerate() {
+                let value = *input as f64;
+                let window_start = index.saturating_add(1).saturating_sub(period);
+                let window = &inputs[window_start..=index];
+                let expected = window.iter().sum::<i64>() as f64 / window.len() as f64;
+
+                sma.update_raw(value);
+                equal_weight_wma.update_raw(value);
+
+                prop_assert_eq!(sma.value(), expected);
+                prop_assert_eq!(equal_weight_wma.value(), expected);
+                prop_assert_eq!(sma.count(), window.len());
+                prop_assert_eq!(equal_weight_wma.count(), window.len());
+                prop_assert_eq!(sma.initialized(), index + 1 >= period);
+                prop_assert_eq!(equal_weight_wma.initialized(), index + 1 >= period);
+            }
         }
     }
 
@@ -393,6 +424,7 @@ mod tests {
     #[rstest]
     fn sma_multiple_resets() {
         let mut sma = SimpleMovingAverage::new(4, None);
+
         for cycle in 0..5 {
             for x in 0..4 {
                 sma.update_raw(f64::from(x));

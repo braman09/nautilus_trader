@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -18,94 +18,179 @@
 use super::{position::PoolPosition, profiler::PoolProfiler};
 use crate::defi::pool_analysis::snapshot::PoolSnapshot;
 
+/// Result of comparing a replayed pool profiler against an on-chain snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PoolProfilerComparison {
+    /// All compared fields match.
+    Match,
+    /// Only the sqrt price differs; structural pool state still matches.
+    SqrtPriceMismatch,
+    /// Only the fee protocol differs; structural pool state still matches.
+    FeeProtocolMismatch,
+    /// Only the accrued protocol-fee balances differ; structural pool state still matches.
+    ProtocolFeesMismatch,
+    /// One or more structural fields differ.
+    Mismatch,
+}
+
+impl PoolProfilerComparison {
+    /// Returns `true` when every compared field matches.
+    #[must_use]
+    pub const fn is_exact_match(self) -> bool {
+        matches!(self, Self::Match)
+    }
+
+    /// Returns `true` when the snapshot can seed the profiler cache.
+    #[must_use]
+    pub const fn is_valid_for_snapshot(self) -> bool {
+        matches!(
+            self,
+            Self::Match
+                | Self::SqrtPriceMismatch
+                | Self::FeeProtocolMismatch
+                | Self::ProtocolFeesMismatch
+        )
+    }
+}
+
 /// Compares a pool profiler's internal state with on-chain state to verify consistency.
 ///
 /// This function validates that the profiler's tracked state matches the actual on-chain
 /// pool state by comparing global pool parameters, tick data, and position data.
-/// Any mismatches are logged as errors, while matches are logged as info.
+/// Structural mismatches are logged as errors, sqrt price mismatches are logged as warnings,
+/// and matches are logged as info.
 ///
 /// # Arguments
 ///
-/// * `profiler` - The pool profiler whose state should be compared
-/// * `current_tick` - The current active tick from on-chain state
-/// * `price_sqrt_ratio_x96` - The current sqrt price ratio (Q64.96 format) from on-chain state
-/// * `fee_protocol` - The protocol fee setting from on-chain state
-/// * `liquidity` - The current liquidity from on-chain state
-/// * `ticks` - Map of tick indices to their on-chain tick data
-/// * `positions` - Vector of on-chain position data
+/// - `profiler` - The pool profiler whose state should be compared
+/// - `snapshot` - The on-chain snapshot to compare against
 ///
 /// # Panics
 ///
-/// Panics if the profiler has not been initialized
+/// Panics if the profiler has not been initialized.
 ///
 /// # Returns
 ///
 /// Returns `true` if all compared values match, `false` if any mismatches are detected.
+#[must_use]
 pub fn compare_pool_profiler(profiler: &PoolProfiler, snapshot: &PoolSnapshot) -> bool {
-    if !profiler.is_initialized {
-        panic!("Profiler is not initialized");
-    }
+    compare_pool_profiler_detailed(profiler, snapshot).is_exact_match()
+}
 
-    let mut all_match = true;
+/// Compares a pool profiler's internal state with on-chain state and classifies mismatches.
+///
+/// Sqrt price can differ when replay is event-scoped but the RPC snapshot is block-scoped. Fee
+/// protocol can differ until `SetFeeProtocol` events are indexed and applied during replay, leaving
+/// the profiler value lagging the on-chain one. Accrued protocol-fee balances can differ when
+/// per-step rounding during replay accrual diverges from the on-chain accumulator. These mismatches
+/// are non-blocking when tick, liquidity, ticks, and positions all match.
+///
+/// # Panics
+///
+/// Panics if the profiler has not been initialized.
+#[must_use]
+pub fn compare_pool_profiler_detailed(
+    profiler: &PoolProfiler,
+    snapshot: &PoolSnapshot,
+) -> PoolProfilerComparison {
+    assert!(profiler.is_initialized, "Profiler is not initialized");
+
+    let mut structural_match = true;
+    let mut sqrt_price_matches = true;
+    let mut fee_protocol_matches = true;
+    let mut protocol_fees_match = true;
     let total_ticks = snapshot.ticks.len();
     let total_positions = snapshot.positions.len();
 
-    if snapshot.state.current_tick != profiler.state.current_tick {
-        tracing::error!(
+    if snapshot.state.current_tick == profiler.state.current_tick {
+        log::info!("✓ current_tick matches: {}", snapshot.state.current_tick);
+    } else {
+        log::error!(
             "Tick mismatch: profiler={}, compared={}",
             profiler.state.current_tick,
             snapshot.state.current_tick
         );
-        all_match = false;
-    } else {
-        tracing::info!("✓ current_tick matches: {}", snapshot.state.current_tick);
+        structural_match = false;
     }
 
-    if snapshot.state.price_sqrt_ratio_x96 != profiler.state.price_sqrt_ratio_x96 {
-        tracing::error!(
+    if snapshot.state.price_sqrt_ratio_x96 == profiler.state.price_sqrt_ratio_x96 {
+        log::info!(
+            "✓ sqrt_price_x96 matches: {}",
+            profiler.state.price_sqrt_ratio_x96,
+        );
+    } else {
+        log::warn!(
             "Sqrt ratio mismatch: profiler={}, compared={}",
             profiler.state.price_sqrt_ratio_x96,
             snapshot.state.price_sqrt_ratio_x96
         );
-        all_match = false;
-    } else {
-        tracing::info!(
-            "✓ sqrt_price_x96 matches: {}",
-            profiler.state.price_sqrt_ratio_x96,
-        );
+        sqrt_price_matches = false;
     }
 
-    if snapshot.state.fee_protocol != profiler.state.fee_protocol {
-        tracing::error!(
-            "Fee protocol mismatch: profiler={}, compared={}",
+    if snapshot.state.fee_protocol == profiler.state.fee_protocol
+        && snapshot.state.fee_protocol0_basis_points == profiler.state.fee_protocol0_basis_points
+        && snapshot.state.fee_protocol1_basis_points == profiler.state.fee_protocol1_basis_points
+    {
+        log::info!(
+            "✓ fee_protocol matches: packed={}, token0_bps={:?}, token1_bps={:?}",
+            snapshot.state.fee_protocol,
+            snapshot.state.fee_protocol0_basis_points,
+            snapshot.state.fee_protocol1_basis_points,
+        );
+    } else {
+        log::warn!(
+            "Fee protocol mismatch: profiler=(packed={}, token0_bps={:?}, token1_bps={:?}), compared=(packed={}, token0_bps={:?}, token1_bps={:?})",
             profiler.state.fee_protocol,
-            snapshot.state.fee_protocol
+            profiler.state.fee_protocol0_basis_points,
+            profiler.state.fee_protocol1_basis_points,
+            snapshot.state.fee_protocol,
+            snapshot.state.fee_protocol0_basis_points,
+            snapshot.state.fee_protocol1_basis_points,
         );
-        all_match = false;
-    } else {
-        tracing::info!("✓ fee_protocol matches: {}", snapshot.state.fee_protocol);
+        fee_protocol_matches = false;
     }
 
-    if snapshot.state.liquidity != profiler.tick_map.liquidity {
-        tracing::error!(
+    if snapshot.state.protocol_fees_token0 == profiler.state.protocol_fees_token0
+        && snapshot.state.protocol_fees_token1 == profiler.state.protocol_fees_token1
+    {
+        log::info!(
+            "✓ protocol_fees match: token0={}, token1={}",
+            snapshot.state.protocol_fees_token0,
+            snapshot.state.protocol_fees_token1
+        );
+    } else {
+        log::warn!(
+            "Protocol fees mismatch: profiler=(token0={}, token1={}), compared=(token0={}, token1={})",
+            profiler.state.protocol_fees_token0,
+            profiler.state.protocol_fees_token1,
+            snapshot.state.protocol_fees_token0,
+            snapshot.state.protocol_fees_token1
+        );
+        protocol_fees_match = false;
+    }
+
+    if snapshot.state.liquidity == profiler.tick_map.liquidity {
+        log::info!("✓ liquidity matches: {}", snapshot.state.liquidity);
+    } else {
+        log::error!(
             "Liquidity mismatch: profiler={}, compared={}",
             profiler.tick_map.liquidity,
             snapshot.state.liquidity
         );
-        all_match = false;
-    } else {
-        tracing::info!("✓ liquidity matches: {}", snapshot.state.liquidity);
+        structural_match = false;
     }
 
     // TODO add growth fee checking
 
     // Check ticks
     let mut tick_mismatches = 0;
+
     for tick in &snapshot.ticks {
         if let Some(profiler_tick) = profiler.get_tick(tick.value) {
             let mut all_tick_fields_matching = true;
+
             if profiler_tick.liquidity_net != tick.liquidity_net {
-                tracing::error!(
+                log::error!(
                     "Tick {} mismatch on net liquidity: profiler={}, compared={}",
                     tick.value,
                     profiler_tick.liquidity_net,
@@ -113,8 +198,9 @@ pub fn compare_pool_profiler(profiler: &PoolProfiler, snapshot: &PoolSnapshot) -
                 );
                 all_tick_fields_matching = false;
             }
+
             if profiler_tick.liquidity_gross != tick.liquidity_gross {
-                tracing::error!(
+                log::error!(
                     "Tick {} mismatch on gross liquidity: profiler={}, compared={}",
                     tick.value,
                     profiler_tick.liquidity_gross,
@@ -126,26 +212,24 @@ pub fn compare_pool_profiler(profiler: &PoolProfiler, snapshot: &PoolSnapshot) -
 
             if !all_tick_fields_matching {
                 tick_mismatches += 1;
-                all_match = false;
+                structural_match = false;
             }
         } else {
-            tracing::error!(
+            log::error!(
                 "Tick {} not found in the profiler but provided in the compare mapping",
                 tick.value
             );
-            all_match = false;
+            structural_match = false;
         }
     }
 
     if tick_mismatches == 0 {
-        tracing::info!(
-            "✓ Provided {} ticks with liquidity net and gross are matching",
-            total_ticks
-        );
+        log::info!("✓ Provided {total_ticks} ticks with liquidity net and gross are matching");
     }
 
     // Check positions
     let mut position_mismatches = 0;
+
     for position in &snapshot.positions {
         if let Some(profiler_position) =
             profiler.get_position(&position.owner, position.tick_lower, position.tick_upper)
@@ -155,8 +239,9 @@ pub fn compare_pool_profiler(profiler: &PoolProfiler, snapshot: &PoolSnapshot) -
                 position.tick_lower,
                 position.tick_upper,
             );
+
             if position.liquidity != profiler_position.liquidity {
-                tracing::error!(
+                log::error!(
                     "Position '{}' mismatch on liquidity: profiler={}, compared={}",
                     position_key,
                     profiler_position.liquidity,
@@ -166,22 +251,32 @@ pub fn compare_pool_profiler(profiler: &PoolProfiler, snapshot: &PoolSnapshot) -
             }
             // TODO add fees and tokens owned checking
         } else {
-            tracing::error!(
+            log::error!(
                 "Position {} not found in the profiler but provided in the compare mapping",
                 position.owner
             );
-            all_match = false;
+            structural_match = false;
         }
     }
 
     if position_mismatches == 0 {
-        tracing::info!(
-            "✓ Provided {} active positions with liquidity are matching",
-            total_positions
-        );
+        log::info!("✓ Provided {total_positions} active positions with liquidity are matching");
     } else {
-        all_match = false;
+        structural_match = false;
     }
 
-    all_match
+    if !structural_match {
+        PoolProfilerComparison::Mismatch
+    } else if !sqrt_price_matches {
+        log::warn!("Pool profiler sqrt ratio differs, but all structural state matches");
+        PoolProfilerComparison::SqrtPriceMismatch
+    } else if !fee_protocol_matches {
+        log::warn!("Pool profiler fee protocol differs, but all structural state matches");
+        PoolProfilerComparison::FeeProtocolMismatch
+    } else if !protocol_fees_match {
+        log::warn!("Pool profiler protocol fees differ, but all structural state matches");
+        PoolProfilerComparison::ProtocolFeesMismatch
+    } else {
+        PoolProfilerComparison::Match
+    }
 }

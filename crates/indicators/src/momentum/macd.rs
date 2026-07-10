@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -13,7 +13,7 @@
 //  limitations under the License.
 // -------------------------------------------------------------------------------------------------
 
-use std::fmt::{Display, Formatter};
+use std::fmt::Display;
 
 use nautilus_model::{
     data::{Bar, QuoteTick, TradeTick},
@@ -31,6 +31,10 @@ use crate::{
     feature = "python",
     pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.indicators", unsendable)
 )]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.indicators")
+)]
 pub struct MovingAverageConvergenceDivergence {
     pub fast_period: usize,
     pub slow_period: usize,
@@ -45,7 +49,7 @@ pub struct MovingAverageConvergenceDivergence {
 }
 
 impl Display for MovingAverageConvergenceDivergence {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
             "{}({},{},{},{})",
@@ -71,8 +75,9 @@ impl Indicator for MovingAverageConvergenceDivergence {
         self.initialized
     }
 
-    fn handle_quote(&mut self, quote: &QuoteTick) {
-        self.update_raw(quote.extract_price(self.price_type).into());
+    fn handle_quote(&mut self, quote: &QuoteTick) -> anyhow::Result<()> {
+        self.update_raw(quote.extract_price(self.price_type)?.into());
+        Ok(())
     }
 
     fn handle_trade(&mut self, trade: &TradeTick) {
@@ -139,6 +144,7 @@ impl MovingAverage for MovingAverageConvergenceDivergence {
         // Initialization logic
         if !self.initialized {
             self.has_inputs = true;
+
             if self.fast_ma.initialized() && self.slow_ma.initialized() {
                 self.initialized = true;
             }
@@ -146,9 +152,6 @@ impl MovingAverage for MovingAverageConvergenceDivergence {
     }
 }
 
-////////////////////////////////////////////////////////////////////////////////
-// Tests
-////////////////////////////////////////////////////////////////////////////////
 #[cfg(test)]
 mod tests {
     use nautilus_model::data::{Bar, QuoteTick, TradeTick};
@@ -223,7 +226,7 @@ mod tests {
         mut macd_10: MovingAverageConvergenceDivergence,
         stub_quote: QuoteTick,
     ) {
-        macd_10.handle_quote(&stub_quote);
+        macd_10.handle_quote(&stub_quote).unwrap();
         assert_eq!(macd_10.value, 0.0);
     }
 

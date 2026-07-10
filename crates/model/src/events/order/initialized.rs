@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -15,7 +15,6 @@
 
 use std::fmt::{Debug, Display};
 
-use derive_builder::Builder;
 use indexmap::IndexMap;
 use nautilus_core::{UUID4, UnixNanos};
 use rust_decimal::Decimal;
@@ -32,7 +31,7 @@ use crate::{
         AccountId, ClientOrderId, ExecAlgorithmId, InstrumentId, OrderListId, PositionId,
         StrategyId, TradeId, TraderId, VenueOrderId,
     },
-    orders::OrderAny,
+    orders::{OrderAny, OrderError},
     types::{Currency, Money, Price, Quantity},
 };
 
@@ -43,12 +42,15 @@ use crate::{
 /// 'over the wire' and have a valid order created with exactly the same
 /// properties as if it had been instantiated locally.
 #[repr(C)]
-#[derive(Clone, PartialEq, Eq, Builder, Serialize, Deserialize)]
-#[builder(default)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 #[cfg_attr(
     feature = "python",
-    pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.model")
+    pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.model", from_py_object)
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.model")
 )]
 pub struct OrderInitialized {
     /// The trader ID associated with the event.
@@ -83,6 +85,8 @@ pub struct OrderInitialized {
     pub ts_init: UnixNanos,
     /// The order price (LIMIT).
     pub price: Option<Price>,
+    /// The order activation price for trailing-stop orders.
+    pub activation_price: Option<Price>,
     /// The order trigger price (STOP).
     pub trigger_price: Option<Price>,
     /// The trigger type for the order.
@@ -117,52 +121,19 @@ pub struct OrderInitialized {
     pub exec_spawn_id: Option<ClientOrderId>,
     /// The custom user tags for the order.
     pub tags: Option<Vec<Ustr>>,
-}
-
-impl Default for OrderInitialized {
-    /// Creates a new default [`OrderInitialized`] instance for testing.
-    fn default() -> Self {
-        Self {
-            trader_id: TraderId::default(),
-            strategy_id: StrategyId::default(),
-            instrument_id: InstrumentId::default(),
-            client_order_id: ClientOrderId::default(),
-            order_side: OrderSide::Buy,
-            order_type: OrderType::Market,
-            quantity: Quantity::new(100_000.0, 0),
-            price: Default::default(),
-            trigger_price: Default::default(),
-            trigger_type: Default::default(),
-            time_in_force: TimeInForce::Day,
-            expire_time: Default::default(),
-            post_only: Default::default(),
-            reduce_only: Default::default(),
-            display_qty: Default::default(),
-            quote_quantity: Default::default(),
-            limit_offset: Default::default(),
-            trailing_offset: Default::default(),
-            trailing_offset_type: Default::default(),
-            emulation_trigger: Default::default(),
-            trigger_instrument_id: Default::default(),
-            contingency_type: Default::default(),
-            order_list_id: Default::default(),
-            linked_order_ids: Default::default(),
-            parent_order_id: Default::default(),
-            exec_algorithm_id: Default::default(),
-            exec_algorithm_params: Default::default(),
-            exec_spawn_id: Default::default(),
-            tags: Default::default(),
-            event_id: Default::default(),
-            ts_event: Default::default(),
-            ts_init: Default::default(),
-            reconciliation: Default::default(),
-        }
-    }
+    /// The causation ID associated with the event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub causation_id: Option<UUID4>,
 }
 
 impl OrderInitialized {
     /// Creates a new [`OrderInitialized`] instance.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
+    #[expect(
+        clippy::fn_params_excessive_bools,
+        reason = "domain event constructor requires multiple boolean flags"
+    )]
+    #[must_use]
     pub fn new(
         trader_id: TraderId,
         strategy_id: StrategyId,
@@ -180,6 +151,7 @@ impl OrderInitialized {
         ts_event: UnixNanos,
         ts_init: UnixNanos,
         price: Option<Price>,
+        activation_price: Option<Price>,
         trigger_price: Option<Price>,
         trigger_type: Option<TriggerType>,
         limit_offset: Option<Decimal>,
@@ -215,6 +187,7 @@ impl OrderInitialized {
             ts_event,
             ts_init,
             price,
+            activation_price,
             trigger_price,
             trigger_type,
             limit_offset,
@@ -232,6 +205,7 @@ impl OrderInitialized {
             exec_algorithm_params,
             exec_spawn_id,
             tags,
+            causation_id: None,
         }
     }
 }
@@ -417,7 +391,7 @@ impl OrderEvent for OrderInitialized {
         self.event_id
     }
 
-    fn kind(&self) -> &str {
+    fn type_name(&self) -> &'static str {
         stringify!(OrderInitialized)
     }
 
@@ -495,6 +469,10 @@ impl OrderEvent for OrderInitialized {
 
     fn last_qty(&self) -> Option<Quantity> {
         None
+    }
+
+    fn activation_price(&self) -> Option<Price> {
+        self.activation_price
     }
 
     fn trigger_price(&self) -> Option<Price> {
@@ -582,25 +560,24 @@ impl OrderEvent for OrderInitialized {
     }
 }
 
-impl From<OrderInitialized> for OrderAny {
-    fn from(order: OrderInitialized) -> Self {
-        match order.order_type {
-            OrderType::Limit => Self::Limit(order.into()),
-            OrderType::Market => Self::Market(order.into()),
-            OrderType::StopMarket => Self::StopMarket(order.into()),
-            OrderType::StopLimit => Self::StopLimit(order.into()),
-            OrderType::LimitIfTouched => Self::LimitIfTouched(order.into()),
-            OrderType::TrailingStopLimit => Self::TrailingStopLimit(order.into()),
-            OrderType::TrailingStopMarket => Self::TrailingStopMarket(order.into()),
-            OrderType::MarketToLimit => Self::MarketToLimit(order.into()),
-            OrderType::MarketIfTouched => Self::MarketIfTouched(order.into()),
-        }
+impl TryFrom<OrderInitialized> for OrderAny {
+    type Error = OrderError;
+
+    fn try_from(order: OrderInitialized) -> Result<Self, Self::Error> {
+        Ok(match order.order_type {
+            OrderType::Limit => Self::Limit(order.try_into()?),
+            OrderType::Market => Self::Market(order.try_into()?),
+            OrderType::StopMarket => Self::StopMarket(order.try_into()?),
+            OrderType::StopLimit => Self::StopLimit(order.try_into()?),
+            OrderType::LimitIfTouched => Self::LimitIfTouched(order.try_into()?),
+            OrderType::TrailingStopLimit => Self::TrailingStopLimit(order.try_into()?),
+            OrderType::TrailingStopMarket => Self::TrailingStopMarket(order.try_into()?),
+            OrderType::MarketToLimit => Self::MarketToLimit(order.try_into()?),
+            OrderType::MarketIfTouched => Self::MarketIfTouched(order.try_into()?),
+        })
     }
 }
 
-////////////////////////////////////////////////////////////////////////////////
-// Tests
-////////////////////////////////////////////////////////////////////////////////
 #[cfg(test)]
 mod test {
     use rstest::rstest;
@@ -617,5 +594,28 @@ mod test {
             contingency_type=OTO, order_list_id=1, linked_order_ids=[O-2020872378424], parent_order_id=None, \
             exec_algorithm_id=None, exec_algorithm_params=None, exec_spawn_id=None, tags=None)"
         );
+    }
+
+    #[rstest]
+    fn test_order_initialized_serialization() {
+        let original = OrderInitialized::default();
+        let json = serde_json::to_string(&original).unwrap();
+        let deserialized: OrderInitialized = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, deserialized);
+    }
+
+    #[rstest]
+    fn test_order_initialized_serialization_preserves_activation_price() {
+        use crate::types::Price;
+
+        let original = OrderInitialized {
+            activation_price: Some(Price::from("0.68500")),
+            ..OrderInitialized::default()
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        let deserialized: OrderInitialized = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized.activation_price, Some(Price::from("0.68500")));
+        assert_eq!(original, deserialized);
     }
 }

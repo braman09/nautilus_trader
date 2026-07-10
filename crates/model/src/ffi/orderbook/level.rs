@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -21,7 +21,7 @@ use crate::{
     data::order::BookOrder,
     enums::OrderSide,
     orderbook::{BookLevel, BookPrice},
-    types::Price,
+    types::{Price, quantity::QuantityRaw},
 };
 
 /// C compatible Foreign Function Interface (FFI) for an underlying order book[`BookLevel`].
@@ -59,15 +59,6 @@ impl DerefMut for BookLevel_API {
     }
 }
 
-impl Drop for BookLevel_API {
-    fn drop(&mut self) {
-        // The Box<BookLevel> inside self.0 will be automatically dropped here.
-        // This is critical for preventing memory leaks when BookLevel_API instances
-        // are stored in CVecs, as each BookLevel may contain many BookOrder objects
-        // in its IndexMap which need to be properly deallocated.
-    }
-}
-
 #[unsafe(no_mangle)]
 #[cfg_attr(feature = "high-precision", allow(improper_ctypes_definitions))]
 pub extern "C" fn level_new(order_side: OrderSide, price: Price, orders: CVec) -> BookLevel_API {
@@ -78,7 +69,7 @@ pub extern "C" fn level_new(order_side: OrderSide, price: Price, orders: CVec) -
         side: order_side.as_specified(),
     };
     let mut level = BookLevel::new(price);
-    level.add_bulk(orders);
+    level.add_bulk(&orders);
     BookLevel_API::new(level)
 }
 
@@ -112,6 +103,11 @@ pub extern "C" fn level_orders(level: &BookLevel_API) -> CVec {
 #[unsafe(no_mangle)]
 pub extern "C" fn level_size(level: &BookLevel_API) -> f64 {
     level.size()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn level_size_raw(level: &BookLevel_API) -> QuantityRaw {
+    level.size_raw()
 }
 
 #[unsafe(no_mangle)]

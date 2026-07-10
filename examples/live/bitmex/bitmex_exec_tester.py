@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -------------------------------------------------------------------------------------------------
-#  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+#  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 #  https://nautechsystems.io
 #
 #  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -25,6 +25,7 @@ from nautilus_trader.config import InstrumentProviderConfig
 from nautilus_trader.config import LiveExecEngineConfig
 from nautilus_trader.config import LoggingConfig
 from nautilus_trader.config import TradingNodeConfig
+from nautilus_trader.core.nautilus_pyo3 import BitmexEnvironment
 from nautilus_trader.live.node import TradingNode
 from nautilus_trader.model.enums import TimeInForce
 from nautilus_trader.model.identifiers import InstrumentId
@@ -62,6 +63,7 @@ config_node = TradingNodeConfig(
     exec_engine=LiveExecEngineConfig(
         reconciliation=True,
         reconciliation_instrument_ids=[instrument_id],  # Only reconcile this instrument
+        filter_unclaimed_external_orders=True,
         open_check_interval_secs=5.0,
         open_check_open_only=False,
         # position_check_interval_secs=60.0,
@@ -73,22 +75,14 @@ config_node = TradingNodeConfig(
     ),
     data_clients={
         BITMEX: BitmexDataClientConfig(
-            api_key=None,  # 'BITMEX_API_KEY' env var
-            api_secret=None,  # 'BITMEX_API_SECRET' env var
-            base_url_http=None,  # Override with custom endpoint
-            base_url_ws=None,  # Override with custom endpoint
+            environment=BitmexEnvironment.TESTNET if testnet else BitmexEnvironment.MAINNET,
             instrument_provider=InstrumentProviderConfig(load_all=True),
-            testnet=testnet,  # If client uses the testnet API
         ),
     },
     exec_clients={
         BITMEX: BitmexExecClientConfig(
-            api_key=None,  # 'BITMEX_API_KEY' env var
-            api_secret=None,  # 'BITMEX_API_SECRET' env var
-            base_url_http=None,  # Override with custom endpoint
-            base_url_ws=None,  # Override with custom endpoint
+            environment=BitmexEnvironment.TESTNET if testnet else BitmexEnvironment.MAINNET,
             instrument_provider=InstrumentProviderConfig(load_all=True),
-            testnet=testnet,  # If client uses the testnet API
             submitter_pool_size=1,
             canceller_pool_size=3,
         ),
@@ -122,10 +116,13 @@ config_tester = ExecTesterConfig(
     # stop_trigger_type=TriggerType.MARK_PRICE,
     # enable_brackets=True,
     # test_reject_post_only=True,
-    # cancel_orders_on_stop=False,
-    # close_positions_on_stop=False,
     # use_batch_cancel_on_stop=True,
     # use_individual_cancels_on_stop=True,
+    # cancel_orders_on_stop=False,
+    # close_positions_on_stop=False,
+    manage_stop=True,
+    market_exit_time_in_force=TimeInForce.IOC,
+    market_exit_reduce_only=True,
     log_data=False,
     # dry_run=True,
 )

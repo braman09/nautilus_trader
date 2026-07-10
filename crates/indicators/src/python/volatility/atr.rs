@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -13,13 +13,16 @@
 //  limitations under the License.
 // -------------------------------------------------------------------------------------------------
 
+use nautilus_core::python::to_pyvalue_err;
 use nautilus_model::data::{Bar, QuoteTick, TradeTick};
 use pyo3::prelude::*;
 
 use crate::{average::MovingAverageType, indicator::Indicator, volatility::atr::AverageTrueRange};
 
 #[pymethods]
+#[pyo3_stub_gen::derive::gen_stub_pymethods]
 impl AverageTrueRange {
+    /// An indicator which calculates an Average True Range (ATR) across a rolling window.
     #[new]
     #[pyo3(signature = (period, ma_type=None, use_previous=None, value_floor=None))]
     #[must_use]
@@ -81,18 +84,18 @@ impl AverageTrueRange {
     }
 
     #[pyo3(name = "handle_quote_tick")]
-    const fn py_handle_quote_tick(&mut self, _quote: &QuoteTick) {
-        // Function body intentionally left blank.
+    fn py_handle_quote_tick(&mut self, quote: &QuoteTick) -> PyResult<()> {
+        self.handle_quote(quote).map_err(to_pyvalue_err)
     }
 
     #[pyo3(name = "handle_trade_tick")]
-    const fn py_handle_trade_tick(&mut self, _trade: &TradeTick) {
-        // Function body intentionally left blank.
+    fn py_handle_trade_tick(&mut self, trade: &TradeTick) {
+        self.handle_trade(trade);
     }
 
     #[pyo3(name = "handle_bar")]
     fn py_handle_bar(&mut self, bar: &Bar) {
-        self.update_raw((&bar.high).into(), (&bar.low).into(), (&bar.close).into());
+        self.handle_bar(bar);
     }
 
     #[pyo3(name = "reset")]

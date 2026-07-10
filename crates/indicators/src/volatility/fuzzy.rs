@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -32,8 +32,13 @@ use crate::indicator::Indicator;
         eq,
         eq_int,
         hash,
-        module = "nautilus_trader.core.nautilus_pyo3.indicators"
+        module = "nautilus_trader.core.nautilus_pyo3.indicators",
+        from_py_object,
     )
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.indicators")
 )]
 pub enum CandleBodySize {
     None = 0,
@@ -54,8 +59,13 @@ pub enum CandleBodySize {
         eq,
         eq_int,
         hash,
-        module = "nautilus_trader.core.nautilus_pyo3.indicators"
+        module = "nautilus_trader.core.nautilus_pyo3.indicators",
+        from_py_object,
     )
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.indicators")
 )]
 pub enum CandleDirection {
     Bull = 1,
@@ -74,8 +84,13 @@ pub enum CandleDirection {
         eq,
         eq_int,
         hash,
-        module = "nautilus_trader.core.nautilus_pyo3.indicators"
+        module = "nautilus_trader.core.nautilus_pyo3.indicators",
+        from_py_object,
     )
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.indicators")
 )]
 pub enum CandleSize {
     None = 0,
@@ -98,8 +113,13 @@ pub enum CandleSize {
         eq,
         eq_int,
         hash,
-        module = "nautilus_trader.core.nautilus_pyo3.indicators"
+        module = "nautilus_trader.core.nautilus_pyo3.indicators",
+        from_py_object,
     )
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.indicators")
 )]
 pub enum CandleWickSize {
     None = 0,
@@ -112,7 +132,14 @@ pub enum CandleWickSize {
 #[derive(Debug, Clone, Copy)]
 #[cfg_attr(
     feature = "python",
-    pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.indicators")
+    pyo3::pyclass(
+        module = "nautilus_trader.core.nautilus_pyo3.indicators",
+        from_py_object
+    )
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.indicators")
 )]
 pub struct FuzzyCandle {
     pub direction: CandleDirection,
@@ -158,6 +185,10 @@ const MAX_CAPACITY: usize = 1024;
 #[cfg_attr(
     feature = "python",
     pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.indicators")
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.indicators")
 )]
 pub struct FuzzyCandlesticks {
     pub period: usize,
@@ -293,6 +324,18 @@ impl FuzzyCandlesticks {
         self.last_low = low;
 
         let total = (high - low).abs();
+
+        // Bound the rolling windows to `period`, matching the Cython
+        // `deque(maxlen=period)`. Without this the fixed-capacity deques grow to
+        // their 1024 capacity, so the means (sum / period) and standard
+        // deviations are computed over far more than `period` candles.
+        if self.lengths.len() == self.period {
+            self.lengths.pop_front();
+            self.body_percents.pop_front();
+            self.upper_wick_percents.pop_front();
+            self.lower_wick_percents.pop_front();
+        }
+
         let _ = self.lengths.push_back(total);
 
         if total == 0.0 {
@@ -334,7 +377,7 @@ impl FuzzyCandlesticks {
         let latest_lower = *self.lower_wick_percents.back().unwrap_or(&0.0);
 
         self.value = FuzzyCandle::new(
-            self.fuzzify_direction(open, close),
+            Self::fuzzify_direction(open, close),
             self.fuzzify_size(total, mean_length, sd_length),
             self.fuzzify_body_size(latest_body, mean_body_percent, sd_body),
             self.fuzzify_wick_size(latest_upper, mean_upper_percent, sd_upper),
@@ -371,7 +414,7 @@ impl FuzzyCandlesticks {
         self.initialized = false;
     }
 
-    fn fuzzify_direction(&self, open: f64, close: f64) -> CandleDirection {
+    fn fuzzify_direction(open: f64, close: f64) -> CandleDirection {
         if close > open {
             CandleDirection::Bull
         } else if close < open {
@@ -393,6 +436,7 @@ impl FuzzyCandlesticks {
             mean_length + self.threshold2 * sd_lengths, // Large
             mean_length + self.threshold3 * sd_lengths, // VeryLarge
         ];
+
         if length <= thresholds[0] {
             CandleSize::VerySmall
         } else if length <= thresholds[1] {
@@ -478,9 +522,6 @@ impl FuzzyCandlesticks {
     }
 }
 
-////////////////////////////////////////////////////////////////////////////////
-// Tests
-////////////////////////////////////////////////////////////////////////////////
 #[cfg(test)]
 mod tests {
     use rstest::rstest;
@@ -586,6 +627,42 @@ mod tests {
 
         let expected_vec = vec![-1, 1, 1, 3, 1];
         assert_eq!(fuzzy_candlesticks_10.vector, expected_vec);
+    }
+
+    #[rstest]
+    fn test_windows_bounded_to_period(mut fuzzy_candlesticks_10: FuzzyCandlesticks) {
+        // Regression: the four rolling windows must stay bounded to `period`
+        // (matching the Cython `deque(maxlen=period)`). Previously the
+        // fixed-capacity deques grew to their 1024 capacity, so the means
+        // (sum / period) and standard deviations were computed over far more than
+        // `period` candles.
+        let bars = [
+            (150.25, 153.4, 148.1, 152.75),
+            (152.8, 155.2, 151.3, 151.95),
+            (151.9, 152.85, 147.6, 148.2),
+            (148.3, 150.75, 146.9, 150.4),
+            (150.5, 154.3, 149.8, 153.9),
+            (153.95, 155.8, 152.2, 152.6),
+            (152.7, 153.4, 148.5, 149.1),
+            (149.2, 151.9, 147.3, 151.5),
+            (151.6, 156.4, 151.0, 155.8),
+            (155.9, 157.2, 153.7, 154.3),
+            (154.3, 158.0, 153.0, 157.2),
+            (157.2, 159.5, 155.1, 156.0),
+            (156.0, 156.9, 152.4, 153.1),
+            (153.1, 155.0, 150.2, 154.8),
+            (154.8, 157.7, 154.0, 156.9),
+        ];
+
+        for (open, high, low, close) in bars {
+            fuzzy_candlesticks_10.update_raw(open, high, low, close);
+        }
+
+        assert!(fuzzy_candlesticks_10.initialized());
+        assert_eq!(fuzzy_candlesticks_10.lengths.len(), 10);
+        assert_eq!(fuzzy_candlesticks_10.body_percents.len(), 10);
+        assert_eq!(fuzzy_candlesticks_10.upper_wick_percents.len(), 10);
+        assert_eq!(fuzzy_candlesticks_10.lower_wick_percents.len(), 10);
     }
 
     #[rstest]
